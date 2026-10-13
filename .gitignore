@@ -1,0 +1,7 @@
+node_modules/
+.tmpaudio/
+.tmpconv/
+.tmptest/
+skills-cache/
+*.tgz
+.DS_Store

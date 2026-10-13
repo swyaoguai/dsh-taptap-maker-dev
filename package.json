@@ -1,0 +1,56 @@
+{
+  "name": "dsh-taptap-maker-dev",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TapTap Maker 本地开发插件 (DSH bundle)：强制「非用户主动不消耗 Maker MCP 额度」、内置可周期更新的游戏开发 skills、提供 OpenAI 兼容 /images 的自定义生图接口与 CC0 音效/BGM 库用于生成游戏资源，并附带 Maker MCP 安装/初始化引导命令。",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "taptap-image": "./src/taptap-image.mjs",
+    "taptap-audio": "./src/taptap-audio.mjs",
+    "taptap-music": "./src/taptap-music.mjs",
+    "taptap-skills-update": "./src/taptap-skills-update.mjs"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "src",
+    "skills",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "taptap",
+    "taptap-maker",
+    "game-development",
+    "skills"
+  ],
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/schemastery": { "optional": true }
+  }
+}

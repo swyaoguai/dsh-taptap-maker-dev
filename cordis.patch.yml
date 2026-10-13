@@ -1,0 +1,22 @@
+# dsh-taptap-maker-dev bundle patch.
+#
+# 一行 insert 即把插件挂到 Host 侧。name 必须是裸包名（携带插件半身）。
+# config 可留空，用户也可在此覆盖 image / skills / maker 配置（见 README）。
+- insert:
+    - id: taptap-maker-dev
+      name: 'dsh-taptap-maker-dev'
+      config:
+        maker:
+          blockCreditTools: true
+        image:
+          baseURL: ""
+          apiKey: ""
+          model: ""
+          size: "1024x1024"
+          credentialsFile: ""
+        skills:
+          autoUpdate: true
+          updateIntervalHours: 24
+          sources:
+            - "git:https://github.com/pixijs/pixijs-skills.git"
+            - "git:https://github.com/MRCalderon3D/everything-game-dev-code.git"
