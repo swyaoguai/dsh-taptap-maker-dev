@@ -114,7 +114,13 @@ export async function generateMusic(options) {
   const statusCode = json?.base_resp?.status_code
   const statusMsg = json?.base_resp?.status_msg ?? ''
   if (statusCode !== undefined && statusCode !== 0) {
-    throw new Error(`MiniMax error ${statusCode}: ${statusMsg || text.slice(0, 200)}`)
+    // Translate the two common vendor codes the user will actually hit so the
+    // failure path is self-explanatory instead of a wall of English JSON.
+    let hint = ''
+    if (statusCode === 1004) hint = '（key 无效/未带；请检查 music.json 里的 apiKey 字段）'
+    if (statusCode === 2153) hint = '（该 key 已被厂商认定为"新用户"：M Plan 历史付费用户应该可用，新 key 可能要走 MiniMax Audio）'
+    if (statusCode === 1002) hint = '（触发限流；稍后重试）'
+    throw new Error(`MiniMax error ${statusCode}: ${statusMsg || text.slice(0, 200)}${hint}`)
   }
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${text.slice(0, 200)}`)
 
