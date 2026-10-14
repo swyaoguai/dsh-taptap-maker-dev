@@ -33,7 +33,42 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveDshHome, dataDir } from './paths.js'
 
-export const WEB_URL = 'https://www.minimax.io/audio'
+/**
+ * Two sites, chosen by network reachability — the international site forces
+ * Google sign-in, which many users in China cannot complete.
+ *   CN:   https://www.minimax.cn/audio  (lang zh-CN, title「MiniMax 语音和音乐」)
+ *   INTL: https://www.minimax.io/audio  (lang en, title「MiniMax Audio&Music」)
+ * Both verified reachable; minimaxi.com/audio redirects to minimax.cn/audio.
+ */
+export const SITES = [
+  { id: 'cn', url: 'https://www.minimax.cn/audio', label: '国内版（minimax.cn）' },
+  { id: 'intl', url: 'https://www.minimax.io/audio', label: '国际版（minimax.io）' },
+]
+export const WEB_URL = SITES[0].url // default until detectSite() decides
+
+/**
+ * Probe which site is reachable from here. CN first (no Google login needed),
+ * INTL as fallback. Returns { id, url, label, ok, errors }.
+ */
+export async function detectSite({ timeoutMs = 8000 } = {}) {
+  const errors = []
+  for (const site of SITES) {
+    try {
+      const response = await fetch(site.url, {
+        method: 'GET',
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36' },
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: 'follow',
+      })
+      if (response.ok) return { ...site, ok: true, errors }
+      errors.push(`${site.id}: HTTP ${response.status}`)
+    } catch (error) {
+      errors.push(`${site.id}: ${error?.message ?? error}`)
+    }
+  }
+  // Nothing reachable: fall back to CN but report that the probe failed.
+  return { ...SITES[0], ok: false, errors }
+}
 
 export function profileDir(dshHome) {
   return path.join(dataDir(dshHome), 'browser-profile')
@@ -116,8 +151,9 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
 }
 
 /** `login`: open the page and wait until the user is actually logged in. */
-export async function login(dshHome, { waitMs = 300000 } = {}) {
-  const snippet = `pg.goto(${pyStr(WEB_URL)}, timeout=60000)
+export async function login(dshHome, { waitMs = 300000, site } = {}) {
+  const target = site ?? (await detectSite())
+  const snippet = `pg.goto(${pyStr(target.url)}, timeout=60000)
 result["log"].append("opened " + pg.url)
 import time
 deadline = time.time() + ${Math.floor(waitMs / 1000)}
@@ -165,7 +201,30 @@ return result`
   return { ok: true, logged: r.logged === true, log: r.log, profile: profileDir(dshHome) }
 }
 
-/** `status`: does a saved profile exist with cookies? */
+/** Where the chosen site is remembered, so we don't re-probe every time. */
+export function siteFile(dshHome) {
+  return path.join(dataDir(dshHome), 'bgm-site.json')
+}
+
+/** Remember the detected site; returns the stored record. */
+export function saveSite(dshHome, site) {
+  const file = siteFile(dshHome)
+  const rec = { id: site.id, url: site.url, label: site.label, at: new Date().toISOString() }
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  fs.writeFileSync(file, `${JSON.stringify(rec, null, 2)}\n`, 'utf8')
+  return rec
+}
+
+/** Read the remembered site, or undefined when never chosen. */
+export function loadSite(dshHome) {
+  try {
+    const rec = JSON.parse(fs.readFileSync(siteFile(dshHome), 'utf8'))
+    if (typeof rec?.url === 'string') return rec
+  } catch { /* not chosen yet */ }
+  return undefined
+}
+
+/** `status`: does a saved profile exist with cookies, and which site? */
 export function status(dshHome) {
   const prof = profileDir(dshHome)
   const exists = fs.existsSync(prof)
@@ -175,6 +234,7 @@ export function status(dshHome) {
     exists,
     hasCookies: fs.existsSync(cookieFile),
     downloadDir: downloadDir(dshHome),
+    site: loadSite(dshHome) ?? null,
   }
 }
 
@@ -182,7 +242,8 @@ export function status(dshHome) {
  * `gen`: paste the prompt, generate, then download the newest audio into --out.
  * Selectors are best-effort; unmatched steps are reported honestly.
  */
-export async function generate(dshHome, prompt, { out, waitMs = 300000 } = {}) {
+export async function generate(dshHome, prompt, { out, waitMs = 300000, site } = {}) {
+  const target = site ?? (await detectSite())
   const dl = downloadDir(dshHome)
   fs.mkdirSync(dl, { recursive: true })
   const snippet = `pg.goto(${pyStr(WEB_URL)}, timeout=60000)

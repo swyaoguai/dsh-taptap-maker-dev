@@ -227,12 +227,12 @@ window.__ModuleLoader__.load({
 
       if (info === null) {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'MiniMax Audio 登录'),
+          h('h2', { style: S.cardTitle }, 'BGM 账号登录'),
           h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
       }
       if (info === 'error') {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'MiniMax Audio 登录'),
+          h('h2', { style: S.cardTitle }, 'BGM 账号登录'),
           h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
             '没连上宿主服务。可用命令 /taptap-bgm login。'))
       }
@@ -240,26 +240,20 @@ window.__ModuleLoader__.load({
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
-            h('h2', { style: S.cardTitle }, 'MiniMax Audio 登录'),
+            h('h2', { style: S.cardTitle }, 'BGM 账号登录'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
-              logged
-                ? '已保存登录态，之后生成 BGM 全程自动（无需再登录）。'
-                : '只需登录一次：会打开 Chromium，你手动登录，Cookie 存本机。')),
+              '生成背景音乐需要登录你的 MiniMax 账号，登录后用它来生成。')),
           h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
         ),
+        info.site
+          ? h('p', { style: S.hint }, '将使用：', h('span', { style: S.codeInline }, info.site.label))
+          : null,
         h('div', { style: S.bar },
           h('button', { style: S.btn, disabled: busy !== '', onClick: doLogin },
-            busy === 'login' ? '登录中…' : (logged ? '重新登录 / 刷新' : '登录')),
+            busy === 'login' ? '登录中…' : (logged ? '重新登录' : '登录')),
           err ? h('span', { style: S.warn }, err) : null,
         ),
-        h('p', { style: S.hint }, '登录态文件：', h('span', { style: S.codeInline }, info.profile || '—')),
-        h('p', { style: S.hint }, '下载目录：', h('span', { style: S.codeInline }, info.downloadDir || '—')),
-        h('div', { style: { ...S.warnBox, borderColor: 'var(--dsh-border, rgba(128,128,128,0.4))', background: 'rgba(128,128,128,0.08)' } },
-          h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '为什么不是 iframe 回传 token'),
-          h('p', { style: { ...S.hint, margin: 0 } },
-            '从第三方页面里把会话 token 抠出来再回传，既脆弱也不正当（对方主页还是 X-Frame-Options: DENY）。',
-            '这里改用独立的 Chromium profile 持久化 Cookie：你真人在真浏览器里登录一次，',
-            '之后脚本带着同一份登录态操作，不碰你的密码，也不外传任何凭据。')),
+        h('p', { style: S.hint }, '登录态保存在本机，只需登录一次。'),
       )
     }
 
@@ -281,10 +275,9 @@ window.__ModuleLoader__.load({
       }, [])
 
       return h('div', { style: S.card },
-        h('h2', { style: S.cardTitle }, '完整 BGM（网页生成 + 自动导入）'),
+        h('h2', { style: S.cardTitle }, '完整 BGM'),
         h('p', { style: { ...S.sub, marginTop: 0 } },
-          'MiniMax 音乐 API 对新用户返回 410（实测），完整 BGM 只能走网页版手动生成。',
-          '插件负责前后两段：生成提示词 + 打开网页；下载后自动装进项目。'),
+          '在网页生成后，插件自动导入项目。'),
         h('div', { style: S.row },
           h('label', { style: S.label }, '风格 / 情绪描述'),
           h('input', {
@@ -303,11 +296,6 @@ window.__ModuleLoader__.load({
               copied === 'fail' ? h('span', { style: S.warn }, '复制失败') : null,
             ))
           : null,
-        h('div', { style: { ...S.warnBox, borderColor: 'var(--dsh-border, rgba(128,128,128,0.4))', background: 'rgba(128,128,128,0.08)' } },
-          h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '为什么不能全自动'),
-          h('p', { style: { ...S.hint, margin: 0 } },
-            '该网页是需登录的单页应用，没有公开 API，脚本无法代你生成/下载（实测 /api/music 返回的是 HTML 页面）。',
-            '所以「点生成 + 下载」这一段必须你亲手做；下载完之后，跟我说一句「把刚下载的 BGM 装进项目」即可全自动导入。')),
         h('p', { style: { ...S.hint, marginTop: 8 } },
           '也可用命令：', h('span', { style: S.codeInline }, '/taptap-bgm 史诗管弦战斗音乐')),
       )
