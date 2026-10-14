@@ -223,19 +223,19 @@ window.__ModuleLoader__.load({
           .then(({ ok, j }) => {
             if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
             // Browser opens detached; poll until the saved session shows up.
+            // Give up after ~2 min and always surface whatever state we have,
+            // so the card can never sit on 「登录中…」 forever.
             let tries = 0
+            const finish = (st) => { setBusy(''); if (st) setInfo(st) }
             const timer = setInterval(() => {
               tries += 1
               fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
                 .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
                 .then((st) => {
-                  if (st.hasCookies === true || tries >= 100) {
-                    clearInterval(timer)
-                    setInfo(st)
-                    setBusy('')
-                  }
+                  if (st.hasCookies === true) { clearInterval(timer); finish(st) }
+                  else if (tries >= 40) { clearInterval(timer); finish(st); setErr('未检测到登录态：请在打开的浏览器里完成登录，然后点「重新登录」或刷新。') }
                 })
-                .catch(() => { if (tries >= 100) { clearInterval(timer); setBusy('') } })
+                .catch(() => { if (tries >= 40) { clearInterval(timer); setBusy('') } })
             }, 3000)
           })
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })

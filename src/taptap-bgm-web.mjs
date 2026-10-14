@@ -30,6 +30,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { resolveDshHome, dataDir } from './paths.js'
 
@@ -307,38 +308,40 @@ export function status(dshHome) {
 
 /**
  * Read the cookie DB and look for the site's real auth cookie (`_token`).
- * Chromium's encrypted_value is not decryptable without the OS key, but the
- * NAME is plaintext and that is all we need to answer "are we logged in".
+ *
+ * Chromium encrypts cookie VALUES, but the NAMES are plaintext — and the name
+ * is all we need to answer "are we logged in". Uses Node's built-in
+ * `node:sqlite` (available on Node 22+/24) so no python subprocess is needed;
+ * the previous python-based probe was slow and could silently fail inside the
+ * host, which is what made the settings page hang on 「登录中…」.
+ *
  * Returns the cookie name, or null.
  */
 function findAuthCookie(cookieFile) {
   if (!cookieFile) return null
+  const AUTH_NAMES = ['_token', 'token', 'session', 'access_token', 'Authorization']
   try {
-    const py = findPython()
-    if (py === null) return null
-    const script = `import sqlite3, shutil, tempfile, os, json
-src = ${pyStr(cookieFile)}
-tmp = os.path.join(tempfile.gettempdir(), "ck_probe_%d.db" % os.getpid())
-shutil.copy2(src, tmp)
-con = sqlite3.connect(tmp)
-names = [r[0] for r in con.execute("SELECT name FROM cookies").fetchall()]
-con.close()
-os.remove(tmp)
-print("__CKN__" + json.dumps(names))
-`
-    const tmp = path.join(os.tmpdir(), `ckprobe-${Date.now()}.py`)
-    fs.writeFileSync(tmp, script, 'utf8')
-    const r = spawnSync(py, [tmp], { encoding: 'utf8', timeout: 15000 })
-    fs.rmSync(tmp, { force: true })
-    const out = r.stdout ?? ''
-    const i = out.indexOf('__CKN__')
-    if (i < 0) return null
-    const names = JSON.parse(out.slice(i + '__CKN__'.length).split('\n')[0])
-    // The CN site uses `_token`; keep a small allowlist for robustness.
-    const hit = names.find((n) => ['_token', 'token', 'session', 'access_token', 'Authorization'].includes(n))
-    return hit ?? null
+    // node:sqlite is experimental; require() keeps it out of the ESM import graph.
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
+    const tmp = path.join(os.tmpdir(), `ckprobe-${process.pid}-${Date.now()}.db`)
+    fs.copyFileSync(cookieFile, tmp)
+    let names = []
+    try {
+      const db = new DatabaseSync(tmp)
+      names = db.prepare('SELECT name FROM cookies').all().map((r) => r.name)
+      db.close()
+    } finally {
+      fs.rmSync(tmp, { force: true })
+    }
+    return names.find((n) => AUTH_NAMES.includes(n)) ?? null
   } catch {
-    return null
+    // Fallback: if node:sqlite is unavailable, treat a non-trivial cookie DB as
+    // logged-in only when it is clearly larger than an analytics-only jar.
+    try {
+      return fs.statSync(cookieFile).size > 20480 ? '(unknown)' : null
+    } catch {
+      return null
+    }
   }
 }
 
