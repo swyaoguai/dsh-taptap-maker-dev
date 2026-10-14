@@ -151,9 +151,11 @@ function policyText(config) {
     '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
     '     单文件按需下载，绝不整站抓取。',
     '     **未接入**：Freesound（需用户自己的 API Key，裸请求实测 401）、OpenGameArt（授权混杂，含禁商用的 CC-BY-NC）。',
-    '  ② 完整 BGM——**用户说「要背景音乐/BGM」时走这条**：',
+    '  ② 完整 BGM——**用户说「要背景音乐/BGM」时走这条**（全程在对话里完成，不要指路设置页）：',
     '     - **需要账号**：生成 BGM 要用用户的 MiniMax 账号登录网页来生成。',
-    '       首次登录一次（`/taptap-bgm login` 或设置页「BGM 账号登录」），登录态存本机，之后自动。',
+    '       用户说「要 BGM」而尚未登录时，**你直接用 pwsh 执行** `/taptap-bgm login` 对应的',
+    '       `node "<插件目录>/src/taptap-bgm-web.mjs" login`（会弹出浏览器让用户登录一次），',
+    '       或用 `/taptap-bgm login` 命令；登录态存本机，之后自动。**不要让用户自己去设置页点**。',
     '     - **站点自动判断**：按当前网络可达性自动选国内版（minimax.cn）或国际版（minimax.io），',
     '       国际版多为 Google 登录，国内网络下选国内版。选好的站点会记住。',
     '     - **生成**：`/taptap-bgm <风格情绪描述>` —— 自动出提示词并用已登录浏览器完成生成与下载。',
@@ -881,15 +883,23 @@ export function apply(ctx, config = {}) {
         const desc = raw.replace(/^(bgm|背景音乐|音乐)\s*/i, '').trim()
         if (desc.length === 0) {
           const st = bgmStatus(home)
+          // Suggest scenes from the project so the user can pick one in one line.
+          let picks = []
+          try { picks = suggestBgmForProject(process.cwd()).slice(0, 6) } catch { picks = [] }
           return {
             kind: 'success',
             text: [
-              `生成 BGM 需要你的 MiniMax 账号（用于登录网页生成音乐）。`,
-              '',
+              '生成 BGM 需要你的 MiniMax 账号（登录一次，之后自动）。',
               `当前状态：${st.hasCookies ? '已登录，可直接生成' : '未登录'}`,
               st.site ? `将使用：${st.site.label}` : '',
               '',
-              st.hasCookies ? '' : '登录：/taptap-bgm login（只需一次）',
+              st.hasCookies
+                ? '直接说「来个战斗 BGM」或 /taptap-bgm 战斗'
+                : '先登录：/taptap-bgm login',
+              '',
+              picks.length > 0
+                ? `按你的项目内容，推荐这些场景：${picks.map((p) => p.scene).join('、')}`
+                : '常用场景：战斗、BOSS、胜利、失败、主菜单、探索、紧张、悲伤、商店、升级',
             ].filter(Boolean).join('\n'),
           }
         }

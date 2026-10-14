@@ -203,146 +203,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function BgmLoginCard() {
-      const [info, setInfo] = useState(null) // null | 'error' | {hasCookies,profile,downloadDir}
-      const [busy, setBusy] = useState('')
-      const [err, setErr] = useState('')
-
-      const load = useCallback(() => {
-        fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
-          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-          .then((j) => setInfo(j))
-          .catch(() => setInfo('error'))
-      }, [])
-      useEffect(() => { load() }, [load])
-
-      const doLogin = useCallback(() => {
-        setBusy('login'); setErr('')
-        fetch(`${API_BASE}/bgm-login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
-          .then(({ ok, j }) => {
-            if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
-            // Browser opens detached; poll until the saved session shows up.
-            // Give up after ~2 min and always surface whatever state we have,
-            // so the card can never sit on 「登录中…」 forever.
-            let tries = 0
-            const finish = (st) => { setBusy(''); if (st) setInfo(st) }
-            const timer = setInterval(() => {
-              tries += 1
-              fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
-                .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
-                .then((st) => {
-                  if (st.hasCookies === true) { clearInterval(timer); finish(st) }
-                  else if (tries >= 40) { clearInterval(timer); finish(st); setErr('未检测到登录态：请在打开的浏览器里完成登录，然后点「重新登录」或刷新。') }
-                })
-                .catch(() => { if (tries >= 40) { clearInterval(timer); setBusy('') } })
-            }, 3000)
-          })
-          .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
-      }, [load])
-
-      if (info === null) {
-        return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'BGM 账号登录'),
-          h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
-      }
-      if (info === 'error') {
-        return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'BGM 账号登录'),
-          h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
-            '没连上宿主服务。可用命令 /taptap-bgm login。'))
-      }
-      const logged = info.hasCookies === true
-      return h('div', { style: S.card },
-        h('div', { style: S.rowBetween },
-          h('div', null,
-            h('h2', { style: S.cardTitle }, 'BGM 账号登录'),
-            h('p', { style: { ...S.sub, marginTop: 2 } },
-              '生成背景音乐需要登录你的 MiniMax 账号，登录后用它来生成。')),
-          h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
-        ),
-        info.site
-          ? h('p', { style: S.hint }, '将使用：', h('span', { style: S.codeInline }, info.site.label))
-          : null,
-        h('div', { style: S.bar },
-          h('button', { style: S.btn, disabled: busy !== '', onClick: doLogin },
-            busy === 'login' ? '登录中…' : (logged ? '重新登录' : '登录')),
-          err ? h('span', { style: S.warn }, err) : null,
-        ),
-        h('p', { style: S.hint }, '登录态保存在本机，只需登录一次。'),
-      )
-    }
-
-    function BgmGuide() {
-      const WEB = 'https://www.minimax.cn/audio/music'
-      const [desc, setDesc] = useState('')
-      const [copied, setCopied] = useState('')
-      const [scenes, setScenes] = useState(null)
-
-      // Ask the host for scene suggestions derived from the actual project.
-      useEffect(() => {
-        fetch(`${API_BASE}/bgm-scenes`, { headers: { accept: 'application/json' } })
-          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
-          .then((j) => setScenes(Array.isArray(j.scenes) ? j.scenes : []))
-          .catch(() => setScenes([]))
-      }, [])
-
-      const build = useCallback((d) => {
-        const s = String(d || '').trim()
-        if (s.length === 0) return ''
-        const tail = ['纯音乐，无人声', '结构完整可无缝循环', '时长 60-120 秒', '高音质']
-        return [s, ...tail].join('，')
-      }, [])
-      const prompt = useMemo(() => build(desc), [desc, build])
-      const onCopy = useCallback(() => {
-        const ok = copyText(prompt)
-        setCopied(ok ? 'ok' : 'fail')
-        try { setTimeout(() => setCopied(''), 2000) } catch (_e) { /* no-op */ }
-      }, [prompt])
-      const onOpen = useCallback(() => {
-        try { window.open(WEB, '_blank', 'noopener') } catch (_e) { /* no-op */ }
-      }, [])
-      const useScene = useCallback((p) => { setDesc(p) }, [])
-
-      return h('div', { style: S.card },
-        h('h2', { style: S.cardTitle }, '完整 BGM'),
-        h('p', { style: { ...S.sub, marginTop: 0 } },
-          '在网页生成后，插件自动导入项目。'),
-        scenes !== null && scenes.length > 0
-          ? h('div', null,
-            h('label', { style: S.label }, '按项目内容推荐（点一下填入）'),
-            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, margin: '4px 0 10px' } },
-              scenes.slice(0, 8).map((s) => h('button', {
-                key: s.id,
-                style: S.ghostBtn,
-                title: s.prompt,
-                onClick: () => useScene(s.prompt),
-              }, `${s.scene}${s.hits > 1 ? ` ×${s.hits}` : ''}`))),
-          )
-          : null,
-        h('div', { style: S.row },
-          h('label', { style: S.label }, '风格 / 情绪描述（中文）'),
-          h('input', {
-            style: S.input, value: desc, placeholder: '如：紧张激烈的战斗音乐，鼓点推进',
-            onChange: (e) => setDesc(e.target.value), spellCheck: false,
-          }),
-        ),
-        prompt.length > 0
-          ? h('div', { style: S.outputWrap },
-            h('label', { style: S.label }, '↓ 可直接粘贴到网页的提示词'),
-            h('textarea', { style: { ...S.textarea, minHeight: 70 }, readOnly: true, value: prompt }),
-            h('div', { style: S.btnRow },
-              h('button', { style: S.btn, onClick: onCopy }, '复制提示词'),
-              h('button', { style: S.ghostBtn, onClick: onOpen }, '打开生成网页'),
-              copied === 'ok' ? h('span', { style: S.ok }, '已复制') : null,
-              copied === 'fail' ? h('span', { style: S.warn }, '复制失败') : null,
-            ))
-          : null,
-        h('p', { style: { ...S.hint, marginTop: 8 } },
-          '也可用命令：', h('span', { style: S.codeInline }, '/taptap-bgm 战斗')),
-      )
-    }
-
     function AudioLibrary() {
       const [info, setInfo] = useState(null) // null | 'error' | {ready,count,cacheDir}
       const [query, setQuery] = useState('')
@@ -636,24 +496,29 @@ window.__ModuleLoader__.load({
 
         h(ImageConfig),
 
-        h(BgmLoginCard),
-
-        h(BgmGuide),
-
         h(AudioLibrary),
 
         h(SkillManager),
 
         h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, '配置优先级 & 用法'),
+          h('h2', { style: S.cardTitle }, '怎么用（全部在对话里，不用回设置页）'),
+          h('p', { style: { ...S.sub, marginTop: 0 } },
+            '本页只放一次性配置。日常使用直接跟模型说中文，或打斜杠命令：'),
           h('ul', { style: S.ul },
-            h('li', null, '优先级：credentialsFile 指向的 JSON ＞ 环境变量 TAPTAP_IMAGE_* ＞ image.json ＞ 插件内联 config。'),
-            h('li', null, 'image.json 改完即时生效，无需重启。'),
-            h('li', null, '对话里用 ', h('span', { style: S.codeInline }, '/taptap-image <中文描述>'), ' 生成游戏图片素材。'),
-            h('li', null, '安装/初始化 Maker：直接说中文「帮我初始化 taptap maker」即可，无需记斜杠命令（',
-              h('span', { style: S.codeInline }, '/taptap-setup'), ' 仍是等价快捷方式）。'),
-            h('li', null, '查看/管理 skills：', h('span', { style: S.codeInline }, '/taptap-skills'), '。'),
+            h('li', null, '生图：说「生成一个蓝色盾牌图标」，或 ',
+              h('span', { style: S.codeInline }, '/taptap-image 蓝色盾牌图标')),
+            h('li', null, '音效：说「加个金币音效」，或 ',
+              h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
+            h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
+            h('li', null, '音频转格式：说「把这些音效转成 wav」，或 ',
+              h('span', { style: S.codeInline }, '/taptap-audio-convert')),
+            h('li', null, '初始化 Maker：说「帮我初始化 taptap maker」。'),
+            h('li', null, 'Skills：说「把用不上的 skill 关掉」，或 ',
+              h('span', { style: S.codeInline }, '/taptap-skills')),
+            h('li', null, '额度红线开关：说「关掉额度红线」即可（会先跟你确认）。'),
           ),
+          h('p', { style: { ...S.hint, marginTop: 8 } },
+            'image.json / music 配置改完即时生效；插件代码与设置页改动需重启 DSH。'),
         ),
       )
     }
