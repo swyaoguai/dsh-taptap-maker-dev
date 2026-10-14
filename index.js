@@ -35,6 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { SOURCES } from './src/audio-sources.mjs'
+import { status as bgmStatus, generate as bgmGenerate, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, bgmPromptFor } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
@@ -150,19 +151,17 @@ function policyText(config) {
     '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
     '     单文件按需下载，绝不整站抓取。',
     '     **未接入**：Freesound（需用户自己的 API Key，裸请求实测 401）、OpenGameArt（授权混杂，含禁商用的 CC-BY-NC）。',
-    '  ② 完整 BGM（网页生成 + 自动导入）——**用户说「要背景音乐/BGM」时走这条**：',
-    '     - **先自动生成提示词**：用 `/taptap-bgm <风格情绪描述>`（如「史诗管弦战斗音乐，紧张激烈」），',
-    '       插件会输出一段可直接粘贴的提示词，并**打开网页 https://www.minimax.io/audio**；',
-    '     - **为什么不是全自动**：该网页是需登录的 Next.js 单页应用，没有公开 API，',
-    '       无法用脚本生成/下载（实测：`/api/music` 返回的是 HTML 页面不是接口）。',
-    '       MiniMax 音乐 API 对新用户账号直接返回 **HTTP 410**（实测：真 key 调三个模型全 410，假 key 才 200/1004），',
-    '       所以「网页手动点生成 + 下载」是目前唯一可行的一段，必须用户亲手做。',
-    '     - **下载后自动装进项目**（这段全自动）：用 pwsh 执行',
-    '       `node "<插件目录>/src/taptap-audio.mjs" import --in "C:\\Users\\<你>\\Downloads" '
+    '  ② 完整 BGM（登录一次后全程自动）——**用户说「要背景音乐/BGM」时走这条**：',
+    '     - **登录（只需一次）**：`/taptap-bgm login` 或设置页「MiniMax Audio 登录」点「登录」，',
+    '       会打开一个独立 Chromium（独立 profile，Cookie 存本机），用户真人在里面登录一次即永久生效。',
+    '     - **之后自动生成**：`/taptap-bgm <风格情绪描述>`（如「史诗管弦战斗音乐，紧张激烈」）——',
+    '       插件自动生成提示词 → 用已登录的浏览器打开网页 → 粘贴提示词 → 点生成 → 等下载 → 存到下载目录。',
+    '     - **下载后装进项目**：用 pwsh 执行',
+    '       `node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录> '
       + '--project <Maker项目目录> --kind bgm --to wav --latest`；',
-    '       会自动转格式 → 复制到 `assets/audio/bgm/` → 生成同名 `.meta`（22 位 uuid）；',
-    '       `--latest` 只取目录里最新下载的那个文件；不传 `--to` 则保持原格式。',
+    '       会自动转格式 → 复制到 `assets/audio/bgm/` → 生成同名 `.meta`（22 位 uuid）。',
     '     - 装完要**告诉用户装到了哪个文件**，不要停在这里。',
+    '     - **若网页结构变了**导致自动生成拿不到文件，如实报告步骤明细，并提示手动下载后 import。',
     '     - 自部署开源 MiniMax-Music3 需要 24GB+ 显存，普通机器跑不动，别推荐。',
     '**诚实限制（必须如实告知）**：',
     '  - Kenney 音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM；',
@@ -429,6 +428,24 @@ export function apply(ctx, config = {}) {
             hasApiKey: Boolean(merged.apiKey),
             file: imageConfigPath(home),
           })
+        }
+        if (req.method === 'GET' && sub === 'bgm') {
+          return sendJson(res, 200, { ok: true, ...bgmStatus(home) })
+        }
+        if (req.method === 'POST' && sub === 'bgm-login') {
+          // Kick off interactive login in a detached window; the request returns
+          // immediately so the UI doesn't block for minutes.
+          const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
+          try {
+            const child = spawnSync(process.execPath, [cli, 'login', '--waitMs', '300000'],
+              { encoding: 'utf8', timeout: 330000, maxBuffer: 4 * 1024 * 1024 })
+            const out = child.stdout ?? ''
+            let parsed = {}
+            try { parsed = JSON.parse(out.slice(out.indexOf('{'))) } catch { /* ignore */ }
+            return sendJson(res, 200, { ok: child.status === 0, logged: parsed.logged === true, ...bgmStatus(home) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
         }
         if (req.method === 'GET' && sub === 'audio-sources') {
           return sendJson(res, 200, {
@@ -799,55 +816,95 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-bgm',
-      description: '生成 BGM 提示词并在网页打开生成页（新用户 API 410，只能走网页）',
-      input: { hint: '"<风格情绪描述>" 例如：/taptap-bgm 史诗管弦战斗音乐，紧张' },
+      description: '网页 BGM：login 首次登录 / status 查看登录态 / "<描述>" 自动生成并导入',
+      input: { hint: 'login | status | "<风格描述>"' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
-        const desc = raw.replace(/^(bgm|背景音乐|音乐)\s*/i, '').trim()
-        const WEB = 'https://www.minimax.io/audio'
+        const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
+        const low = raw.toLowerCase()
 
-        if (desc.length === 0) {
+        if (low === 'login' || raw === '登录') {
           return {
             kind: 'success',
             text: [
-              'BGM 生成（网页版路径）：',
+              '首次登录（只需做一次）：',
               '',
-              'MiniMax 音乐 API 对新用户账号直接返回 HTTP 410（网关层拒绝，实测），',
-              '所以完整 BGM 只能走网页版手动生成，再由插件自动装进项目。',
+              `  node "${cli}" login`,
               '',
-              `网页：${WEB}`,
+              '会打开 Chromium 到 MiniMax Audio，你手动登录一次，',
+              'Cookie 存到本机 browser-profile，之后就都是自动的。',
+            ].join('\n'),
+          }
+        }
+        if (low === 'status' || raw === '状态') {
+          const st = bgmStatus(home)
+          return {
+            kind: 'success',
+            text: [
+              `浏览器登录态：${st.hasCookies ? '已保存' : '未登录'}`,
+              `  profile: ${st.profile}`,
+              `  下载目录: ${st.downloadDir}`,
               '',
-              '用法：/taptap-bgm <风格情绪描述>',
-              '  例：/taptap-bgm 史诗管弦战斗音乐，紧张激烈',
+              st.hasCookies ? '可自动生成 BGM。' : '先跑一次 login。',
+            ].join('\n'),
+          }
+        }
+
+        const desc = raw.replace(/^(bgm|背景音乐|音乐)\s*/i, '').trim()
+        if (desc.length === 0) {
+          const st = bgmStatus(home)
+          return {
+            kind: 'success',
+            text: [
+              'BGM（网页自动生成，登录一次后全程自动）：',
+              `  登录态：${st.hasCookies ? '已登录 ✅' : '未登录 ❌（先跑 /taptap-bgm login）'}`,
               '',
-              '我会：① 生成一段可直接粘贴的提示词 ② 打开网页 ③ 你下载后我自动装进项目',
+              '  /taptap-bgm login          首次登录',
+              '  /taptap-bgm status         查看登录态',
+              '  /taptap-bgm 史诗管弦战斗   自动生成并导入项目',
+            ].join('\n'),
+          }
+        }
+
+        const st = bgmStatus(home)
+        if (!st.hasCookies) {
+          return {
+            kind: 'error',
+            text: [
+              '还没有登录 MiniMax Audio，无法自动生成。',
+              `先跑：node "${cli}" login`,
+              '',
+              `（当前 profile：${st.profile}）`,
             ].join('\n'),
           }
         }
 
         const prompt = bgmPromptFor(desc)
-        // Open the web page in the default browser so the user only has to paste.
-        let opened = false
-        try {
-          const r = spawnSync('cmd', ['/c', 'start', '', WEB], { stdio: 'ignore' })
-          opened = r.status === 0
-        } catch { opened = false }
-
+        const r = await bgmGenerate(home, prompt)
+        if (!r.ok || r.error) {
+          return { kind: 'error', text: `网页生成失败：${r.error ?? JSON.stringify(r.steps ?? {})}` }
+        }
+        const saved = r.steps?.saved
+        if (!saved) {
+          return {
+            kind: 'error',
+            text: [
+              '网页步骤走完了，但没拿到下载文件（页面结构可能变了）。',
+              `  步骤明细：${JSON.stringify(r.steps ?? {})}`,
+              '',
+              '可以手动下载后执行导入：',
+              `  /taptap-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
+            ].join('\n'),
+          }
+        }
         return {
           kind: 'success',
           text: [
-            `BGM 提示词已生成（复制到 ${WEB} 的提示词框）：`,
+            `已生成 BGM：${saved}`,
+            `提示词：${prompt}`,
             '',
-            `  ${prompt}`,
-            '',
-            opened ? `网页已打开：${WEB}` : `请打开：${WEB}`,
-            '',
-            '接下来：',
-            '  1) 在网页粘贴上面提示词 → 生成 → 下载（通常是 .mp3，落到「下载」目录）',
-            '  2) 跟我说「把刚下载的 BGM 装进项目」，或执行：',
-            `     /taptap-audio import --in "C:\\Users\\<你>\\Downloads" --project <项目目录> --kind bgm --to wav --latest`,
-            '',
-            '说明：插件会自动转格式、复制到 assets/audio/bgm/、生成同名 .meta（22 位 uuid）。',
+            '装进项目：',
+            `  /taptap-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
           ].join('\n'),
         }
       },

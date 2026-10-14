@@ -203,6 +203,66 @@ window.__ModuleLoader__.load({
       )
     }
 
+    function BgmLoginCard() {
+      const [info, setInfo] = useState(null) // null | 'error' | {hasCookies,profile,downloadDir}
+      const [busy, setBusy] = useState('')
+      const [err, setErr] = useState('')
+
+      const load = useCallback(() => {
+        fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => setInfo(j))
+          .catch(() => setInfo('error'))
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const doLogin = useCallback(() => {
+        setBusy('login'); setErr('')
+        fetch(`${API_BASE}/bgm-login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => { if (ok && j.ok) load(); else setErr(j.error || '登录启动失败') })
+          .catch(() => setErr('请求失败：宿主服务未就绪'))
+          .finally(() => setBusy(''))
+      }, [load])
+
+      if (info === null) {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, 'MiniMax Audio 登录'),
+          h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
+      }
+      if (info === 'error') {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, 'MiniMax Audio 登录'),
+          h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
+            '没连上宿主服务。可用命令 /taptap-bgm login。'))
+      }
+      const logged = info.hasCookies === true
+      return h('div', { style: S.card },
+        h('div', { style: S.rowBetween },
+          h('div', null,
+            h('h2', { style: S.cardTitle }, 'MiniMax Audio 登录'),
+            h('p', { style: { ...S.sub, marginTop: 2 } },
+              logged
+                ? '已保存登录态，之后生成 BGM 全程自动（无需再登录）。'
+                : '只需登录一次：会打开 Chromium，你手动登录，Cookie 存本机。')),
+          h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
+        ),
+        h('div', { style: S.bar },
+          h('button', { style: S.btn, disabled: busy !== '', onClick: doLogin },
+            busy === 'login' ? '登录中…' : (logged ? '重新登录 / 刷新' : '登录')),
+          err ? h('span', { style: S.warn }, err) : null,
+        ),
+        h('p', { style: S.hint }, '登录态文件：', h('span', { style: S.codeInline }, info.profile || '—')),
+        h('p', { style: S.hint }, '下载目录：', h('span', { style: S.codeInline }, info.downloadDir || '—')),
+        h('div', { style: { ...S.warnBox, borderColor: 'var(--dsh-border, rgba(128,128,128,0.4))', background: 'rgba(128,128,128,0.08)' } },
+          h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '为什么不是 iframe 回传 token'),
+          h('p', { style: { ...S.hint, margin: 0 } },
+            '从第三方页面里把会话 token 抠出来再回传，既脆弱也不正当（对方主页还是 X-Frame-Options: DENY）。',
+            '这里改用独立的 Chromium profile 持久化 Cookie：你真人在真浏览器里登录一次，',
+            '之后脚本带着同一份登录态操作，不碰你的密码，也不外传任何凭据。')),
+      )
+    }
+
     function BgmGuide() {
       const WEB = 'https://www.minimax.io/audio'
       const [desc, setDesc] = useState('')
@@ -561,6 +621,8 @@ window.__ModuleLoader__.load({
               '/taptap-image 蓝色盾牌图标，扁平，居中留白 --transparent --downscale 128x128')),
           ),
         ),
+
+        h(BgmLoginCard),
 
         h(BgmGuide),
 
