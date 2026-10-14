@@ -157,16 +157,29 @@ function policyText(config) {
     '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
     '     单文件按需下载，绝不整站抓取。',
     '     **未接入**：Freesound（需用户自己的 API Key，裸请求实测 401）、OpenGameArt（授权混杂，含禁商用的 CC-BY-NC）。',
-    '  ② MiniMax 音乐生成（用户已配 Key 时，用于 CC0 库没有的**完整 BGM**）：',
+    '  ② MiniMax 音乐生成（**仅历史付费/M Plan 用户可用**）：',
     '     - `node <插件>/src/taptap-music.mjs --prompt "<风格情绪描述>" --out <文件.mp3> [--instrumental]`；',
     '     - 端点固定为 `https://api.minimax.cn/v1/music_generation`，用户只需填 apiKey 与 model；',
     '     - 用的是用户自己的 MiniMax 订阅，**不消耗 Maker 内置额度**。',
+    '     - **重要**：厂商对新用户账号直接返回 **HTTP 410**（网关层拒绝，不是接口下线）。',
+    '       实测：真 key 调 `music-3.0` / `music-2.6` / `music-cover` 全为 410；只有假 key 才返回 200/1004。',
+    '       因此**新用户走不通这条路**，不要反复重试，也不要据此判断接口故障。',
+    '  ③ 网页下载 BGM 后导入（**新用户唯一可自动化的完整 BGM 路径**）：',
+    '     - 用户在 MiniMax Audio（https://www.minimax.io/audio）或任何 CC0 音乐站下载到本机后，',
+    '       用 pwsh 执行：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录或文件> '
+      + '--project <Maker项目目录> --kind bgm [--to wav] [--latest] [--mono] [--rate 44100]`；',
+    '     - 会自动：可选 ffmpeg 转格式 → 复制到 `assets/audio/bgm/` → 生成同名 `.meta`（22 位 uuid）；',
+    '     - `--latest` 只取目录里最新下载的那个文件（刚下完时最常用）；不传 `--to` 则保持原格式。',
+    '     - 导入完要**告诉用户装到了哪个文件**。',
+    '     - 自部署开源 MiniMax-Music3 需要 24GB+ 显存，普通机器跑不动，别推荐。',
     '**诚实限制（必须如实告知）**：',
     '  - Kenney 音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM；',
-    '  - MiniMax 付费音乐模型（music-3.0 / music-2.6 / music-cover）**M Plan 与付费用户可正常使用**（RPM 120）；',
-    '    厂商公告仅说明「自 2026-08-20 起不再面向新用户开放」以及三个 *-free 限免模型停服——**不影响已有 M Plan 用户**；',
-    '  - 所以：短音效走 ①；完整 BGM 走 ②（M Plan 用户直接用）。若 MiniMax 仍返回错误，',
-    '    **把错误原文如实告诉用户**，不要臆测成「停服」，也不要擅自改用消耗额度的内置生成工具。',
+    '  - MiniMax 付费音乐模型（music-3.0 / music-2.6 / music-cover）**仅历史付费 / M Plan 用户可用**（RPM 120）；',
+    '    **新用户账号会被网关直接返回 HTTP 410**（实测：真 key 调三个模型全 410，假 key 才 200/1004）。',
+    '    新用户要完整 BGM：**去 MiniMax Audio 网页下载，再用 `taptap-audio import` 导入**（路径 ③）；',
+    '  - 自部署开源 MiniMax-Music3 需 24GB+ 显存，普通机器跑不动，不要推荐；',
+    '  - 所以：短音效走 ①；完整 BGM——M Plan 老用户走 ②，新用户走 ③。若 MiniMax 返回错误，',
+    '    **把错误原文如实告诉用户**，不要臆测成「接口故障」，也不要擅自改用消耗额度的内置生成工具。',
     '',
     `**插件目录**：\`${PKG_DIR}\`——上面所有 \`<插件目录>\` 都指这个真实路径，`,
     '调 CLI 时直接把它拼进命令（PowerShell 里路径加引号），不要让用户自己去猜路径。',
@@ -577,8 +590,8 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-audio',
-      description: 'CC0 音效 / BGM：搜索并安装到项目（不消耗 Maker 额度）',
-      input: { hint: 'search/add "<描述>"；add 需 --project 项目目录 [--out 名字.wav]；或 sync 更新库' },
+      description: 'CC0 音效 / BGM：搜索、安装、导入本地音频到项目（不消耗 Maker 额度）',
+      input: { hint: 'search/add "<描述>"；import --in <文件/目录> --project <dir>；sync 更新库' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const cli = path.join(PKG_DIR, 'src', 'taptap-audio.mjs')
@@ -589,12 +602,70 @@ export function apply(ctx, config = {}) {
               'CC0 音效 / BGM（Kenney，可商用、免署名，不消耗任何 Maker 额度）：',
               '',
               `  node "${cli}" search "金币音效"`,
-              `  node "${cli}" add "金币音效" --project D:\\tapyx --out coin.wav`,
+              `  node "${cli}" add "金币音效" --project <项目目录> --out coin.wav`,
+              `  node "${cli}" import --in <下载目录> --project <项目目录> --kind bgm --to wav --latest`,
               `  node "${cli}" sync     # 下载/更新音频库`,
               '',
               `音频库缓存：${audioCacheDir}`,
-              '首次使用会自动下载（约 7MB，九个包、六百多个音频），之后走本地缓存。',
+              '首次使用会自动下载（约 7MB，九个包、七百多个音频），之后走本地缓存。',
               '注意：音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM。',
+              '完整 BGM：MiniMax API 对新用户返回 410，可从 MiniMax Audio 网页下载后用 import 导入。',
+            ].join('\n'),
+          }
+        }
+
+        // `import --in <file|dir> --project dir [--kind bgm|sfx] [--to wav] [--latest]`
+        const im = /^(import|导入)\s+(.+)$/.exec(raw)
+        if (im !== null) {
+          const rest = im[2]
+          const pm = /--project\s+("[^"]+"|\S+)/.exec(rest)
+          const inm = /--in\s+("[^"]+"|\S+)/.exec(rest)
+          if (pm === null || inm === null) {
+            return { kind: 'error', text: '用法：/taptap-audio import --in <文件或目录> --project <Maker项目目录> [--kind bgm|sfx] [--to wav] [--latest]' }
+          }
+          const project = path.resolve(pm[1].replace(/^["']|["']$/g, ''))
+          const inPath = path.resolve(inm[1].replace(/^["']|["']$/g, ''))
+          if (!fs.existsSync(path.join(project, 'assets'))) {
+            return { kind: 'error', text: `${project} 看起来不是 Maker 项目（没有 assets/ 目录）` }
+          }
+          if (!fs.existsSync(inPath)) {
+            return { kind: 'error', text: `找不到：${inPath}` }
+          }
+          const argv = [
+            cli, 'import', '--in', inPath, '--project', project,
+          ]
+          const kindM = /--kind\s+(bgm|sfx)/.exec(rest)
+          if (kindM !== null) argv.push('--kind', kindM[1])
+          const toM = /--to\s+(\w+)/.exec(rest)
+          if (toM !== null) argv.push('--to', toM[1])
+          const outM = /--out\s+(\S+)/.exec(rest)
+          if (outM !== null) argv.push('--out', outM[1])
+          if (/--latest/.test(rest)) argv.push('--latest')
+          if (/--mono/.test(rest)) argv.push('--mono')
+          const rateM = /--rate\s+(\d+)/.exec(rest)
+          if (rateM !== null) argv.push('--rate', rateM[1])
+          const out = spawnSync(process.execPath, argv, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+          if (out.status !== 0 && !out.stdout) {
+            return { kind: 'error', text: `导入失败：${(out.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}` }
+          }
+          let parsed
+          try { parsed = JSON.parse(out.stdout) } catch {
+            return { kind: 'error', text: `导入失败（输出无法解析）：${(out.stdout || '').slice(0, 300)}` }
+          }
+          if (parsed.ok === false || parsed.imported === 0) {
+            const errs = (parsed.files ?? []).filter((f) => f.error).map((f) => `  ${f.file}: ${f.error}`)
+            return { kind: 'error', text: ['导入未完成：', ...errs].join('\n') }
+          }
+          return {
+            kind: 'success',
+            text: [
+              `已导入 ${parsed.imported} 个音频 → assets/audio/${parsed.kind}/`,
+              '',
+              ...(parsed.files ?? []).map((f) => f.error
+                ? `  ✗ ${f.file}: ${f.error}`
+                : `  ✓ ${path.basename(f.file)}  ${f.kb}KB${f.converted ? `（已转 ${f.converted}）` : ''}  uuid=${f.uuid}`),
+              '',
+              '已生成同名 .meta（22 位 uuid），Maker 可直接识别。',
             ].join('\n'),
           }
         }

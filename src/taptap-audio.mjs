@@ -21,6 +21,8 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveDshHome, defaultCacheDir } from './paths.js'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './audio-library.mjs'
@@ -58,7 +60,67 @@ function installFile(srcAbs, project, kind, outName) {
   if (!fs.existsSync(meta)) {
     fs.writeFileSync(meta, `${JSON.stringify({ uuid: newAssetUuid() }, null, 2)}\n`)
   }
-  return { target, meta, uuid: JSON.parse(fs.readFileSync(meta, 'utf8')).uuid }
+  return { target, meta, uuid: JSON.parse(fs.readFileSync(meta, 'utf8')).uuid, bytes: fs.statSync(target).size }
+}
+
+const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.opus', '.webm'])
+
+/**
+ * Import audio files the user ALREADY has (e.g. BGM downloaded from the
+ * MiniMax Audio web page, or any CC0 track) into a Maker project.
+ *
+ * Pipeline: pick source(s) → optional ffmpeg conversion → copy into
+ * assets/audio/{sfx|bgm}/ → write the sibling .meta (uuid).
+ *
+ * This exists because the MiniMax music API rejects new users (HTTP 410), so
+ * the web page is the practical path for full BGM today.
+ */
+function importLocalFiles(sources, project, kind, opts = {}) {
+  const results = []
+  for (const src of sources) {
+    const stat = fs.statSync(src)
+    if (!stat.isFile()) { results.push({ src, error: 'not a file' }); continue }
+    if (!AUDIO_EXT.has(path.extname(src).toLowerCase())) {
+      results.push({ src, error: `unsupported extension ${path.extname(src)}` }); continue
+    }
+    let toInstall = src
+    // Optional conversion step (e.g. mp3 → wav for Maker conventions).
+    if (opts.convertTo) {
+      const tmpOut = path.join(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'imp-')),
+        `${path.basename(src, path.extname(src))}.${opts.convertTo}`,
+      )
+      const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', src,
+        ...(opts.convertTo === 'wav' ? ['-c:a', 'pcm_s16le'] : []),
+        ...(opts.convertTo === 'mp3' ? ['-c:a', 'libmp3lame', '-b:a', String(opts.bitrate ?? '192k')] : []),
+        ...(opts.convertTo === 'ogg' ? ['-c:a', 'libvorbis', '-q:a', '4'] : []),
+        ...(opts.mono ? ['-ac', '1'] : []),
+        ...(opts.rate ? ['-ar', String(opts.rate)] : []),
+        tmpOut], { encoding: 'utf8' })
+      if (r.status !== 0 || !fs.existsSync(tmpOut)) {
+        results.push({ src, error: `ffmpeg convert failed: ${(r.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}` })
+        continue
+      }
+      toInstall = tmpOut
+    }
+    const name = opts.name && sources.length === 1
+      ? opts.name
+      : `${path.basename(toInstall, path.extname(toInstall))}${path.extname(toInstall)}`
+    try {
+      const inst = installFile(toInstall, project, kind, name)
+      results.push({
+        src: path.basename(src),
+        file: inst.target,
+        meta: inst.meta,
+        uuid: inst.uuid,
+        kb: Math.round(inst.bytes / 1024),
+        converted: opts.convertTo ?? null,
+      })
+    } catch (e) {
+      results.push({ src, error: e.message })
+    }
+  }
+  return results
 }
 
 async function main() {
@@ -76,6 +138,71 @@ async function main() {
       indexed: result.index.length,
       errors: result.errors,
     }, null, 2)}\n`)
+    return
+  }
+
+  // `import` — bring files the user already has (e.g. BGM from the MiniMax
+  // Audio web page) into the project, optionally converting them first.
+  if (cmd === 'import' || cmd === '导入' || cmd === 'install-local') {
+    const project = typeof args.project === 'string' ? path.resolve(args.project) : null
+    if (project === null) {
+      process.stderr.write('--project <Maker项目目录> is required for import\n')
+      process.exitCode = 2
+      return
+    }
+    if (!fs.existsSync(path.join(project, 'assets'))) {
+      process.stderr.write(`${project} does not look like a Maker project (no assets/ dir)\n`)
+      process.exitCode = 2
+      return
+    }
+    const inArg = args.in ?? args.from ?? args._[1]
+    if (typeof inArg !== 'string') {
+      process.stderr.write('usage: taptap-audio import --in <文件或目录> --project <dir> [--to wav] [--kind bgm|sfx] [--out name] [--mono] [--rate 44100]\n')
+      process.exitCode = 2
+      return
+    }
+    const inPath = path.resolve(inArg)
+    if (!fs.existsSync(inPath)) {
+      process.stderr.write(`not found: ${inPath}\n`)
+      process.exitCode = 2
+      return
+    }
+    const kind = args.kind === 'sfx' ? 'sfx' : 'bgm'
+    const files = fs.statSync(inPath).isDirectory()
+      ? fs.readdirSync(inPath)
+        .filter((f) => AUDIO_EXT.has(path.extname(f).toLowerCase()))
+        .map((f) => path.join(inPath, f))
+      : [inPath]
+    if (files.length === 0) {
+      process.stderr.write(`no audio files found in ${inPath}\n`)
+      process.exitCode = 1
+      return
+    }
+    // newest-first: the file just downloaded from the web page is usually last.
+    if (fs.statSync(inPath).isDirectory()) {
+      files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
+      if (args.latest === true || args.latest === 'true') files.splice(1)
+    }
+    if (args.latest === true || args.latest === 'true') files.splice(1)
+
+    const results = importLocalFiles(files, project, kind, {
+      convertTo: typeof args.to === 'string' ? args.to : null,
+      mono: args.mono === true || args.mono === 'true',
+      rate: Number(args.rate ?? 0) || null,
+      bitrate: typeof args.bitrate === 'string' ? args.bitrate : '192k',
+      name: typeof args.out === 'string' ? args.out : null,
+    })
+    const ok = results.filter((r) => !r.error)
+    process.stdout.write(`${JSON.stringify({
+      ok: ok.length === results.length,
+      kind,
+      imported: ok.length,
+      failed: results.length - ok.length,
+      files: results.map((r) => (r.error
+        ? { file: r.src, error: r.error }
+        : { file: r.file, uuid: r.uuid, kb: r.kb, converted: r.converted })),
+    }, null, 2)}\n`)
+    if (ok.length === 0) process.exitCode = 1
     return
   }
 
