@@ -520,50 +520,42 @@ for sel in ["text=纯音乐", "label:has-text('纯音乐')"]:
     except Exception:
         pass
 # Force 数量 = 1. The site defaults to 2, so every generation produced two
-# tracks and burned double the credits. Click the "-" stepper next to 数量.
+# tracks and burned double the credits.
+# Verified DOM (2026-10):
+#   <div class="bg-bg_gray_15 flex items-center gap-1 rounded-[20px] px-3 py-2">
+#     <span>数量:&nbsp;</span><button>…minus svg…</button><span>2</span><button>…plus…</button>
+#   </div>
+# So: take the 数量 label's DIRECT parent, and its first <button> is the minus.
+QTY_READ = """() => {
+    const all = Array.from(document.querySelectorAll('span,div,label'));
+    const lab = all.filter(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').trim().length < 12)
+                   .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+    if (!lab || !lab.parentElement) return null;
+    const box = lab.parentElement;
+    const m = (box.innerText || '').match(/(\\d+)/);
+    return m ? parseInt(m[1], 10) : null;
+}"""
 try:
-    qty = pg.evaluate("""() => {
-        // Find the 数量 label, then walk up to its container and read the number.
-        const all = Array.from(document.querySelectorAll('div,span,label'));
-        const lab = all.find(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').length < 24);
-        if (!lab) return { found: false };
-        let box = lab;
-        for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
-        const txt = (box.innerText || '');
-        const m = txt.match(/(\\d+)/);
-        return { found: true, current: m ? parseInt(m[1], 10) : null, html: box.outerHTML.slice(0, 400) };
-    }""")
-    steps["qty_probe"] = { "found": (qty or {}).get("found"), "current": (qty or {}).get("current") }
-    # Click the minus control until the displayed number is 1 (max 4 clicks).
-    for _ in range(4):
-        cur = pg.evaluate("""() => {
-            const all = Array.from(document.querySelectorAll('div,span,label'));
-            const lab = all.find(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').length < 24);
-            if (!lab) return null;
-            let box = lab;
-            for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
-            const m = (box.innerText || '').match(/(\\d+)/);
-            return m ? parseInt(m[1], 10) : null;
-        }""")
+    cur0 = pg.evaluate(QTY_READ)
+    steps["qty_initial"] = cur0
+    for _ in range(5):
+        cur = pg.evaluate(QTY_READ)
         if cur is None or cur <= 1:
             steps["qty_final"] = cur
             break
-        # The stepper's minus button is the small button just left of the number.
-        clicked_minus = pg.evaluate("""() => {
-            const all = Array.from(document.querySelectorAll('div,span,label'));
-            const lab = all.find(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').length < 24);
-            if (!lab) return false;
-            let box = lab;
-            for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
-            const btns = Array.from(box.querySelectorAll('button,[role=button],svg'));
-            // Heuristic: the first small clickable is "minus", second is "plus".
-            const cand = btns.filter(x => x.tagName === 'BUTTON' || x.getAttribute('role') === 'button');
-            if (cand.length >= 1) { cand[0].click(); return true; }
-            return false;
+        clicked = pg.evaluate("""() => {
+            const all = Array.from(document.querySelectorAll('span,div,label'));
+            const lab = all.filter(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').trim().length < 12)
+                           .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
+            if (!lab || !lab.parentElement) return false;
+            const btn = lab.parentElement.querySelector('button');  // first button = minus
+            if (!btn) return false;
+            btn.click();
+            return true;
         }""")
-        if not clicked_minus:
+        if not clicked:
             break
-        pg.wait_for_timeout(700)
+        pg.wait_for_timeout(600)
 except Exception as e:
     steps["qty_error"] = str(e)
 # Snapshot existing track ids so we can identify the NEW one after generating.
