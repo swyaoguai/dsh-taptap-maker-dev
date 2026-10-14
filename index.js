@@ -29,7 +29,8 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
@@ -139,14 +140,18 @@ function policyText(config) {
     '**Skill 管理**：用户想隐藏/删除某些用不上的 skill 时，用 `/taptap-skills disable <名字>`（可空格或逗号分隔多个），',
     '`/taptap-skills enable <名字>` 恢复，`/taptap-skills list` 查看全部及禁用状态；禁用项不会再进入 skill 候选。',
     '',
-    '**音效 / 背景音乐必须优先走 CC0 本地库（自动触发）**：只要用户表达“加个音效 / 来个背景音乐 / 配个 BGM /',
-    '加个点击音 / 金币声 / 胜利音效”等需求，**不要调用 `text_to_sound_effect` / `text_to_music` / `batch_sound_effects`**',
-    '（这些消耗 Maker 内置额度），而是按顺序走下面两条自建通道：',
+    '**音效 / 背景音乐必须优先走 CC0 本地库（自动触发 · 不要只给命令让用户自己跑）**：',
+    '只要用户用大白话表达“加个音效 / 来个背景音乐 / 配个 BGM / 加个点击音 / 金币声 / 胜利音效”等需求，',
+    '**你必须自己动手完成，不要停在「你可以运行这条命令」**——用户要的是装好的素材，不是命令说明。',
+    '任何时候都**不要调用 `text_to_sound_effect` / `text_to_music` / `batch_sound_effects`**（消耗 Maker 内置额度）。',
+    '执行顺序（用 pwsh 真正跑命令，不要只打印）：',
     '  ① 音效资源库（首选，零成本）：',
-    '     - 搜索：`node <插件>/src/taptap-audio.mjs search "<中文描述>"`；',
-    '     - 安装：`node <插件>/src/taptap-audio.mjs add "<中文描述>" --project <Maker项目目录> [--out 名字.wav]`',
+    '     - 搜索：用 pwsh 执行 `node "<插件目录>/src/taptap-audio.mjs" search "<中文描述>"`；',
+    '     - 安装：用 pwsh 执行 `node "<插件目录>/src/taptap-audio.mjs" add "<中文描述>" --project <Maker项目目录> [--out 名字.wav]`',
     '       —— 自动写入 `assets/audio/{sfx|bgm}/` 并生成同名 `.meta`（uuid）；',
-    '     - 查看来源：`node <插件>/src/taptap-audio.mjs sources`。',
+    '     - 安装完要**告诉用户装到了哪个文件**，并继续该做的事（如接入代码），不要把命令甩给用户。',
+    '     - `<插件目录>` 在本机的实际路径见下方「插件目录」一行；`<Maker项目目录>` 用当前工作目录。',
+    '     - 查看来源：`node "<插件目录>/src/taptap-audio.mjs" sources`。',
     '     本地库 Kenney（CC0，可商用/可修改/无需署名，约 706 个）优先命中；本地没有时自动回落到',
     '     Mixkit（Mixkit Free License，可商用免署名）、小森平（中文页明写商业利用可）、',
     '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
@@ -162,6 +167,9 @@ function policyText(config) {
     '    厂商公告仅说明「自 2026-08-20 起不再面向新用户开放」以及三个 *-free 限免模型停服——**不影响已有 M Plan 用户**；',
     '  - 所以：短音效走 ①；完整 BGM 走 ②（M Plan 用户直接用）。若 MiniMax 仍返回错误，',
     '    **把错误原文如实告诉用户**，不要臆测成「停服」，也不要擅自改用消耗额度的内置生成工具。',
+    '',
+    `**插件目录**：\`${PKG_DIR}\`——上面所有 \`<插件目录>\` 都指这个真实路径，`,
+    '调 CLI 时直接把它拼进命令（PowerShell 里路径加引号），不要让用户自己去猜路径。',
   ].join('\n')
 }
 
@@ -681,33 +689,73 @@ export function apply(ctx, config = {}) {
       name: 'taptap-audio-convert',
       description: '用 ffmpeg 批量转换/压缩/响度归一游戏音频（本地离线，不耗额度）',
       input: { hint: '--in <文件或目录> --out <目标> [--to wav|mp3|ogg] [--mono] [--rate 44100] [--normalize] [--trim] [--loop N]' },
-      handler: (invocation) => {
+      handler: async (invocation) => {
         const cli = path.join(PKG_DIR, 'src', 'taptap-audio-convert.mjs')
         const raw = (invocation?.rawInput ?? '').trim()
-        const fm = /--in\s+(\S+)/.exec(raw)
+        const fm = /--in\s+("[^"]+"|\S+)/.exec(raw)
         const to = /--to\s+(\w+)/.exec(raw)
-        return {
-          kind: 'success',
-          text: [
-            '音频转换（ffmpeg，本地离线，不消耗任何额度）：',
-            '',
-            '  · CC0 下载来的 ogg/mp3 转成 Maker 项目习惯的 wav：',
-            `    node "${cli}" --in D:\\tmp\\sfx --out D:\\tapyx\\assets\\audio\\sfx --to wav --mono --rate 44100`,
-            '  · 压缩体积（适合小游戏）：',
-            `    node "${cli}" --in big.wav --out small.mp3 --to mp3 --bitrate 64k --mono`,
-            '  · 统一响度 + 去首尾静音 + 淡出：',
-            `    node "${cli}" --in sfx --out out --to wav --normalize --trim --fade-out 0.05`,
-            '  · 短音拼成一段可循环 BGM：',
-            `    node "${cli}" --in one_shot.ogg --out bgm_loop.mp3 --loop 8`,
-            '  · 查看时长：',
-            `    node "${cli}" --probe some.ogg`,
-            '',
-            fm !== null
-              ? `你现在可以直接跑：\n  node "${cli}" ${raw}`
-              : '支持格式：wav / mp3 / ogg / opus / m4a / flac。需要 ffmpeg（winget install Gyan.FFmpeg）。',
-            to !== null ? `目标格式：${to[1]}` : '',
-          ].filter(Boolean).join('\n'),
+        const usage = [
+          '音频转换（ffmpeg，本地离线，不消耗任何额度）：',
+          '',
+          '  · CC0 下载来的 ogg/mp3 转成 Maker 项目习惯的 wav：',
+          `    /taptap-audio-convert --in D:\\tmp\\sfx --out <项目>\\assets\\audio\\sfx --to wav --mono --rate 44100`,
+          '  · 压缩体积（适合小游戏）：',
+          `    /taptap-audio-convert --in big.wav --out small.mp3 --to mp3 --bitrate 64k --mono`,
+          '  · 统一响度 + 去首尾静音 + 淡出：',
+          `    /taptap-audio-convert --in sfx --out out --to wav --normalize --trim --fade-out 0.05`,
+          '  · 短音拼成一段可循环 BGM：',
+          `    /taptap-audio-convert --in one_shot.ogg --out bgm_loop.mp3 --loop 8`,
+          '  · 查看时长：',
+          `    /taptap-audio-convert --probe some.ogg`,
+          '',
+          '支持格式：wav / mp3 / ogg / opus / m4a / flac。需要 ffmpeg（winget install Gyan.FFmpeg）。',
+        ].join('\n')
+
+        // --in given → actually run it, not just echo the command back.
+        if (fm !== null) {
+          const inPath = path.resolve(fm[1].replace(/^["']|["']$/g, ''))
+          if (!fs.existsSync(inPath)) {
+            return { kind: 'error', text: `找不到输入：${inPath}\n\n${usage}` }
+          }
+          const om = /--out\s+("[^"]+"|\S+)/.exec(raw)
+          if (om === null) {
+            return { kind: 'error', text: `缺少 --out <目标文件/目录>\n\n${usage}` }
+          }
+          const outPath = path.resolve(om[1].replace(/^["']|["']$/g, ''))
+          try {
+            const out = spawnSync(process.execPath, [
+              cli, '--in', inPath, '--out', outPath,
+              ...(to !== null ? ['--to', to[1]] : []),
+              ...(/\s--mono/.test(raw) ? ['--mono'] : []),
+              ...((/--rate\s+(\d+)/.exec(raw) ?? [])[1] ? ['--rate', (/--rate\s+(\d+)/.exec(raw) ?? [])[1]] : []),
+              ...(/\s--normalize/.test(raw) ? ['--normalize'] : []),
+              ...(/\s--trim/.test(raw) ? ['--trim'] : []),
+              ...((/--bitrate\s+(\S+)/.exec(raw) ?? [])[1] ? ['--bitrate', (/--bitrate\s+(\S+)/.exec(raw) ?? [])[1]] : []),
+              ...((/--loop\s+(\d+)/.exec(raw) ?? [])[1] ? ['--loop', (/--loop\s+(\d+)/.exec(raw) ?? [])[1]] : []),
+            ], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+            if (out.status !== 0 && !out.stdout) {
+              return { kind: 'error', text: `转换失败：${(out.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}\n\n${usage}` }
+            }
+            const parsed = JSON.parse(out.stdout)
+            if (parsed.ok === false) {
+              return { kind: 'error', text: `转换有失败项：\n${(parsed.files ?? []).filter((f) => f.error).map((f) => `  ${f.file}: ${f.error}`).join('\n')}` }
+            }
+            return {
+              kind: 'success',
+              text: [
+                `已转换 ${parsed.converted} 个文件 → ${parsed.to}`,
+                `体积：${Math.round(parsed.bytesBefore / 1024)}KB → ${Math.round(parsed.bytesAfter / 1024)}KB`,
+                '',
+                ...(parsed.files ?? []).slice(0, 10).map((f) => `  ${f.file}  (${f.from}→${f.to}, ${f.kbBefore}KB→${f.kbAfter}KB)`),
+                (parsed.files ?? []).length > 10 ? `  …还有 ${(parsed.files ?? []).length - 10} 个` : '',
+                to !== null ? '' : '',
+              ].filter(Boolean).join('\n'),
+            }
+          } catch (error) {
+            return { kind: 'error', text: `转换失败：${error?.message ?? error}\n\n${usage}` }
+          }
         }
+        return { kind: 'success', text: usage }
       },
     })
 
@@ -715,7 +763,7 @@ export function apply(ctx, config = {}) {
       name: 'taptap-music',
       description: 'MiniMax 音乐生成（用自己的 Key，不消耗 Maker 额度）',
       input: { hint: '留空=查看用法；或 "风格情绪描述" --out <文件.mp3> [--instrumental]' },
-      handler: (invocation) => {
+      handler: async (invocation) => {
         const musicCfg = config.music ?? {}
         const raw = (invocation?.rawInput ?? '').trim()
         const cli = path.join(PKG_DIR, 'src', 'taptap-music.mjs')
@@ -724,22 +772,62 @@ export function apply(ctx, config = {}) {
         const model = stored.model || musicCfg.model || 'music-3.0'
         const om = /--out\s+(\S+)/.exec(raw)
         const desc = raw.replace(/--out\s+\S+/, '').replace(/--instrumental/, '').trim()
+
+        const usage = [
+          `MiniMax 音乐生成（端点固定 ${MINIMAX_MUSIC_URL}）`,
+          `配置：${musicConfigPath(home)}`,
+          `状态：${keySet ? `已配置（model=${model}）` : '未配置 API Key'}`,
+          '',
+          '可用模型：' + MUSIC_MODELS.filter((m) => m.available !== false).map((m) => m.id).join('、')
+            + '（*-free 三个限免版厂商公告已停服）',
+          '说明：用的是你自己的 MiniMax 订阅，不消耗 Maker 内置额度。M Plan / 付费用户可正常使用。',
+        ].join('\n')
+
+        // Really generate when a prompt AND --out are given: don't just print a
+        // command for the user to copy-paste.
+        if (desc.length > 0 && om !== null && keySet) {
+          try {
+            const out = path.resolve(om[1].replace(/^["']|["']$/g, ''))
+            const { generateMusic } = await import(pathToFileURL(cli).href)
+            const result = await generateMusic({
+              prompt: desc,
+              out,
+              model,
+              instrumental: raw.includes('--instrumental'),
+              dshHome: home,
+            })
+            return {
+              kind: 'success',
+              text: [
+                `已生成 BGM：${result.out}`,
+                `模型：${result.model}　大小：${Math.round(result.bytes / 1024)}KB`
+                + (result.durationMs ? `　时长：${(result.durationMs / 1000).toFixed(1)}s` : ''),
+                '授权/来源：你自己的 MiniMax 订阅，不消耗 Maker 内置额度。',
+                '',
+                '提示：还要装进项目的话，把它复制到 <Maker项目>/assets/audio/bgm/ 并补同名 .meta（uuid）。',
+              ].join('\n'),
+            }
+          } catch (error) {
+            return { kind: 'error', text: `MiniMax 生成失败：${error?.message ?? error}\n\n${usage}` }
+          }
+        }
+        if (desc.length > 0 && om !== null && !keySet) {
+          return {
+            kind: 'error',
+            text: `还没有配置 MiniMax API Key，无法生成。\n请在设置 → TapTap Maker → MiniMax 音乐 里填 Key，或直接写 ${musicConfigPath(home)}\n\n${usage}`,
+          }
+        }
         return {
           kind: 'success',
           text: [
-            `MiniMax 音乐生成（端点固定 ${MINIMAX_MUSIC_URL}）`,
-            `配置：${musicConfigPath(home)}`,
-            `状态：${keySet ? `已配置（model=${model}）` : '未配置 API Key'}`,
+            usage,
             '',
-            desc.length > 0 && om !== null
-              ? `建议执行：\n  node "${cli}" --prompt "${desc}" --out ${om[1]}${raw.includes('--instrumental') ? ' --instrumental' : ''}`
-              : `调用示例：\n  node "${cli}" --prompt "史诗管弦战斗音乐，紧张" --out D:\\tmp\\bgm.mp3 --instrumental\n  node "${cli}" --models   # 可用模型 id`,
+            '直接生成（给描述 + --out 即可，我会真跑）：',
+            `  /taptap-music 史诗管弦战斗音乐，紧张 --out D:\\tmp\\bgm.mp3 --instrumental`,
             '',
-            '可用模型：' + MUSIC_MODELS.map((m) => m.id).join('、'),
-            '说明：用的是你自己的 MiniMax 订阅，不消耗 Maker 内置额度。',
-            'M Plan / 付费用户可正常使用 music-3.0 / music-2.6 / music-cover（RPM 120）。',
-            '厂商公告仅涉及「新用户不再开放」与三个 *-free 限免模型停服，不影响已有 M Plan 用户。',
-            '若调用仍失败，请把错误原文贴给用户，不要臆测原因、也不要擅自改用内置 text_to_music。',
+            '命令行等价：',
+            `  node "${cli}" --prompt "史诗管弦战斗音乐，紧张" --out D:\\tmp\\bgm.mp3 --instrumental`,
+            `  node "${cli}" --models   # 可用模型 id`,
           ].join('\n'),
         }
       },
