@@ -111,19 +111,171 @@ export function writeJson(file, value) {
 }
 
 /**
- * BGM prompt presets: when the user asks for background music, we generate a
- * ready-to-paste prompt for the MiniMax Audio web page (the API rejects new
- * users with HTTP 410, so the web page is the practical path).
+ * Chinese BGM prompt library, keyed by common game scenarios. Each entry is a
+ * ready-to-paste Chinese prompt for the MiniMax Audio web page (the API rejects
+ * new users with HTTP 410, so the web page is the practical path).
+ *
+ * Why Chinese: the user generates on a zh-CN site and reads Chinese; English
+ * prompts also made it hard to tell what would come out.
  */
-export function bgmPromptFor(desc) {
+export const BGM_SCENES = [
+  {
+    id: 'battle',
+    zh: ['战斗', '打斗', '交战', '战斗音乐', 'combat', 'battle'],
+    name: '战斗',
+    prompt: '紧张激烈的战斗背景音乐，快节奏鼓点与低音贝斯推进，弦乐紧张上行，铜管强调重音，'
+      + '情绪压迫感强、不中断，适合持续战斗循环',
+  },
+  {
+    id: 'boss',
+    zh: ['boss', '首领', '最终boss', '终极', '决战'],
+    name: 'BOSS 战',
+    prompt: '史诗级 BOSS 决战音乐，沉重的低音轰鸣与金属撞击声，管弦与电子合成器混合，'
+      + '压迫感极强、庄严而不祥，情绪层层递进，适合循环播放',
+  },
+  {
+    id: 'victory',
+    zh: ['胜利', '获胜', '通关', '凯旋', 'win', 'victory'],
+    name: '胜利',
+    prompt: '胜利庆祝音乐，明亮的大调铜管号角，上扬的旋律线条，鼓点铿锵有力，'
+      + '情绪振奋、有成就感，时长较短用于结算画面',
+  },
+  {
+    id: 'defeat',
+    zh: ['失败', '战败', '游戏结束', 'lose', 'defeat', 'gameover'],
+    name: '失败',
+    prompt: '失败与挫败感的背景音乐，低沉缓慢的小调弦乐，稀疏的钢琴单音，'
+      + '情绪压抑、沉重但不刺耳，适合失败结算画面',
+  },
+  {
+    id: 'menu',
+    zh: ['主菜单', '菜单', '首页', '大厅', 'lobby', 'menu'],
+    name: '主菜单',
+    prompt: '主菜单背景音乐，舒缓大气的氛围音乐，温暖的合成器铺底与轻柔的钢琴琶音，'
+      + '情绪平静、耐听、可长时间无缝循环，不抢注意力',
+  },
+  {
+    id: 'explore',
+    zh: ['探索', '冒险', '地图', '闲逛', 'explore', 'adventure'],
+    name: '探索',
+    prompt: '探索冒险背景音乐，中速节奏，明快的木管与拨弦乐器，旋律悠扬有期待感，'
+      + '情绪轻松好奇，可长时间循环不疲劳',
+  },
+  {
+    id: 'tense',
+    zh: ['紧张', '悬疑', '危机', '危险', 'tense', 'suspense'],
+    name: '紧张悬疑',
+    prompt: '紧张悬疑的氛围音乐，持续的低频嗡鸣与不规则的心跳般鼓点，'
+      + '稀疏的高音点缀，情绪不安、悬念感强，无人声',
+  },
+  {
+    id: 'sad',
+    zh: ['悲伤', '伤感', '剧情', '离别', 'sad', 'emotional'],
+    name: '悲伤剧情',
+    prompt: '悲伤抒情的剧情音乐，缓慢的小调钢琴与弦乐，旋律温柔克制，'
+      + '情绪细腻动人，适合剧情演出，无人声',
+  },
+  {
+    id: 'shop',
+    zh: ['商店', '商城', '商店音乐', 'shop', 'store'],
+    name: '商店',
+    prompt: '轻松愉快的商店界面音乐，轻快的爵士风格钢琴与拨弦贝斯，节奏摇摆，'
+      + '情绪轻松愉悦、不吵闹，适合长时间循环',
+  },
+  {
+    id: 'upgrade',
+    zh: ['升级', '养成', '强化', '装备', 'upgrade'],
+    name: '升级养成',
+    prompt: '升级强化界面音乐，明亮上升的合成器琶音，节奏稳定有推进感，'
+      + '情绪积极向上、有成长感，适合循环播放',
+  },
+]
+
+/** Pick the best-matching scene for a Chinese/English description. */
+export function matchBgmScene(desc) {
+  const q = String(desc ?? '').toLowerCase()
+  if (q.length === 0) return null
+  for (const scene of BGM_SCENES) {
+    if (scene.zh.some((k) => q.includes(k.toLowerCase()))) return scene
+  }
+  return null
+}
+
+/**
+ * Build a Chinese, ready-to-paste BGM prompt.
+ *
+ * - A recognised scenario uses its curated Chinese template.
+ * - A free-form Chinese description is used as-is plus Chinese constraints.
+ * - An English description is wrapped with a Chinese instruction so the model
+ *   still returns something usable on the zh-CN site, and we tell the caller
+ *   that we detected English input.
+ *
+ * Returns { prompt, scene, wasEnglish }.
+ */
+export function buildBgmPrompt(desc) {
   const d = String(desc ?? '').trim()
-  if (d.length === 0) return ''
-  return [
-    d,
-    '纯音乐，无人声',
-    '结构完整，可循环',
-    '44.1kHz 高音质',
-  ].join('，')
+  if (d.length === 0) return { prompt: '', scene: null, wasEnglish: false }
+  const scene = matchBgmScene(d)
+  // Scene templates already say 无人声 themselves, so avoid saying it twice.
+  const TAIL = scene === null
+    ? ['纯音乐，无人声', '结构完整可无缝循环', '时长 60-120 秒', '高音质']
+    : ['结构完整可无缝循环', '时长 60-120 秒', '高音质']
+  // Detect a mostly-ASCII description (i.e. the caller wrote English).
+  const ascii = (d.match(/[\x20-\x7e]/g) ?? []).length
+  const wasEnglish = d.length > 0 && ascii / d.length > 0.7
+
+  if (scene !== null) {
+    return { prompt: [scene.prompt, ...TAIL].join('，'), scene: scene.name, wasEnglish }
+  }
+  if (wasEnglish) {
+    // Keep the user's intent but force a Chinese-framed request.
+    return {
+      prompt: `游戏背景音乐。风格与情绪参考：${d}。${TAIL.join('，')}`,
+      scene: null,
+      wasEnglish,
+    }
+  }
+  return { prompt: [d, ...TAIL].join('，'), scene: null, wasEnglish }
+}
+
+/** Backwards-compatible one-liner used by the CLI/commands. */
+export function bgmPromptFor(desc) {
+  return buildBgmPrompt(desc).prompt
+}
+
+/**
+ * Suggest BGM prompts for a project by scanning its text files for scenario
+ * keywords (e.g. a GAME_RULES.md mentioning 战斗/BOSS/商店). Returns an array of
+ * { scene, prompt, hits } ordered by how often the keyword appeared.
+ */
+export function suggestBgmForProject(projectDir) {
+  const out = []
+  let corpus = ''
+  try {
+    const names = fs.readdirSync(projectDir).filter((f) => /\.(md|txt|json|lua)$/i.test(f))
+    for (const n of names.slice(0, 40)) {
+      try {
+        const p = path.join(projectDir, n)
+        const stat = fs.statSync(p)
+        if (stat.size > 512 * 1024) continue
+        corpus += `\n${fs.readFileSync(p, 'utf8')}`
+      } catch { /* skip unreadable */ }
+    }
+  } catch { /* not a readable dir */ }
+  const lower = corpus.toLowerCase()
+  for (const scene of BGM_SCENES) {
+    let hits = 0
+    for (const k of scene.zh) {
+      const key = k.toLowerCase()
+      let idx = lower.indexOf(key)
+      while (idx !== -1) { hits += 1; idx = lower.indexOf(key, idx + key.length) }
+    }
+    if (hits > 0) {
+      out.push({ scene: scene.name, id: scene.id, hits, prompt: [scene.prompt, '纯音乐，无人声', '结构完整可无缝循环'].join('，') })
+    }
+  }
+  out.sort((a, b) => b.hits - a.hits)
+  return out
 }
 
 /**

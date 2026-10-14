@@ -36,7 +36,7 @@ import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { SOURCES } from './src/audio-sources.mjs'
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, bgmPromptFor } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, bgmPromptFor, buildBgmPrompt, suggestBgmForProject, BGM_SCENES } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -157,6 +157,9 @@ function policyText(config) {
     '     - **站点自动判断**：按当前网络可达性自动选国内版（minimax.cn）或国际版（minimax.io），',
     '       国际版多为 Google 登录，国内网络下选国内版。选好的站点会记住。',
     '     - **生成**：`/taptap-bgm <风格情绪描述>` —— 自动出提示词并用已登录浏览器完成生成与下载。',
+    '       **提示词必须用中文**（站点是国内版、用户看中文）；用户给英文时先翻译成中文再生成，',
+    '       并优先套用内置的中文场景模板（战斗/BOSS/胜利/失败/主菜单/探索/紧张/悲伤/商店/升级）。',
+    '       也可先读项目里的文档（GAME_RULES.md 等）推断需要哪些场景 BGM，再据此生成提示词。',
     '     - **导入项目**：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录> '
       + '--project <Maker项目目录> --kind bgm --to wav --latest`，自动转格式 + 写 `.meta`。',
     '     - 装完要**告诉用户装到了哪个文件**。' + '不要向用户长篇解释原理，只说清「需要登录账号，之后用它生成」。',
@@ -425,6 +428,23 @@ export function apply(ctx, config = {}) {
             hasApiKey: Boolean(merged.apiKey),
             file: imageConfigPath(home),
           })
+        }
+        if (req.method === 'GET' && sub === 'bgm-scenes') {
+          // Suggest Chinese BGM prompts derived from the actual project, so the
+          // user gets project-relevant prompts instead of generic English ones.
+          let scenes = []
+          try {
+            scenes = suggestBgmForProject(process.cwd())
+            if (scenes.length === 0) {
+              scenes = BGM_SCENES.map((s) => ({
+                id: s.id, scene: s.name, hits: 0,
+                prompt: [s.prompt, '纯音乐，无人声', '结构完整可无缝循环'].join('，'),
+              }))
+            }
+          } catch {
+            scenes = []
+          }
+          return sendJson(res, 200, { ok: true, scenes })
         }
         if (req.method === 'GET' && sub === 'bgm') {
           const st = bgmStatus(home)
@@ -886,7 +906,23 @@ export function apply(ctx, config = {}) {
           }
         }
 
-        const prompt = bgmPromptFor(desc)
+        // Build a Chinese prompt; recognised scenarios use a curated template.
+        const built = buildBgmPrompt(desc)
+        const prompt = built.prompt
+        if (built.wasEnglish) {
+          // Tell the caller we detected English so it can rephrase in Chinese.
+          return {
+            kind: 'success',
+            text: [
+              `你给的是英文描述，我按中文重写成可直接粘贴的提示词：`,
+              '',
+              `  ${prompt}`,
+              '',
+              '如果这不是你想要的，请用中文再说一次（例如「紧张激烈的战斗音乐」）。',
+              built.scene ? `匹配场景：${built.scene}` : '',
+            ].filter(Boolean).join('\n'),
+          }
+        }
         // Hard cap the whole flow. Without this a stuck generation kept the
         // browser + python + node alive indefinitely and the settings page
         // showed 「登录中…」/nothing forever (we hit exactly that).

@@ -274,13 +274,26 @@ window.__ModuleLoader__.load({
     }
 
     function BgmGuide() {
-      const WEB = 'https://www.minimax.io/audio'
+      const WEB = 'https://www.minimax.cn/audio/music'
       const [desc, setDesc] = useState('')
       const [copied, setCopied] = useState('')
-      const prompt = useMemo(() => {
-        const d = desc.trim()
-        return d.length === 0 ? '' : [d, '纯音乐，无人声', '结构完整，可循环', '44.1kHz 高音质'].join('，')
-      }, [desc])
+      const [scenes, setScenes] = useState(null)
+
+      // Ask the host for scene suggestions derived from the actual project.
+      useEffect(() => {
+        fetch(`${API_BASE}/bgm-scenes`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
+          .then((j) => setScenes(Array.isArray(j.scenes) ? j.scenes : []))
+          .catch(() => setScenes([]))
+      }, [])
+
+      const build = useCallback((d) => {
+        const s = String(d || '').trim()
+        if (s.length === 0) return ''
+        const tail = ['纯音乐，无人声', '结构完整可无缝循环', '时长 60-120 秒', '高音质']
+        return [s, ...tail].join('，')
+      }, [])
+      const prompt = useMemo(() => build(desc), [desc, build])
       const onCopy = useCallback(() => {
         const ok = copyText(prompt)
         setCopied(ok ? 'ok' : 'fail')
@@ -289,15 +302,28 @@ window.__ModuleLoader__.load({
       const onOpen = useCallback(() => {
         try { window.open(WEB, '_blank', 'noopener') } catch (_e) { /* no-op */ }
       }, [])
+      const useScene = useCallback((p) => { setDesc(p) }, [])
 
       return h('div', { style: S.card },
         h('h2', { style: S.cardTitle }, '完整 BGM'),
         h('p', { style: { ...S.sub, marginTop: 0 } },
           '在网页生成后，插件自动导入项目。'),
+        scenes !== null && scenes.length > 0
+          ? h('div', null,
+            h('label', { style: S.label }, '按项目内容推荐（点一下填入）'),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 6, margin: '4px 0 10px' } },
+              scenes.slice(0, 8).map((s) => h('button', {
+                key: s.id,
+                style: S.ghostBtn,
+                title: s.prompt,
+                onClick: () => useScene(s.prompt),
+              }, `${s.scene}${s.hits > 1 ? ` ×${s.hits}` : ''}`))),
+          )
+          : null,
         h('div', { style: S.row },
-          h('label', { style: S.label }, '风格 / 情绪描述'),
+          h('label', { style: S.label }, '风格 / 情绪描述（中文）'),
           h('input', {
-            style: S.input, value: desc, placeholder: '如：史诗管弦战斗音乐，紧张激烈',
+            style: S.input, value: desc, placeholder: '如：紧张激烈的战斗音乐，鼓点推进',
             onChange: (e) => setDesc(e.target.value), spellCheck: false,
           }),
         ),
@@ -313,7 +339,7 @@ window.__ModuleLoader__.load({
             ))
           : null,
         h('p', { style: { ...S.hint, marginTop: 8 } },
-          '也可用命令：', h('span', { style: S.codeInline }, '/taptap-bgm 史诗管弦战斗音乐')),
+          '也可用命令：', h('span', { style: S.codeInline }, '/taptap-bgm 战斗')),
       )
     }
 
@@ -609,22 +635,6 @@ window.__ModuleLoader__.load({
         h(PolicyToggle),
 
         h(ImageConfig),
-
-        h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, '小资源 / 图标怎么出'),
-          h('p', { style: { ...S.sub, marginTop: 0 } },
-            '直接让模型出极小尺寸（如 64×64）细节会糊。正确做法：出干净大图再高质量缩小。'),
-          h('ul', { style: S.ul },
-            h('li', null, '出大图（图标建议透明底、主体居中留白）：',
-              h('span', { style: S.codeInline }, '--transparent'), '（端点不支持会自动去掉重试）。'),
-            h('li', null, '再缩到目标尺寸：',
-              h('span', { style: S.codeInline }, '--downscale 128x128'), '（或 64x64）。'),
-            h('li', null, '缩放用本机 ImageMagick 或 Python+Pillow，缺失则保留大图并打印手动命令；原大图存为 ',
-              h('span', { style: S.codeInline }, '*.full.png'), '。'),
-            h('li', null, '示例：', h('span', { style: S.codeInline },
-              '/taptap-image 蓝色盾牌图标，扁平，居中留白 --transparent --downscale 128x128')),
-          ),
-        ),
 
         h(BgmLoginCard),
 
