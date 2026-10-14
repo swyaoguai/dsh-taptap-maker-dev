@@ -360,20 +360,41 @@ export async function generate(dshHome, prompt, { out, waitMs = 300000, site } =
   const snippet = `import time, os, base64
 steps = {}
 MUSIC_URL = ${pyStr(target.url)}.replace("/audio", "/audio/music")
-# Capture the site's OWN history_list response: the page calls it with its own
-# auth headers, which a manual fetch() cannot reproduce (we got HTTP 401 doing
-# that). Listening to the real response is both authenticated and version-proof.
-captured = {}
+# Auth on this site is a token REQUEST HEADER (JWT), not a cookie — verified
+# by inspecting the real requests. So capture that header once, then we can call
+# the API ourselves and never depend on clicking/hovering or reloading.
+captured = {"token": None, "json": None, "list_url": None}
+def _on_req(r):
+    try:
+        if captured["token"] is None:
+            h = r.headers
+            t = h.get("token") or h.get("Token") or h.get("authorization") or h.get("Authorization")
+            if t and t.count(".") == 2:
+                captured["token"] = t.replace("Bearer ", "").strip()
+        # Remember the site's OWN history_list URL. It carries required query
+        # params (device_platform/app_id/uuid/unix/...); calling without them
+        # returns an empty list (verified).
+        if captured["list_url"] is None and "music/history_list" in r.url:
+            captured["list_url"] = r.url
+    except Exception:
+        pass
 def _on_resp(r):
     try:
         if "music/history_list" in r.url and r.status == 200:
             captured["json"] = r.json()
     except Exception:
         pass
+pg.on("request", _on_req)
 pg.on("response", _on_resp)
 pg.goto(MUSIC_URL, timeout=60000)
-pg.wait_for_timeout(8000)
+# Wait for both the auth token and the initial work list.
+_wait = time.time() + 45
+while time.time() < _wait and (captured["token"] is None or captured["json"] is None):
+    pg.wait_for_timeout(1500)
+steps["got_token"] = captured["token"] is not None
+steps["got_list_url"] = captured["list_url"] is not None
 steps["url"] = pg.url
+TOKEN = captured["token"]
 # Dismiss a first-run consent dialog if it is covering the form.
 for sel in ["button:has-text('同意')", "button:has-text('我知道了')", "button:has-text('确定')",
             ".ant-modal button:has-text('同意')", ".ant-modal-close"]:
@@ -454,10 +475,23 @@ if clicked is None:
     result["error"] = "could not find the 创作 button"
     return result
 # Wait for a NEW finished track to appear (status 2 = done).
+# Poll the JSON API quietly with the captured token. CRITICAL: never reload the
+# page here — an earlier version did, which made the browser visibly refresh in
+# a loop and wiped the typed prompt.
 deadline = time.time() + ${Math.floor(waitMs / 1000)}
 new_track = None
+polls = 0
+api_url = captured.get("list_url") or (${pyStr(target.url)}.replace("/audio", "/v1/api/music/history_list") + "?is_favorite=false&page=1&page_size=20")
 while time.time() < deadline:
-    lst = ((captured.get("json") or {}).get("data") or {}).get("music_list") or []
+    polls += 1
+    got = pg.evaluate("""async ([u, t]) => {
+        try {
+            const r = await fetch(u, { headers: { token: t } });
+            if (!r.ok) return { error: 'HTTP ' + r.status };
+            return await r.json();
+        } catch (e) { return { error: String(e) }; }
+    }""", [api_url, TOKEN])
+    lst = ((got or {}).get("data") or {}).get("music_list") or []
     for it in lst:
         mid = it.get("music_id")
         if mid and mid not in before_ids and it.get("status") == 2 and it.get("audio_url"):
@@ -465,12 +499,8 @@ while time.time() < deadline:
             break
     if new_track:
         break
-    # Nudge the list to refresh so we see the new item.
-    try:
-        pg.reload(timeout=45000)
-        pg.wait_for_timeout(6000)
-    except Exception:
-        pg.wait_for_timeout(5000)
+    pg.wait_for_timeout(6000)
+steps["polls"] = polls
 steps["new_track"] = None
 if new_track:
     steps["new_track"] = {"title": new_track.get("title"), "music_id": new_track.get("music_id"),
