@@ -108,6 +108,28 @@ const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").r
  * Returns { ok, out, err }.
  */
 /**
+ * Kill any leftover Chromium holding our profile, and clear stale lock files.
+ *
+ * Why this is needed: a crashed/killed browser leaves SingletonLock behind and
+ * the next launch dies with exitCode=21. We only touch processes whose command
+ * line references OUR profile dir, so the user's own Chrome is never harmed.
+ */
+function releaseProfile(prof) {
+  try {
+    const r = spawnSync('powershell', ['-NoProfile', '-Command',
+      `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+      `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
+      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+    ], { stdio: 'ignore', timeout: 20000 })
+    if (r.status !== 0) { /* best effort */ }
+  } catch { /* best effort */ }
+  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile',
+    path.join('Default', 'LOCK')]) {
+    try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
+  }
+}
+
+/**
  * Run a python playwright snippet with the persistent profile.
  * The snippet is a callable body that receives (pg, b, result) and is written
  * to a real .py file so indentation is unambiguous.
@@ -119,6 +141,7 @@ function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000 } =
   }
   const prof = profileDir(dshHome)
   fs.mkdirSync(prof, { recursive: true })
+  releaseProfile(prof)
   const script = `import json
 from playwright.sync_api import sync_playwright
 result = {"ok": False, "log": [], "error": None}
@@ -130,7 +153,12 @@ try:
         b = p.chromium.launch_persistent_context(${pyStr(prof)}, headless=${headless ? 'True' : 'False'})
         pg = b.pages[0] if b.pages else b.new_page()
         _snippet(pg, b, result)
-        b.close()
+        # Graceful close matters: a hard kill can lose the login cookie before
+        # Chromium flushes it to disk (we hit exactly that while debugging).
+        try:
+            b.close()
+        except Exception:
+            pass
         result["ok"] = True
 except Exception as e:
     result["error"] = str(e)
@@ -212,6 +240,14 @@ if logged:
         except Exception:
             break
         pg.wait_for_timeout(1000)
+# Flush the cookie jar to disk explicitly. Chromium normally persists on clean
+# close, but a hard kill can lose the auth cookie before it is written — we hit
+# exactly that while debugging, which silently logged the user back out.
+try:
+    b.add_cookies(b.cookies())
+    pg.wait_for_timeout(1500)
+except Exception:
+    pass
 result["logged"] = logged
 result["url"] = pg.url
 return result`
@@ -255,21 +291,54 @@ export function status(dshHome) {
     path.join(prof, 'Default', 'Cookies'),
   ]
   const cookieFile = cookieCandidates.find((f) => fs.existsSync(f))
-  let hasCookies = false
-  if (cookieFile) {
-    try {
-      hasCookies = fs.statSync(cookieFile).size > 4096
-    } catch {
-      hasCookies = false
-    }
-  }
+  // Size alone is NOT a login signal: 13 analytics cookies also exceed 4KB, and
+  // we shipped that false positive once. Query the DB for the real auth cookie.
+  const authCookie = findAuthCookie(cookieFile)
   return {
     profile: prof,
     exists,
-    hasCookies,
+    hasCookies: authCookie !== null,
+    authCookie,
     cookieFile: cookieFile ?? null,
     downloadDir: downloadDir(dshHome),
     site: loadSite(dshHome) ?? null,
+  }
+}
+
+/**
+ * Read the cookie DB and look for the site's real auth cookie (`_token`).
+ * Chromium's encrypted_value is not decryptable without the OS key, but the
+ * NAME is plaintext and that is all we need to answer "are we logged in".
+ * Returns the cookie name, or null.
+ */
+function findAuthCookie(cookieFile) {
+  if (!cookieFile) return null
+  try {
+    const py = findPython()
+    if (py === null) return null
+    const script = `import sqlite3, shutil, tempfile, os, json
+src = ${pyStr(cookieFile)}
+tmp = os.path.join(tempfile.gettempdir(), "ck_probe_%d.db" % os.getpid())
+shutil.copy2(src, tmp)
+con = sqlite3.connect(tmp)
+names = [r[0] for r in con.execute("SELECT name FROM cookies").fetchall()]
+con.close()
+os.remove(tmp)
+print("__CKN__" + json.dumps(names))
+`
+    const tmp = path.join(os.tmpdir(), `ckprobe-${Date.now()}.py`)
+    fs.writeFileSync(tmp, script, 'utf8')
+    const r = spawnSync(py, [tmp], { encoding: 'utf8', timeout: 15000 })
+    fs.rmSync(tmp, { force: true })
+    const out = r.stdout ?? ''
+    const i = out.indexOf('__CKN__')
+    if (i < 0) return null
+    const names = JSON.parse(out.slice(i + '__CKN__'.length).split('\n')[0])
+    // The CN site uses `_token`; keep a small allowlist for robustness.
+    const hit = names.find((n) => ['_token', 'token', 'session', 'access_token', 'Authorization'].includes(n))
+    return hit ?? null
+  } catch {
+    return null
   }
 }
 
@@ -285,34 +354,41 @@ export async function generate(dshHome, prompt, { out, waitMs = 300000, site } =
   //   /audio       → must click 「音乐创作」 to reach /audio/music
   //   /audio/music → 风格 textarea placeholder「描述音乐风格与制作要求…」
   //                  纯音乐 toggle, 「创作」 button, then a 下载 action
-  const snippet = `import time, os
-# Go straight to the music view: the landing page is speech synthesis, and
-# clicking through can be blocked by a first-run modal. /audio/music works
-# directly (verified) and any lingering modal is dismissed defensively below.
-MUSIC_URL = ${pyStr(target.url)}.replace("/audio", "/audio/music")
-pg.goto(MUSIC_URL, timeout=60000)
-pg.wait_for_timeout(7000)
+  const snippet = `import time, os, base64
 steps = {}
+MUSIC_URL = ${pyStr(target.url)}.replace("/audio", "/audio/music")
+# Capture the site's OWN history_list response: the page calls it with its own
+# auth headers, which a manual fetch() cannot reproduce (we got HTTP 401 doing
+# that). Listening to the real response is both authenticated and version-proof.
+captured = {}
+def _on_resp(r):
+    try:
+        if "music/history_list" in r.url and r.status == 200:
+            captured["json"] = r.json()
+    except Exception:
+        pass
+pg.on("response", _on_resp)
+pg.goto(MUSIC_URL, timeout=60000)
+pg.wait_for_timeout(8000)
 steps["url"] = pg.url
-# Dismiss a first-run consent dialog if it is present and actually covering.
+# Dismiss a first-run consent dialog if it is covering the form.
 for sel in ["button:has-text('同意')", "button:has-text('我知道了')", "button:has-text('确定')",
             ".ant-modal button:has-text('同意')", ".ant-modal-close"]:
     try:
         d = pg.query_selector(sel)
         if d and d.is_visible():
-            d.click()
+            d.click(force=True)
             steps.setdefault("dialog_dismissed", sel)
-            pg.wait_for_timeout(1500)
+            pg.wait_for_timeout(1200)
     except Exception:
         pass
-# If a modal still intercepts clicks, force-remove the overlay.
 try:
     if pg.query_selector(".ant-modal-wrap"):
         pg.evaluate("() => document.querySelectorAll('.ant-modal-wrap,.ant-modal-mask').forEach(e => e.remove())")
         steps["modal_removed"] = True
 except Exception:
     pass
-# Fill the style/description box (the real one is a textarea with this hint).
+# Fill the style/description box.
 box = None
 for sel in ["textarea[placeholder*='描述音乐风格']", "textarea[placeholder*='风格']", "textarea"]:
     try:
@@ -339,20 +415,28 @@ except Exception:
         result["steps"] = steps
         result["error"] = "could not fill prompt: " + str(e)
         return result
-# Turn on 纯音乐 (instrumental) when present — BGM has no vocals.
-for sel in ["text=纯音乐", "label:has-text('纯音乐')", ".ant-switch"]:
+# Turn on 纯音乐 when present — BGM should have no vocals.
+for sel in ["text=纯音乐", "label:has-text('纯音乐')"]:
     try:
         t = pg.query_selector(sel)
         if t and t.is_visible():
             t.click(force=True)
             steps["instrumental_toggled"] = sel
-            pg.wait_for_timeout(1200)
+            pg.wait_for_timeout(1000)
             break
     except Exception:
         pass
-# Click 创作 / 生成. The button text may include a credit count ("600\\n创作").
+# Snapshot existing track ids so we can identify the NEW one after generating.
+before_ids = set()
+try:
+    lst0 = ((captured.get("json") or {}).get("data") or {}).get("music_list") or []
+    before_ids = {x.get("music_id") for x in lst0}
+    steps["existing_tracks"] = len(before_ids)
+except Exception:
+    pass
+# Click 创作 / 生成 (button text can include a credit count, e.g. "600\\n创作").
 clicked = None
-for sel in ["button:has-text('创作')", "button:has-text('生成')", "button:has-text('Create')", "button:has-text('Generate')"]:
+for sel in ["button:has-text('创作')", "button:has-text('生成')", "button:has-text('Create')"]:
     try:
         b2 = pg.query_selector(sel)
         if b2 and b2.is_visible():
@@ -362,36 +446,63 @@ for sel in ["button:has-text('创作')", "button:has-text('生成')", "button:ha
     except Exception:
         pass
 steps["generate_clicked"] = clicked
-# Wait for a result + download control.
+if clicked is None:
+    result["steps"] = steps
+    result["error"] = "could not find the 创作 button"
+    return result
+# Wait for a NEW finished track to appear (status 2 = done).
 deadline = time.time() + ${Math.floor(waitMs / 1000)}
-found = None
+new_track = None
 while time.time() < deadline:
-    for sel in ["button:has-text('下载')", "a[download]", "button:has-text('Download')", "audio"]:
-        try:
-            el = pg.query_selector(sel)
-            if el and el.is_visible():
-                found = sel
-                break
-        except Exception:
-            pass
-    if found:
+    lst = ((captured.get("json") or {}).get("data") or {}).get("music_list") or []
+    for it in lst:
+        mid = it.get("music_id")
+        if mid and mid not in before_ids and it.get("status") == 2 and it.get("audio_url"):
+            new_track = it
+            break
+    if new_track:
         break
-    pg.wait_for_timeout(3000)
-steps["download_ready"] = found
-if found:
-    os.makedirs(${pyStr(dl)}, exist_ok=True)
+    # Nudge the list to refresh so we see the new item.
     try:
-        with pg.expect_download(timeout=180000) as info:
-            pg.click(found, force=True)
-        d = info.value
-        saved = os.path.join(${pyStr(dl)}, d.suggested_filename or "bgm.mp3")
-        d.save_as(saved)
+        pg.reload(timeout=45000)
+        pg.wait_for_timeout(6000)
+    except Exception:
+        pg.wait_for_timeout(5000)
+steps["new_track"] = None
+if new_track:
+    steps["new_track"] = {"title": new_track.get("title"), "music_id": new_track.get("music_id"),
+                          "duration_ms": new_track.get("duration")}
+    audio = new_track.get("audio_url")
+    steps["audio_url"] = audio
+    os.makedirs(${pyStr(dl)}, exist_ok=True)
+    safe = "".join(c for c in (new_track.get("title") or "bgm") if c.isalnum() or c in " -_()")
+    saved = os.path.join(${pyStr(dl)}, (safe.strip() or "bgm") + ".mp3")
+    # Fetch through the page so the CDN sees the same origin/headers.
+    got = pg.evaluate("""async (u) => {
+        try {
+            const r = await fetch(u);
+            if (!r.ok) return { error: 'HTTP ' + r.status };
+            const buf = await r.arrayBuffer();
+            const by = new Uint8Array(buf);
+            let s = '';
+            for (let i = 0; i < by.length; i++) s += String.fromCharCode(by[i]);
+            return { b64: btoa(s), len: by.length };
+        } catch (e) { return { error: String(e) }; }
+    }""", audio)
+    if got and got.get("b64"):
+        open(saved, "wb").write(base64.b64decode(got["b64"]))
         steps["saved"] = saved
-    except Exception as e:
-        steps["download_error"] = str(e)
+        steps["saved_bytes"] = got.get("len")
+    else:
+        steps["download_error"] = (got or {}).get("error", "no data")
+else:
+    steps["note"] = "no new finished track appeared before the deadline"
 result["steps"] = steps
 return result`
-  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 180000 })
+  // MUST run headed: verified that headless loses the login session (cookies
+  // drop to the 8 analytics-only ones and _token is absent), so the works list
+  // and download button never appear.
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 240000 })
   if (!r.ok) return r
   return { ok: true, steps: r.steps, error: r.error, downloadDir: dl }
 }
