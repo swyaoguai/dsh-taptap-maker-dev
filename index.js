@@ -165,6 +165,12 @@ function policyText(config) {
       + '--project <Maker项目目录> --kind bgm --to wav --latest`，自动转格式 + 写 `.meta`。',
     '     - 装完要**告诉用户装到了哪个文件**。' + '不要向用户长篇解释原理，只说清「需要登录账号，之后用它生成」。',
     '     - 若网页结构变了拿不到文件，如实报告，提示手动下载后 import。',
+    '  ③ 音频转格式 / 压缩（本地 ffmpeg，零成本、不联网）：',
+    '     用户说「转成 wav / 压缩一下 / 统一音量 / 去掉静音 / 拼成循环 / 看看时长」时用：',
+    '     `node "<插件目录>/src/taptap-audio-convert.mjs" --in <文件或目录> --out <目标> '
+      + '[--to wav|mp3|ogg|opus|m4a|flac] [--mono] [--rate 44100] [--normalize] [--trim] '
+      + '[--fade-in 0.1] [--fade-out 0.2] [--bitrate 64k] [--loop 8]`，',
+    '     或对话里直接说需求（`/taptap-audio-convert` 同义）。需要 ffmpeg，缺失时如实提示安装。',
     '**诚实限制（必须如实告知）**：',
     '  - Kenney 音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM；',
     '  - 完整 BGM 需要用户的 MiniMax 账号登录网页生成（登录一次即可，之后自动）；',
