@@ -13,7 +13,6 @@
   "bin": {
     "taptap-image": "./src/taptap-image.mjs",
     "taptap-audio": "./src/taptap-audio.mjs",
-    "taptap-music": "./src/taptap-music.mjs",
     "taptap-skills-update": "./src/taptap-skills-update.mjs"
   },
   "files": [
@@ -51,6 +50,8 @@
     "@deepseek-ai/schemastery": "^3.18.4"
   },
   "peerDependenciesMeta": {
-    "@deepseek-ai/schemastery": { "optional": true }
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
   }
 }

@@ -35,8 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { SOURCES } from './src/audio-sources.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, readMusicConfigRaw, writeMusicConfigPatch, musicConfigPath } from './src/paths.js'
-import { MUSIC_MODELS, MINIMAX_MUSIC_URL } from './src/taptap-music.mjs'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, bgmPromptFor } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -77,12 +76,6 @@ try {
       cacheDir: Schema.string().default('')
         .description('音频库缓存目录，留空用 $DSH_HOME/taptap-maker-dev/skills-cache/audio'),
     }).description('CC0 音效 / BGM（Kenney，可商用免署名）'),
-    music: Schema.object({
-      apiKey: Schema.string().role('secret').default('')
-        .description('MiniMax API Key（M Plan / 付费用户；端点已固定，无需填 URL）'),
-      model: Schema.string().default('music-3.0').description('MiniMax 音乐模型 id'),
-      format: Schema.string().default('mp3').description('输出格式 mp3 / wav'),
-    }).description('MiniMax 音乐生成（自带 Key，不走 Maker 额度）'),
     skills: Schema.object({
       autoUpdate: Schema.boolean().default(true).description('定期检查并拉取 skill 更新'),
       updateIntervalHours: Schema.number().default(24).description('更新检查间隔（小时）'),
@@ -157,29 +150,28 @@ function policyText(config) {
     '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
     '     单文件按需下载，绝不整站抓取。',
     '     **未接入**：Freesound（需用户自己的 API Key，裸请求实测 401）、OpenGameArt（授权混杂，含禁商用的 CC-BY-NC）。',
-    '  ② MiniMax 音乐生成（**仅历史付费/M Plan 用户可用**）：',
-    '     - `node <插件>/src/taptap-music.mjs --prompt "<风格情绪描述>" --out <文件.mp3> [--instrumental]`；',
-    '     - 端点固定为 `https://api.minimax.cn/v1/music_generation`，用户只需填 apiKey 与 model；',
-    '     - 用的是用户自己的 MiniMax 订阅，**不消耗 Maker 内置额度**。',
-    '     - **重要**：厂商对新用户账号直接返回 **HTTP 410**（网关层拒绝，不是接口下线）。',
-    '       实测：真 key 调 `music-3.0` / `music-2.6` / `music-cover` 全为 410；只有假 key 才返回 200/1004。',
-    '       因此**新用户走不通这条路**，不要反复重试，也不要据此判断接口故障。',
-    '  ③ 网页下载 BGM 后导入（**新用户唯一可自动化的完整 BGM 路径**）：',
-    '     - 用户在 MiniMax Audio（https://www.minimax.io/audio）或任何 CC0 音乐站下载到本机后，',
-    '       用 pwsh 执行：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录或文件> '
-      + '--project <Maker项目目录> --kind bgm [--to wav] [--latest] [--mono] [--rate 44100]`；',
-    '     - 会自动：可选 ffmpeg 转格式 → 复制到 `assets/audio/bgm/` → 生成同名 `.meta`（22 位 uuid）；',
-    '     - `--latest` 只取目录里最新下载的那个文件（刚下完时最常用）；不传 `--to` 则保持原格式。',
-    '     - 导入完要**告诉用户装到了哪个文件**。',
+    '  ② 完整 BGM（网页生成 + 自动导入）——**用户说「要背景音乐/BGM」时走这条**：',
+    '     - **先自动生成提示词**：用 `/taptap-bgm <风格情绪描述>`（如「史诗管弦战斗音乐，紧张激烈」），',
+    '       插件会输出一段可直接粘贴的提示词，并**打开网页 https://www.minimax.io/audio**；',
+    '     - **为什么不是全自动**：该网页是需登录的 Next.js 单页应用，没有公开 API，',
+    '       无法用脚本生成/下载（实测：`/api/music` 返回的是 HTML 页面不是接口）。',
+    '       MiniMax 音乐 API 对新用户账号直接返回 **HTTP 410**（实测：真 key 调三个模型全 410，假 key 才 200/1004），',
+    '       所以「网页手动点生成 + 下载」是目前唯一可行的一段，必须用户亲手做。',
+    '     - **下载后自动装进项目**（这段全自动）：用 pwsh 执行',
+    '       `node "<插件目录>/src/taptap-audio.mjs" import --in "C:\\Users\\<你>\\Downloads" '
+      + '--project <Maker项目目录> --kind bgm --to wav --latest`；',
+    '       会自动转格式 → 复制到 `assets/audio/bgm/` → 生成同名 `.meta`（22 位 uuid）；',
+    '       `--latest` 只取目录里最新下载的那个文件；不传 `--to` 则保持原格式。',
+    '     - 装完要**告诉用户装到了哪个文件**，不要停在这里。',
     '     - 自部署开源 MiniMax-Music3 需要 24GB+ 显存，普通机器跑不动，别推荐。',
     '**诚实限制（必须如实告知）**：',
     '  - Kenney 音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM；',
-    '  - MiniMax 付费音乐模型（music-3.0 / music-2.6 / music-cover）**仅历史付费 / M Plan 用户可用**（RPM 120）；',
-    '    **新用户账号会被网关直接返回 HTTP 410**（实测：真 key 调三个模型全 410，假 key 才 200/1004）。',
-    '    新用户要完整 BGM：**去 MiniMax Audio 网页下载，再用 `taptap-audio import` 导入**（路径 ③）；',
+    '  - **完整 BGM 无法全自动**：网页版需登录且无 API，必须由用户手动点生成并下载；',
+    '    MiniMax 音乐 API 对新用户返回 410（已实测确认，不要反复重试，也不要说成接口故障）；',
+    '  - 插件能自动的只有前后两段：生成提示词 + 打开网页，以及下载后导入项目；',
     '  - 自部署开源 MiniMax-Music3 需 24GB+ 显存，普通机器跑不动，不要推荐；',
-    '  - 所以：短音效走 ①；完整 BGM——M Plan 老用户走 ②，新用户走 ③。若 MiniMax 返回错误，',
-    '    **把错误原文如实告诉用户**，不要臆测成「接口故障」，也不要擅自改用消耗额度的内置生成工具。',
+    '  - 若用户在网页也拿不到满意 BGM，如实报告并给选项（用短 jingle 凑 / 找 CC0 曲目 /',
+    '    由用户决定是否动用 Maker 内置额度），绝不擅自调用消耗额度的生成工具。',
     '',
     `**插件目录**：\`${PKG_DIR}\`——上面所有 \`<插件目录>\` 都指这个真实路径，`,
     '调 CLI 时直接把它拼进命令（PowerShell 里路径加引号），不要让用户自己去猜路径。',
@@ -449,31 +441,6 @@ export function apply(ctx, config = {}) {
               { id: 'freesound', reason: '需要用户自己的 API Key（实测裸请求 401）' },
               { id: 'opengameart', reason: '授权混杂，含禁止商用的 CC-BY-NC' },
             ],
-          })
-        }
-        if (req.method === 'GET' && sub === 'music') {
-          const raw = readMusicConfigRaw(home)
-          return sendJson(res, 200, {
-            ok: true,
-            endpoint: MINIMAX_MUSIC_URL,
-            apiKey: raw.apiKey ?? '',
-            model: raw.model ?? 'music-3.0',
-            format: raw.format ?? 'mp3',
-            models: MUSIC_MODELS.map((m) => m.id),
-          })
-        }
-        if (req.method === 'POST' && sub === 'music') {
-          const body = await readBody(req)
-          let parsed
-          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
-          const merged = writeMusicConfigPatch(home, {
-            apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey : undefined,
-            model: typeof parsed.model === 'string' ? parsed.model : undefined,
-            format: typeof parsed.format === 'string' ? parsed.format : undefined,
-          })
-          return sendJson(res, 200, {
-            ok: true, model: merged.model ?? '', format: merged.format ?? '', hasApiKey: Boolean(merged.apiKey),
-            file: musicConfigPath(home),
           })
         }
         if (req.method === 'GET' && sub === 'audio') {
@@ -831,74 +798,56 @@ export function apply(ctx, config = {}) {
     })
 
     scoped.commands.register({
-      name: 'taptap-music',
-      description: 'MiniMax 音乐生成（用自己的 Key，不消耗 Maker 额度）',
-      input: { hint: '留空=查看用法；或 "风格情绪描述" --out <文件.mp3> [--instrumental]' },
+      name: 'taptap-bgm',
+      description: '生成 BGM 提示词并在网页打开生成页（新用户 API 410，只能走网页）',
+      input: { hint: '"<风格情绪描述>" 例如：/taptap-bgm 史诗管弦战斗音乐，紧张' },
       handler: async (invocation) => {
-        const musicCfg = config.music ?? {}
         const raw = (invocation?.rawInput ?? '').trim()
-        const cli = path.join(PKG_DIR, 'src', 'taptap-music.mjs')
-        const stored = readMusicConfigRaw(home)
-        const keySet = Boolean(stored.apiKey || musicCfg.apiKey || process.env.MINIMAX_API_KEY)
-        const model = stored.model || musicCfg.model || 'music-3.0'
-        const om = /--out\s+(\S+)/.exec(raw)
-        const desc = raw.replace(/--out\s+\S+/, '').replace(/--instrumental/, '').trim()
+        const desc = raw.replace(/^(bgm|背景音乐|音乐)\s*/i, '').trim()
+        const WEB = 'https://www.minimax.io/audio'
 
-        const usage = [
-          `MiniMax 音乐生成（端点固定 ${MINIMAX_MUSIC_URL}）`,
-          `配置：${musicConfigPath(home)}`,
-          `状态：${keySet ? `已配置（model=${model}）` : '未配置 API Key'}`,
-          '',
-          '可用模型：' + MUSIC_MODELS.filter((m) => m.available !== false).map((m) => m.id).join('、')
-            + '（*-free 三个限免版厂商公告已停服）',
-          '说明：用的是你自己的 MiniMax 订阅，不消耗 Maker 内置额度。M Plan / 付费用户可正常使用。',
-        ].join('\n')
-
-        // Really generate when a prompt AND --out are given: don't just print a
-        // command for the user to copy-paste.
-        if (desc.length > 0 && om !== null && keySet) {
-          try {
-            const out = path.resolve(om[1].replace(/^["']|["']$/g, ''))
-            const { generateMusic } = await import(pathToFileURL(cli).href)
-            const result = await generateMusic({
-              prompt: desc,
-              out,
-              model,
-              instrumental: raw.includes('--instrumental'),
-              dshHome: home,
-            })
-            return {
-              kind: 'success',
-              text: [
-                `已生成 BGM：${result.out}`,
-                `模型：${result.model}　大小：${Math.round(result.bytes / 1024)}KB`
-                + (result.durationMs ? `　时长：${(result.durationMs / 1000).toFixed(1)}s` : ''),
-                '授权/来源：你自己的 MiniMax 订阅，不消耗 Maker 内置额度。',
-                '',
-                '提示：还要装进项目的话，把它复制到 <Maker项目>/assets/audio/bgm/ 并补同名 .meta（uuid）。',
-              ].join('\n'),
-            }
-          } catch (error) {
-            return { kind: 'error', text: `MiniMax 生成失败：${error?.message ?? error}\n\n${usage}` }
-          }
-        }
-        if (desc.length > 0 && om !== null && !keySet) {
+        if (desc.length === 0) {
           return {
-            kind: 'error',
-            text: `还没有配置 MiniMax API Key，无法生成。\n请在设置 → TapTap Maker → MiniMax 音乐 里填 Key，或直接写 ${musicConfigPath(home)}\n\n${usage}`,
+            kind: 'success',
+            text: [
+              'BGM 生成（网页版路径）：',
+              '',
+              'MiniMax 音乐 API 对新用户账号直接返回 HTTP 410（网关层拒绝，实测），',
+              '所以完整 BGM 只能走网页版手动生成，再由插件自动装进项目。',
+              '',
+              `网页：${WEB}`,
+              '',
+              '用法：/taptap-bgm <风格情绪描述>',
+              '  例：/taptap-bgm 史诗管弦战斗音乐，紧张激烈',
+              '',
+              '我会：① 生成一段可直接粘贴的提示词 ② 打开网页 ③ 你下载后我自动装进项目',
+            ].join('\n'),
           }
         }
+
+        const prompt = bgmPromptFor(desc)
+        // Open the web page in the default browser so the user only has to paste.
+        let opened = false
+        try {
+          const r = spawnSync('cmd', ['/c', 'start', '', WEB], { stdio: 'ignore' })
+          opened = r.status === 0
+        } catch { opened = false }
+
         return {
           kind: 'success',
           text: [
-            usage,
+            `BGM 提示词已生成（复制到 ${WEB} 的提示词框）：`,
             '',
-            '直接生成（给描述 + --out 即可，我会真跑）：',
-            `  /taptap-music 史诗管弦战斗音乐，紧张 --out D:\\tmp\\bgm.mp3 --instrumental`,
+            `  ${prompt}`,
             '',
-            '命令行等价：',
-            `  node "${cli}" --prompt "史诗管弦战斗音乐，紧张" --out D:\\tmp\\bgm.mp3 --instrumental`,
-            `  node "${cli}" --models   # 可用模型 id`,
+            opened ? `网页已打开：${WEB}` : `请打开：${WEB}`,
+            '',
+            '接下来：',
+            '  1) 在网页粘贴上面提示词 → 生成 → 下载（通常是 .mp3，落到「下载」目录）',
+            '  2) 跟我说「把刚下载的 BGM 装进项目」，或执行：',
+            `     /taptap-audio import --in "C:\\Users\\<你>\\Downloads" --project <项目目录> --kind bgm --to wav --latest`,
+            '',
+            '说明：插件会自动转格式、复制到 assets/audio/bgm/、生成同名 .meta（22 位 uuid）。',
           ].join('\n'),
         }
       },

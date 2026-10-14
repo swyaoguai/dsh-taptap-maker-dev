@@ -110,52 +110,20 @@ export function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
 }
 
-/** Path to the MiniMax music config file. */
-export function musicConfigPath(dshHome) {
-  return path.join(dataDir(dshHome), 'music.json')
-}
-
-/** Read the raw music.json (what the settings form edits), or {}. */
-export function readMusicConfigRaw(dshHome) {
-  return readJson(musicConfigPath(dshHome)) ?? {}
-}
-
-/** Merge a {apiKey,model,format,sampleRate,bitrate} patch into music.json. */
-export function writeMusicConfigPatch(dshHome, patch = {}) {
-  const file = musicConfigPath(dshHome)
-  const merged = { ...(readJson(file) ?? {}) }
-  for (const key of ['apiKey', 'model', 'format']) {
-    if (typeof patch[key] === 'string') merged[key] = patch[key].trim()
-  }
-  for (const key of ['sampleRate', 'bitrate']) {
-    const v = Number(patch[key])
-    if (Number.isFinite(v)) merged[key] = v
-  }
-  if (typeof merged._comment !== 'string') {
-    merged._comment = 'MiniMax 音乐生成（api.minimax.cn/v1/music_generation）。URL 固定，只需填 apiKey 与 model。'
-  }
-  writeJson(file, merged)
-  return merged
-}
-
 /**
- * Resolve effective music config:
- *   env MINIMAX_API_KEY / MINIMAX_MUSIC_MODEL  >  music.json  >  inline options.
- * The endpoint is fixed, so only the key and model are configurable.
+ * BGM prompt presets: when the user asks for background music, we generate a
+ * ready-to-paste prompt for the MiniMax Audio web page (the API rejects new
+ * users with HTTP 410, so the web page is the practical path).
  */
-export function resolveMusicConfig(options = {}) {
-  const dshHome = options.dshHome
-  const fromFile = readJson(musicConfigPath(dshHome)) ?? {}
-  const pick = (...vals) => vals.find((v) => typeof v === 'string' && v.length > 0)
-  const num = (...vals) => vals.find((v) => typeof v === 'number' && Number.isFinite(v))
-  return {
-    apiKey: pick(process.env.MINIMAX_API_KEY, fromFile.apiKey, options.apiKey) ?? '',
-    model: pick(process.env.MINIMAX_MUSIC_MODEL, fromFile.model, options.model) ?? 'music-3.0',
-    format: pick(fromFile.format, options.format) ?? 'mp3',
-    sampleRate: num(options.sampleRate, fromFile.sampleRate) ?? 44100,
-    bitrate: num(options.bitrate, fromFile.bitrate) ?? 256000,
-    timeoutMs: num(options.timeoutMs, fromFile.timeoutMs) ?? 180000,
-  }
+export function bgmPromptFor(desc) {
+  const d = String(desc ?? '').trim()
+  if (d.length === 0) return ''
+  return [
+    d,
+    '纯音乐，无人声',
+    '结构完整，可循环',
+    '44.1kHz 高音质',
+  ].join('，')
 }
 
 /**

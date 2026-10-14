@@ -203,78 +203,53 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function MusicConfig() {
-      const [form, setForm] = useState(null) // null | 'error' | {apiKey,model,format,endpoint,models}
-      const [status, setStatus] = useState('')
-      const [err, setErr] = useState('')
-
-      const load = useCallback(() => {
-        fetch(`${API_BASE}/music`, { headers: { accept: 'application/json' } })
-          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-          .then((j) => setForm({ apiKey: j.apiKey || '', model: j.model || 'music-3.0', format: j.format || 'mp3', endpoint: j.endpoint || '', models: Array.isArray(j.models) ? j.models : [] }))
-          .catch(() => setForm('error'))
+    function BgmGuide() {
+      const WEB = 'https://www.minimax.io/audio'
+      const [desc, setDesc] = useState('')
+      const [copied, setCopied] = useState('')
+      const prompt = useMemo(() => {
+        const d = desc.trim()
+        return d.length === 0 ? '' : [d, '纯音乐，无人声', '结构完整，可循环', '44.1kHz 高音质'].join('，')
+      }, [desc])
+      const onCopy = useCallback(() => {
+        const ok = copyText(prompt)
+        setCopied(ok ? 'ok' : 'fail')
+        try { setTimeout(() => setCopied(''), 2000) } catch (_e) { /* no-op */ }
+      }, [prompt])
+      const onOpen = useCallback(() => {
+        try { window.open(WEB, '_blank', 'noopener') } catch (_e) { /* no-op */ }
       }, [])
-      useEffect(() => { load() }, [load])
 
-      const set = useCallback((k, v) => setForm((f) => (f && f !== 'error' ? { ...f, [k]: v } : f)), [])
-      const save = useCallback(() => {
-        if (!form || form === 'error') return
-        setStatus('saving'); setErr('')
-        fetch(`${API_BASE}/music`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ apiKey: form.apiKey, model: form.model, format: form.format }) })
-          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-          .then(() => { setStatus('saved'); try { setTimeout(() => setStatus(''), 2500) } catch (_e) { /* no-op */ } })
-          .catch(() => { setStatus(''); setErr('保存失败：宿主 web 服务可能未就绪。') })
-      }, [form])
-
-      if (form === null) {
-        return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'MiniMax 音乐生成'),
-          h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
-      }
-      if (form === 'error') {
-        return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'MiniMax 音乐生成'),
-          h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
-            '没连上宿主服务，配置暂不可用。可改用命令 /taptap-music。'))
-      }
-      const keySet = form.apiKey.trim().length > 0
       return h('div', { style: S.card },
-        h('div', { style: S.rowBetween },
-          h('div', null,
-            h('h2', { style: S.cardTitle }, 'MiniMax 音乐生成'),
-            h('p', { style: { ...S.sub, marginTop: 2 } },
-              '端点固定，只填 Key 与模型。用于 CC0 库没有的完整 BGM。')),
-          h('span', { style: keySet ? S.pill : S.offPill }, keySet ? '已配置' : '未配置'),
-        ),
-        form.endpoint ? h('p', { style: S.hint }, '端点：', h('span', { style: S.codeInline }, form.endpoint)) : null,
-        h(LabeledInput, {
-          label: 'API Key', value: form.apiKey, onChange: (v) => set('apiKey', v), secret: true,
-          placeholder: 'MiniMax 接口密钥（M Plan / 付费）', hint: '仅存本机 music.json，不进工作区。',
-        }),
+        h('h2', { style: S.cardTitle }, '完整 BGM（网页生成 + 自动导入）'),
+        h('p', { style: { ...S.sub, marginTop: 0 } },
+          'MiniMax 音乐 API 对新用户返回 410（实测），完整 BGM 只能走网页版手动生成。',
+          '插件负责前后两段：生成提示词 + 打开网页；下载后自动装进项目。'),
         h('div', { style: S.row },
-          h('label', { style: S.label }, 'Model'),
-          form.models.length > 0
-            ? h('select', { style: S.input, value: form.model, onChange: (e) => set('model', e.target.value) },
-              form.models.map((m) => h('option', { key: m, value: m }, m)))
-            : h('input', { style: S.input, value: form.model, onChange: (e) => set('model', e.target.value), spellCheck: false }),
-          h('label', { style: { ...S.label, marginLeft: 8 } }, '格式'),
-          h('select', { style: { ...S.input, maxWidth: 90 }, value: form.format, onChange: (e) => set('format', e.target.value) },
-            ['mp3', 'wav'].map((f) => h('option', { key: f, value: f }, f))),
+          h('label', { style: S.label }, '风格 / 情绪描述'),
+          h('input', {
+            style: S.input, value: desc, placeholder: '如：史诗管弦战斗音乐，紧张激烈',
+            onChange: (e) => setDesc(e.target.value), spellCheck: false,
+          }),
         ),
-        h('div', { style: S.bar },
-          h('button', { style: S.btn, disabled: status === 'saving', onClick: save }, status === 'saving' ? '保存中…' : '保存'),
-          status === 'saved' ? h('span', { style: S.ok }, '已保存 ✓') : null,
-          err ? h('span', { style: S.warn }, err) : null,
-        ),
-        h('p', { style: { ...S.hint, marginTop: 8 } },
-          '生成：', h('span', { style: S.codeInline }, '/taptap-music 史诗管弦战斗 --out D:\\tmp\\bgm.mp3 --instrumental'),
-          '。用的是你的 MiniMax 订阅，不消耗 Maker 额度。'),
+        prompt.length > 0
+          ? h('div', { style: S.outputWrap },
+            h('label', { style: S.label }, '↓ 可直接粘贴到网页的提示词'),
+            h('textarea', { style: { ...S.textarea, minHeight: 70 }, readOnly: true, value: prompt }),
+            h('div', { style: S.btnRow },
+              h('button', { style: S.btn, onClick: onCopy }, '复制提示词'),
+              h('button', { style: S.ghostBtn, onClick: onOpen }, '打开生成网页'),
+              copied === 'ok' ? h('span', { style: S.ok }, '已复制') : null,
+              copied === 'fail' ? h('span', { style: S.warn }, '复制失败') : null,
+            ))
+          : null,
         h('div', { style: { ...S.warnBox, borderColor: 'var(--dsh-border, rgba(128,128,128,0.4))', background: 'rgba(128,128,128,0.08)' } },
-          h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '厂商公告'),
+          h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '为什么不能全自动'),
           h('p', { style: { ...S.hint, margin: 0 } },
-            'M Plan / 付费用户可正常使用 music-3.0 / music-2.6 / music-cover（RPM 120）。',
-            '公告仅涉及两点：自 2026-08-20 起付费音乐接口不再面向「新用户」开放；三个 *-free 限免模型停服。',
-            '两者都不影响已有的 M Plan / 付费用户。若调用仍失败，错误原文会如实返回。')),
+            '该网页是需登录的单页应用，没有公开 API，脚本无法代你生成/下载（实测 /api/music 返回的是 HTML 页面）。',
+            '所以「点生成 + 下载」这一段必须你亲手做；下载完之后，跟我说一句「把刚下载的 BGM 装进项目」即可全自动导入。')),
+        h('p', { style: { ...S.hint, marginTop: 8 } },
+          '也可用命令：', h('span', { style: S.codeInline }, '/taptap-bgm 史诗管弦战斗音乐')),
       )
     }
 
@@ -587,7 +562,7 @@ window.__ModuleLoader__.load({
           ),
         ),
 
-        h(MusicConfig),
+        h(BgmGuide),
 
         h(AudioLibrary),
 
