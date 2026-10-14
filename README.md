@@ -84,7 +84,7 @@ node <plugin-dir>/src/taptap-skills-update.mjs
 使用前请读完这几条，我们不假装它们不存在：
 
 1. **没有可无缝循环的完整 BGM**。Kenney 音乐包只有 1~3 秒短 jingle。完整 BGM 要走你的 MiniMax Key。
-2. **MiniMax 音乐接口可能对你不可用**。厂商文档公示：自 2026-08-20 起付费音乐接口不再面向新用户开放，三个 `*-free` 模型已停服。历史付费 / M Plan 用户可继续用。失败时错误原文会如实返回，不会被吞掉。
+2. **MiniMax 音乐：M Plan / 付费用户可正常使用**（`music-3.0` / `music-2.6` / `music-cover`，RPM 120）。厂商公告只涉及两点——自 2026-08-20 起付费音乐接口不再面向**新用户**开放，以及三个 `*-free` 限免模型停服；**都不影响已有的 M Plan / 付费用户**。失败时错误原文会如实返回，不会被吞掉。
 3. **効果音ラボ 的 robots.txt 禁止 AI 爬虫抓 mp3**。它的授权允许你把音效嵌进有偿游戏，但本插件只在你要装**某一个**文件时才下载它，串行 + 限速 + 遇错退避，**绝不整站抓取**。
 4. **设置页的保存依赖宿主 web 服务**（`webServer`）。若你的 DSH 组合没启用，卡片会提示改用命令，不会白屏。
 5. **生图 / 音乐用的是你自己的 Key**，账单在你那边；本插件不代付、不代理、不上传你的 Key 到任何第三方。
@@ -120,8 +120,9 @@ ffmpeg-based audio conversion, and checkbox skill management — all configurabl
 from the Settings page without hand-editing JSON.
 
 See the tables above for verified licenses, and read the **honest limitations**:
-there is **no seamless looping BGM** in the CC0 library, the MiniMax music
-endpoint may be unavailable to new users per vendor notice, and 効果音ラボ's
+there is **no seamless looping BGM** in the CC0 library (use your MiniMax key for
+full tracks — M Plan / paid users are unaffected by the vendor's notice, which
+only concerns *new* users and the discontinued `*-free` models), and 効果音ラボ's
 robots.txt restricts AI bulk fetching (we fetch one file per install,
 sequentially, and never crawl).
 

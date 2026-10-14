@@ -272,8 +272,9 @@ window.__ModuleLoader__.load({
         h('div', { style: { ...S.warnBox, borderColor: 'var(--dsh-border, rgba(128,128,128,0.4))', background: 'rgba(128,128,128,0.08)' } },
           h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '厂商公告'),
           h('p', { style: { ...S.hint, margin: 0 } },
-            'MiniMax 文档公示：自 2026-08-20 起付费音乐接口不再面向新用户开放，music-*-free 三个限免模型已停服；',
-            '已有 M Plan / 付费用户可继续用。调用失败时错误原文会如实返回。')),
+            'M Plan / 付费用户可正常使用 music-3.0 / music-2.6 / music-cover（RPM 120）。',
+            '公告仅涉及两点：自 2026-08-20 起付费音乐接口不再面向「新用户」开放；三个 *-free 限免模型停服。',
+            '两者都不影响已有的 M Plan / 付费用户。若调用仍失败，错误原文会如实返回。')),
       )
     }
 

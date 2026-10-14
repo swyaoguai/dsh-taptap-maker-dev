@@ -35,14 +35,19 @@ import { resolveMusicConfig, maskSecret, musicConfigPath, resolveDshHome } from 
 /** Fixed endpoint — verified from vendor docs. */
 export const MINIMAX_MUSIC_URL = 'https://api.minimax.cn/v1/music_generation'
 
-/** Model ids as documented by MiniMax. Verified from the live docs page. */
+/**
+ * Model ids as documented by MiniMax (verified from the live docs page).
+ * M Plan / paid users can use music-3.0 / music-2.6 / music-cover (RPM 120).
+ * The *-free variants were DISCONTINUED per the vendor notice; they are listed
+ * only so a stale config explains itself instead of failing cryptically.
+ */
 export const MUSIC_MODELS = [
-  { id: 'music-3.0', label: 'music-3.0（推荐 · 文本生成音乐，M Plan/付费，RPM 120）' },
-  { id: 'music-2.6', label: 'music-2.6（上一代，M Plan/付费，RPM 120）' },
-  { id: 'music-cover', label: 'music-cover（基于参考音频翻唱，M Plan/付费，RPM 120）' },
-  { id: 'music-3.0-free', label: 'music-3.0-free（限免版 · 文档标注已停服）' },
-  { id: 'music-2.6-free', label: 'music-2.6-free（限免版 · 文档标注已停服）' },
-  { id: 'music-cover-free', label: 'music-cover-free（限免版 · 文档标注已停服）' },
+  { id: 'music-3.0', label: 'music-3.0（推荐 · 文本生成音乐，M Plan/付费，RPM 120）', available: true },
+  { id: 'music-2.6', label: 'music-2.6（上一代，M Plan/付费，RPM 120）', available: true },
+  { id: 'music-cover', label: 'music-cover（基于参考音频翻唱，M Plan/付费，RPM 120）', available: true },
+  { id: 'music-3.0-free', label: 'music-3.0-free（限免版 · 厂商公告已停服）', available: false },
+  { id: 'music-2.6-free', label: 'music-2.6-free（限免版 · 厂商公告已停服）', available: false },
+  { id: 'music-cover-free', label: 'music-cover-free（限免版 · 厂商公告已停服）', available: false },
 ]
 
 function parseArgs(argv) {
