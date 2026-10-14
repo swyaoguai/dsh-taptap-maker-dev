@@ -195,7 +195,19 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
+      // Killing the python process alone is NOT enough: playwright keeps its own
+      // driver node plus the whole Chromium tree alive, and those hold the
+      // profile lock forever (that was the "卡住" the user hit). Kill the tree,
+      // then release the profile so the next run can start.
       try { child.kill('SIGKILL') } catch { /* ignore */ }
+      try {
+        spawnSync('powershell', ['-NoProfile', '-Command',
+          `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
+          `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+        ], { stdio: 'ignore', timeout: 20000 })
+      } catch { /* best effort */ }
+      releaseProfile(prof)
+      fs.rmSync(tmp, { force: true })
       resolve({ ok: false, err: `timed out after ${Math.round(timeoutMs / 1000)}s` })
     }, timeoutMs)
     child.stdout.on('data', (d) => { out += d.toString() })

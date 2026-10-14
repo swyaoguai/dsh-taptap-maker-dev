@@ -206,9 +206,27 @@ async function main() {
     return
   }
 
+  // `sources` takes no query, so it MUST be handled before the "query is
+  // required" guard below — otherwise it was unreachable and printed usage.
+  if (cmd === 'sources' || cmd === '源' || cmd === '清单') {
+    process.stdout.write(`${JSON.stringify({
+      sources: [
+        { id: 'kenney', title: 'Kenney（本地 CC0）', license: 'CC0 — 可商用、可修改、无需署名', kind: 'sfx+bgm', note: '已下载到本地缓存，706 个音频' },
+        ...SOURCES.map((s) => ({
+          id: s.id, title: s.title, license: s.license, kind: s.kind, home: s.home, note: s.note,
+        })),
+      ],
+      excluded: [
+        { id: 'freesound', reason: '需要用户自己的 API Key（裸请求实测 401）' },
+        { id: 'opengameart', reason: '授权混杂，含 CC-BY-NC 等禁止商用的协议' },
+      ],
+    }, null, 2)}\n`)
+    return
+  }
+
   const query = args._.slice(1).join(' ')
   if (query.length === 0) {
-    process.stderr.write('usage: taptap-audio search "<描述>" | add "<描述>" --project <dir> [--out name.wav] | sync\n')
+    process.stderr.write('usage: taptap-audio search "<描述>" | add "<描述>" --project <dir> [--out name.wav] | sources | sync\n')
     process.exitCode = 2
     return
   }
@@ -233,22 +251,6 @@ async function main() {
       externalCount: result.externalCount ?? 0,
     }, null, 2)}\n`)
     if (result.matches.length === 0) process.exitCode = 1
-    return
-  }
-
-  if (cmd === 'sources' || cmd === '源' || cmd === '清单') {
-    process.stdout.write(`${JSON.stringify({
-      sources: [
-        { id: 'kenney', title: 'Kenney（本地 CC0）', license: 'CC0 — 可商用、可修改、无需署名', kind: 'sfx+bgm', note: '已下载到本地缓存，706 个音频' },
-        ...SOURCES.map((s) => ({
-          id: s.id, title: s.title, license: s.license, kind: s.kind, home: s.home, note: s.note,
-        })),
-      ],
-      excluded: [
-        { id: 'freesound', reason: '需要用户自己的 API Key（裸请求实测 401）' },
-        { id: 'opengameart', reason: '授权混杂，含 CC-BY-NC 等禁止商用的协议' },
-      ],
-    }, null, 2)}\n`)
     return
   }
 

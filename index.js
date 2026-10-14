@@ -29,14 +29,13 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync, spawn } from 'node:child_process'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { spawnSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
-import { SOURCES } from './src/audio-sources.mjs'
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, bgmPromptFor, buildBgmPrompt, suggestBgmForProject, BGM_SCENES } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -431,58 +430,11 @@ export function apply(ctx, config = {}) {
             file: imageConfigPath(home),
           })
         }
-        if (req.method === 'GET' && sub === 'bgm-scenes') {
-          // Suggest Chinese BGM prompts derived from the actual project, so the
-          // user gets project-relevant prompts instead of generic English ones.
-          let scenes = []
-          try {
-            scenes = suggestBgmForProject(process.cwd())
-            if (scenes.length === 0) {
-              scenes = BGM_SCENES.map((s) => ({
-                id: s.id, scene: s.name, hits: 0,
-                prompt: [s.prompt, '纯音乐，无人声', '结构完整可无缝循环'].join('，'),
-              }))
-            }
-          } catch {
-            scenes = []
-          }
-          return sendJson(res, 200, { ok: true, scenes })
-        }
-        if (req.method === 'GET' && sub === 'bgm') {
-          const st = bgmStatus(home)
-          const site = st.site ?? (await bgmDetectSite())
-          if (!st.site) bgmSaveSite(home, site)
-          return sendJson(res, 200, { ok: true, ...st, site })
-        }
-        if (req.method === 'POST' && sub === 'bgm-login') {
-          // Launch the interactive browser DETACHED and return immediately.
-          // spawnSync here would block the whole DSH event loop for up to
-          // 330s, which froze the settings page ("flash and gone").
-          const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
-          try {
-            const site = (bgmStatus(home).site) ?? (await bgmDetectSite())
-            bgmSaveSite(home, site)
-            const child = spawn(process.execPath, [cli, 'login', '--waitMs', '300000'],
-              { detached: true, stdio: 'ignore' })
-            child.unref()
-            return sendJson(res, 200, { ok: true, started: true, site, ...bgmStatus(home) })
-          } catch (error) {
-            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
-          }
-        }
-        if (req.method === 'GET' && sub === 'audio-sources') {
-          return sendJson(res, 200, {
-            ok: true,
-            sources: [
-              { id: 'kenney', title: 'Kenney（本地 CC0）', license: 'CC0 — 可商用、可修改、无需署名', note: '本地缓存，706 个音频' },
-              ...SOURCES.map((s) => ({ id: s.id, title: s.title, license: s.license, home: s.home, note: s.note })),
-            ],
-            excluded: [
-              { id: 'freesound', reason: '需要用户自己的 API Key（实测裸请求 401）' },
-              { id: 'opengameart', reason: '授权混杂，含禁止商用的 CC-BY-NC' },
-            ],
-          })
-        }
+        // NOTE: bgm-scenes / bgm / bgm-login / audio-search / audio-sources were
+        // removed on purpose. The settings page no longer offers BGM or audio
+        // search (that is usage, not configuration — it belongs in the chat), so
+        // those routes had no caller. BGM now runs through /taptap-bgm and the
+        // audio library through /taptap-audio.
         if (req.method === 'GET' && sub === 'audio') {
           const ready = fs.existsSync(path.join(audioCacheDir, 'index.json'))
           return sendJson(res, 200, {
@@ -491,25 +443,6 @@ export function apply(ctx, config = {}) {
             ready,
             count: ready ? (readJson(path.join(audioCacheDir, 'index.json'))?.items?.length ?? 0) : 0,
           })
-        }
-        if (req.method === 'POST' && sub === 'audio-search') {
-          const body = await readBody(req)
-          let parsed
-          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
-          const limit = Number(parsed.limit ?? 8)
-          try {
-            await ensureAudio()
-            const result = await searchAudio(audioCacheDir, String(parsed.query ?? ''), {
-              limit: Number.isFinite(limit) ? Math.min(Math.max(limit, 1), 20) : 8,
-            })
-            return sendJson(res, 200, {
-              ok: true,
-              matches: result.matches.map((m) => ({ pack: m.pack, file: m.file, kb: m.kb, kind: m.kind })),
-              note: result.note, total: result.total,
-            })
-          } catch (error) {
-            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
-          }
         }
         if (req.method === 'POST' && sub === 'audio-sync') {
           try {
@@ -680,9 +613,14 @@ export function apply(ctx, config = {}) {
         const m = /^(add|install|添加|安装)\s+(.+)$/.exec(raw)
         if (m !== null) {
           const rest = m[2]
-          const pm = /--project\s+(\S+)/.exec(rest)
-          const om = /--out\s+(\S+)/.exec(rest)
-          const desc = rest.replace(/--project\s+\S+/, '').replace(/--out\s+\S+/, '').trim()
+          // Accept quoted values so paths containing spaces work (the import
+          // branch already did; this one silently truncated them).
+          const pm = /--project\s+("[^"]+"|'[^']+'|\S+)/.exec(rest)
+          const om = /--out\s+("[^"]+"|'[^']+'|\S+)/.exec(rest)
+          const desc = rest
+            .replace(/--project\s+("[^"]+"|'[^']+'|\S+)/, '')
+            .replace(/--out\s+("[^"]+"|'[^']+'|\S+)/, '')
+            .trim()
           if (pm === null) {
             return { kind: 'error', text: '用法：/taptap-audio add "<描述>" --project <Maker项目目录> [--out 名字.wav]' }
           }
@@ -801,16 +739,30 @@ export function apply(ctx, config = {}) {
           }
           const outPath = path.resolve(om[1].replace(/^["']|["']$/g, ''))
           try {
-            const out = spawnSync(process.execPath, [
-              cli, '--in', inPath, '--out', outPath,
-              ...(to !== null ? ['--to', to[1]] : []),
-              ...(/\s--mono/.test(raw) ? ['--mono'] : []),
-              ...((/--rate\s+(\d+)/.exec(raw) ?? [])[1] ? ['--rate', (/--rate\s+(\d+)/.exec(raw) ?? [])[1]] : []),
-              ...(/\s--normalize/.test(raw) ? ['--normalize'] : []),
-              ...(/\s--trim/.test(raw) ? ['--trim'] : []),
-              ...((/--bitrate\s+(\S+)/.exec(raw) ?? [])[1] ? ['--bitrate', (/--bitrate\s+(\S+)/.exec(raw) ?? [])[1]] : []),
-              ...((/--loop\s+(\d+)/.exec(raw) ?? [])[1] ? ['--loop', (/--loop\s+(\d+)/.exec(raw) ?? [])[1]] : []),
-            ], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
+            // Flag matching must not require a leading space: "--mono" may be the
+            // first flag the user types (an earlier /\s--mono/ pattern silently
+            // dropped it in that case).
+            const hasFlag = (name) => new RegExp(`(^|\\s)--${name}(\\s|$)`).test(raw)
+            const flagVal = (name) => {
+              const m = new RegExp(`(?:^|\\s)--${name}\\s+("[^"]+"|\\S+)`).exec(raw)
+              return m === null ? null : m[1].replace(/^["']|["']$/g, '')
+            }
+            const spawnArgs = [cli, '--in', inPath, '--out', outPath]
+            if (to !== null) spawnArgs.push('--to', to[1])
+            if (hasFlag('mono')) spawnArgs.push('--mono')
+            const rate = flagVal('rate')
+            if (rate !== null) spawnArgs.push('--rate', rate)
+            if (hasFlag('normalize')) spawnArgs.push('--normalize')
+            if (hasFlag('trim')) spawnArgs.push('--trim')
+            const bitrate = flagVal('bitrate')
+            if (bitrate !== null) spawnArgs.push('--bitrate', bitrate)
+            const loop = flagVal('loop')
+            if (loop !== null) spawnArgs.push('--loop', loop)
+            const fadeOut = flagVal('fade-out')
+            if (fadeOut !== null) spawnArgs.push('--fade-out', fadeOut)
+            const fadeIn = flagVal('fade-in')
+            if (fadeIn !== null) spawnArgs.push('--fade-in', fadeIn)
+            const out = spawnSync(process.execPath, spawnArgs, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
             if (out.status !== 0 && !out.stdout) {
               return { kind: 'error', text: `转换失败：${(out.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}\n\n${usage}` }
             }
@@ -936,13 +888,25 @@ export function apply(ctx, config = {}) {
         // Hard cap the whole flow. Without this a stuck generation kept the
         // browser + python + node alive indefinitely and the settings page
         // showed 「登录中…」/nothing forever (we hit exactly that).
+        // NOTE: Promise.race alone does NOT stop the loser — on timeout we must
+        // actively release the browser profile, or the Chromium tree survives
+        // and blocks every later run.
         const BGM_TIMEOUT_MS = 12 * 60 * 1000
         const r = await Promise.race([
           bgmGenerate(home, prompt, { site: st.site ?? undefined, waitMs: 8 * 60 * 1000 }),
-          new Promise((resolve) => setTimeout(
-            () => resolve({ ok: false, error: `生成超时（${BGM_TIMEOUT_MS / 60000} 分钟）。已放弃等待，可稍后重试或在网页里手动完成。` }),
-            BGM_TIMEOUT_MS,
-          )),
+          new Promise((resolve) => setTimeout(() => {
+            try {
+              const prof = profileDir(home)
+              spawnSync('powershell', ['-NoProfile', '-Command',
+                `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
+                `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+              ], { stdio: 'ignore', timeout: 20000 })
+              for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
+                try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
+              }
+            } catch { /* best effort */ }
+            resolve({ ok: false, error: `生成超时（${BGM_TIMEOUT_MS / 60000} 分钟）。已停止浏览器，可稍后重试或在网页里手动完成。` })
+          }, BGM_TIMEOUT_MS)),
         ])
         if (!r.ok || r.error) {
           return { kind: 'error', text: `生成失败：${r.error ?? JSON.stringify(r.steps ?? {})}` }
