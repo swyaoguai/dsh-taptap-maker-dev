@@ -205,11 +205,8 @@ window.__ModuleLoader__.load({
 
     function AudioLibrary() {
       const [info, setInfo] = useState(null) // null | 'error' | {ready,count,cacheDir}
-      const [query, setQuery] = useState('')
-      const [results, setResults] = useState(null)
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
-      const [note, setNote] = useState('')
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/audio`, { headers: { accept: 'application/json' } })
@@ -218,23 +215,6 @@ window.__ModuleLoader__.load({
           .catch(() => setInfo('error'))
       }, [])
       useEffect(() => { load() }, [load])
-
-      const search = useCallback(() => {
-        const q = query.trim()
-        if (q.length === 0) return
-        setBusy('search'); setErr(''); setNote(''); setResults(null)
-        fetch(`${API_BASE}/audio-search`, {
-          method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ query: q, limit: 8 }),
-        })
-          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
-          .then(({ ok, j }) => {
-            if (ok && j.ok) { setResults(j.matches || []); setNote(j.note || '') }
-            else { setErr(j.error || '搜索失败'); setResults([]) }
-          })
-          .catch(() => { setErr('请求失败：宿主服务未就绪'); setResults([]) })
-          .finally(() => setBusy(''))
-      }, [query])
 
       const sync = useCallback(() => {
         setBusy('sync'); setErr('')
@@ -245,47 +225,34 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(''))
       }, [load])
 
-      const ready = info !== null && info !== 'error' && info.ready === true
-      const count = info !== null && info !== 'error' ? info.count : 0
+      if (info === null) {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, '音效素材库'),
+          h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
+      }
+      const ready = info !== 'error' && info.ready === true
+      const count = info !== 'error' ? info.count : 0
 
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
-            h('h2', { style: S.cardTitle }, 'CC0 音效 / BGM 库'),
+            h('h2', { style: S.cardTitle }, '音效素材库'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
-              'Kenney 音频包，CC0 授权：可商用、可修改、无需署名。',
-              info === 'error' ? '' : (ready ? ` 已就绪 ${count} 个音频。` : ' 尚未下载，首次搜索时自动获取（约 7MB）。'))),
+              'Kenney 等 CC0 音源，可商用、可修改、无需署名。',
+              info === 'error' ? '' : (ready ? ` 本地已有 ${count} 个音频。` : ' 尚未下载，首次使用自动获取（约 7MB）。'))),
           h('span', { style: ready ? S.pill : S.offPill }, ready ? '已就绪' : '未下载'),
         ),
         info === 'error'
           ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
-            '没连上宿主服务。可用命令：', h('span', { style: S.codeInline }, '/taptap-audio 金币音效'), '。')
+            '没连上宿主服务。')
           : null,
         h('div', { style: S.bar },
-          h('input', {
-            style: S.search, value: query, placeholder: '试试：金币音效 / 点击按钮 / 胜利 / 开门 / 背景音乐…',
-            onChange: (e) => setQuery(e.target.value), spellCheck: false,
-            onKeyDown: (e) => { if (e.key === 'Enter') search() },
-          }),
-          h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: search }, busy === 'search' ? '搜索中…' : '搜索'),
-          h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: sync }, busy === 'sync' ? '下载中…' : '更新库'),
+          h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: sync },
+            busy === 'sync' ? '下载中…' : '更新素材库'),
+          err ? h('span', { style: S.warn }, err) : null,
         ),
-        err ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, err) : null,
-        note ? h('div', { style: { ...S.warnBox, borderColor: 'var(--dsh-border, rgba(128,128,128,0.4))', background: 'rgba(128,128,128,0.08)' } },
-          h('span', { style: { ...S.warnTitle, color: 'inherit' } }, '说明'),
-          h('p', { style: { ...S.hint, margin: 0 } }, note)) : null,
-        results !== null
-          ? h('div', { style: { ...S.scrollBox, maxHeight: 240 } },
-            results.length === 0
-              ? h('p', { style: { ...S.hint, padding: 8 } }, '没有匹配，换个词试试。')
-              : results.map((m, i) => h('div', { key: `${m.pack}/${m.file}`, style: S.skillRow },
-                h('div', { style: S.skillMeta },
-                  h('span', { style: S.skillName }, `${i + 1}. ${m.file}`),
-                  h('span', { style: S.skillDesc }, `${m.pack} · ${m.kb}KB · ${m.kind}`)))))
-          : null,
         h('p', { style: { ...S.hint, marginTop: 8 } },
-          '安装到项目：对话里说「加个金币音效」，或直接 ',
-          h('span', { style: S.codeInline }, '/taptap-audio add "金币音效" --project <项目目录>'), '。'),
+          '搜索与安装都在对话里做：说「加个金币音效」即可。'),
       )
     }
 
