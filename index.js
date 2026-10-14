@@ -887,7 +887,17 @@ export function apply(ctx, config = {}) {
         }
 
         const prompt = bgmPromptFor(desc)
-        const r = await bgmGenerate(home, prompt, { site: st.site ?? undefined })
+        // Hard cap the whole flow. Without this a stuck generation kept the
+        // browser + python + node alive indefinitely and the settings page
+        // showed 「登录中…」/nothing forever (we hit exactly that).
+        const BGM_TIMEOUT_MS = 12 * 60 * 1000
+        const r = await Promise.race([
+          bgmGenerate(home, prompt, { site: st.site ?? undefined, waitMs: 8 * 60 * 1000 }),
+          new Promise((resolve) => setTimeout(
+            () => resolve({ ok: false, error: `生成超时（${BGM_TIMEOUT_MS / 60000} 分钟）。已放弃等待，可稍后重试或在网页里手动完成。` }),
+            BGM_TIMEOUT_MS,
+          )),
+        ])
         if (!r.ok || r.error) {
           return { kind: 'error', text: `生成失败：${r.error ?? JSON.stringify(r.steps ?? {})}` }
         }

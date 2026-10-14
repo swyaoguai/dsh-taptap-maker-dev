@@ -29,7 +29,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import os from 'node:os'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { resolveDshHome, dataDir } from './paths.js'
@@ -116,18 +116,36 @@ const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").r
  * line references OUR profile dir, so the user's own Chrome is never harmed.
  */
 function releaseProfile(prof) {
-  try {
-    const r = spawnSync('powershell', ['-NoProfile', '-Command',
-      `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-      `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
-      `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
-    ], { stdio: 'ignore', timeout: 20000 })
-    if (r.status !== 0) { /* best effort */ }
-  } catch { /* best effort */ }
-  for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile',
-    path.join('Default', 'LOCK')]) {
-    try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
+  // Retry a few times: Chromium spawns helper processes that outlive the
+  // parent, and a still-exiting tree makes the next launch fail with
+  // exitCode=21. Two passes with a pause is enough in practice.
+  for (let pass = 0; pass < 3; pass += 1) {
+    try {
+      spawnSync('powershell', ['-NoProfile', '-Command',
+        `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+        `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
+        `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+      ], { stdio: 'ignore', timeout: 20000 })
+    } catch { /* best effort */ }
+    for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile',
+      path.join('Default', 'LOCK')]) {
+      try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
+    }
+    // Give the OS a moment to reap the processes before checking again.
+    try {
+      spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},400)'], { stdio: 'ignore', timeout: 3000 })
+    } catch { /* ignore */ }
+    let remaining = 0
+    try {
+      const probe = spawnSync('powershell', ['-NoProfile', '-Command',
+        `@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
+        `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' }).Count`,
+      ], { encoding: 'utf8', timeout: 15000 })
+      remaining = Number.parseInt((probe.stdout ?? '0').trim(), 10) || 0
+    } catch { remaining = 0 }
+    if (remaining === 0) return true
   }
+  return false
 }
 
 /**
@@ -167,16 +185,45 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
 `
   const tmp = path.join(os.tmpdir(), `bgmweb-${Date.now()}.py`)
   fs.writeFileSync(tmp, script, 'utf8')
-  const r = spawnSync(py, [tmp], { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 16 * 1024 * 1024 })
-  fs.rmSync(tmp, { force: true })
-  const out = `${r.stdout ?? ''}${r.stderr ?? ''}`
-  const marker = out.indexOf('__RESULT__')
-  if (marker < 0) return { ok: false, err: out.trim().split('\n').slice(-3).join(' | ') || 'no result' }
-  try {
-    return { ok: true, ...JSON.parse(out.slice(marker + '__RESULT__'.length).split('\n')[0]) }
-  } catch {
-    return { ok: false, err: 'unparseable result: ' + out.slice(marker, marker + 300) }
-  }
+  // MUST be async: spawnSync blocks the whole Node event loop, so the DSH host
+  // stopped answering while the browser stayed open — that was the "卡住" the
+  // user saw. spawn() streams output and lets the host keep serving requests.
+  return new Promise((resolve) => {
+    let out = ''
+    let settled = false
+    const child = spawn(py, [tmp], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill('SIGKILL') } catch { /* ignore */ }
+      resolve({ ok: false, err: `timed out after ${Math.round(timeoutMs / 1000)}s` })
+    }, timeoutMs)
+    child.stdout.on('data', (d) => { out += d.toString() })
+    child.stderr.on('data', (d) => { out += d.toString() })
+    child.on('error', (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fs.rmSync(tmp, { force: true })
+      resolve({ ok: false, err: error?.message ?? String(error) })
+    })
+    child.on('close', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      fs.rmSync(tmp, { force: true })
+      const marker = out.indexOf('__RESULT__')
+      if (marker < 0) {
+        resolve({ ok: false, err: out.trim().split('\n').slice(-3).join(' | ') || 'no result' })
+        return
+      }
+      try {
+        resolve({ ok: true, ...JSON.parse(out.slice(marker + '__RESULT__'.length).split('\n')[0]) })
+      } catch {
+        resolve({ ok: false, err: 'unparseable result: ' + out.slice(marker, marker + 300) })
+      }
+    })
+  })
 }
 
 /** `login`: open the page and wait until the user is actually logged in. */
@@ -320,11 +367,38 @@ export function status(dshHome) {
 function findAuthCookie(cookieFile) {
   if (!cookieFile) return null
   const AUTH_NAMES = ['_token', 'token', 'session', 'access_token', 'Authorization']
+  const tmp = path.join(os.tmpdir(), `ckprobe-${process.pid}-${Date.now()}.db`)
   try {
-    // node:sqlite is experimental; require() keeps it out of the ESM import graph.
+    // Chromium opens the cookie DB with an exclusive lock, so a plain
+    // copyFileSync/readFileSync throws EBUSY whenever the browser is running —
+    // which silently sent us to the fallback and made status show "(unknown)".
+    // Try a few strategies, cheapest first.
+    let copied = false
+    // 1) Node read (works when the browser is closed)
+    try {
+      fs.writeFileSync(tmp, fs.readFileSync(cookieFile))
+      copied = true
+    } catch { copied = false }
+    // 2) PowerShell Copy-Item with -Force (often succeeds via a different share mode)
+    if (!copied) {
+      try {
+        const r = spawnSync('powershell', ['-NoProfile', '-Command',
+          `Copy-Item -LiteralPath '${cookieFile}' -Destination '${tmp}' -Force -ErrorAction Stop`,
+        ], { encoding: 'utf8', timeout: 15000 })
+        copied = r.status === 0 && fs.existsSync(tmp)
+      } catch { copied = false }
+    }
+    // 3) esentutl (VSS-free copy that tolerates open files)
+    if (!copied) {
+      try {
+        const r = spawnSync('esentutl', ['/y', cookieFile, '/d', tmp, '/o'],
+          { encoding: 'utf8', timeout: 20000 })
+        copied = r.status === 0 && fs.existsSync(tmp)
+      } catch { copied = false }
+    }
+    if (!copied) return null
+
     const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
-    const tmp = path.join(os.tmpdir(), `ckprobe-${process.pid}-${Date.now()}.db`)
-    fs.copyFileSync(cookieFile, tmp)
     let names = []
     try {
       const db = new DatabaseSync(tmp)
@@ -335,13 +409,8 @@ function findAuthCookie(cookieFile) {
     }
     return names.find((n) => AUTH_NAMES.includes(n)) ?? null
   } catch {
-    // Fallback: if node:sqlite is unavailable, treat a non-trivial cookie DB as
-    // logged-in only when it is clearly larger than an analytics-only jar.
-    try {
-      return fs.statSync(cookieFile).size > 20480 ? '(unknown)' : null
-    } catch {
-      return null
-    }
+    try { fs.rmSync(tmp, { force: true }) } catch { /* ignore */ }
+    return null
   }
 }
 
@@ -450,6 +519,53 @@ for sel in ["text=纯音乐", "label:has-text('纯音乐')"]:
             break
     except Exception:
         pass
+# Force 数量 = 1. The site defaults to 2, so every generation produced two
+# tracks and burned double the credits. Click the "-" stepper next to 数量.
+try:
+    qty = pg.evaluate("""() => {
+        // Find the 数量 label, then walk up to its container and read the number.
+        const all = Array.from(document.querySelectorAll('div,span,label'));
+        const lab = all.find(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').length < 24);
+        if (!lab) return { found: false };
+        let box = lab;
+        for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
+        const txt = (box.innerText || '');
+        const m = txt.match(/(\\d+)/);
+        return { found: true, current: m ? parseInt(m[1], 10) : null, html: box.outerHTML.slice(0, 400) };
+    }""")
+    steps["qty_probe"] = { "found": (qty or {}).get("found"), "current": (qty or {}).get("current") }
+    # Click the minus control until the displayed number is 1 (max 4 clicks).
+    for _ in range(4):
+        cur = pg.evaluate("""() => {
+            const all = Array.from(document.querySelectorAll('div,span,label'));
+            const lab = all.find(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').length < 24);
+            if (!lab) return null;
+            let box = lab;
+            for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
+            const m = (box.innerText || '').match(/(\\d+)/);
+            return m ? parseInt(m[1], 10) : null;
+        }""")
+        if cur is None or cur <= 1:
+            steps["qty_final"] = cur
+            break
+        # The stepper's minus button is the small button just left of the number.
+        clicked_minus = pg.evaluate("""() => {
+            const all = Array.from(document.querySelectorAll('div,span,label'));
+            const lab = all.find(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').length < 24);
+            if (!lab) return false;
+            let box = lab;
+            for (let i = 0; i < 4 && box.parentElement; i++) box = box.parentElement;
+            const btns = Array.from(box.querySelectorAll('button,[role=button],svg'));
+            // Heuristic: the first small clickable is "minus", second is "plus".
+            const cand = btns.filter(x => x.tagName === 'BUTTON' || x.getAttribute('role') === 'button');
+            if (cand.length >= 1) { cand[0].click(); return true; }
+            return false;
+        }""")
+        if not clicked_minus:
+            break
+        pg.wait_for_timeout(700)
+except Exception as e:
+    steps["qty_error"] = str(e)
 # Snapshot existing track ids so we can identify the NEW one after generating.
 before_ids = set()
 try:
