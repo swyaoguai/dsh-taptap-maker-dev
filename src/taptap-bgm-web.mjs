@@ -151,7 +151,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
 }
 
 /** `login`: open the page and wait until the user is actually logged in. */
-export async function login(dshHome, { waitMs = 300000, site } = {}) {
+export async function login(dshHome, { waitMs = 300000, site, graceSec = 8 } = {}) {
   const target = site ?? (await detectSite())
   const snippet = `pg.goto(${pyStr(target.url)}, timeout=60000)
 result["log"].append("opened " + pg.url)
@@ -174,6 +174,13 @@ def _is_auth(n):
     return any(a in low for a in AUTH)
 logged = False
 while time.time() < deadline:
+    # Stop early if the user closed the browser window themselves.
+    try:
+        if len(b.pages) == 0:
+            result["log"].append("browser window closed by user")
+            break
+    except Exception:
+        pass
     try:
         cks = b.cookies()
         hits = [c["name"] for c in cks if _is_auth(c["name"])]
@@ -193,6 +200,18 @@ while time.time() < deadline:
     except Exception:
         pass
     pg.wait_for_timeout(3000)
+# Grace period: the auth cookie can appear mid-login (e.g. right after a QR
+# scan), and closing instantly made the window "flash past" before the user
+# could see the result. Give them a moment, and let them close it themselves.
+if logged:
+    result["log"].append("login detected; keeping window open ${graceSec}s")
+    for _ in range(${graceSec}):
+        try:
+            if len(b.pages) == 0:
+                break
+        except Exception:
+            break
+        pg.wait_for_timeout(1000)
 result["logged"] = logged
 result["url"] = pg.url
 return result`
@@ -228,11 +247,27 @@ export function loadSite(dshHome) {
 export function status(dshHome) {
   const prof = profileDir(dshHome)
   const exists = fs.existsSync(prof)
-  const cookieFile = path.join(prof, 'Default', 'Cookies')
+  // Chromium stores cookies under Default/Network/Cookies (verified here).
+  // Default/Cookies is the pre-M76 path — checking only that made status say
+  // "not logged in" even after a successful login.
+  const cookieCandidates = [
+    path.join(prof, 'Default', 'Network', 'Cookies'),
+    path.join(prof, 'Default', 'Cookies'),
+  ]
+  const cookieFile = cookieCandidates.find((f) => fs.existsSync(f))
+  let hasCookies = false
+  if (cookieFile) {
+    try {
+      hasCookies = fs.statSync(cookieFile).size > 4096
+    } catch {
+      hasCookies = false
+    }
+  }
   return {
     profile: prof,
     exists,
-    hasCookies: fs.existsSync(cookieFile),
+    hasCookies,
+    cookieFile: cookieFile ?? null,
     downloadDir: downloadDir(dshHome),
     site: loadSite(dshHome) ?? null,
   }
@@ -246,12 +281,40 @@ export async function generate(dshHome, prompt, { out, waitMs = 300000, site } =
   const target = site ?? (await detectSite())
   const dl = downloadDir(dshHome)
   fs.mkdirSync(dl, { recursive: true })
-  const snippet = `pg.goto(${pyStr(WEB_URL)}, timeout=60000)
-pg.wait_for_timeout(5000)
-import time, os
+  // Selectors calibrated against the live CN site (2026-10):
+  //   /audio       → must click 「音乐创作」 to reach /audio/music
+  //   /audio/music → 风格 textarea placeholder「描述音乐风格与制作要求…」
+  //                  纯音乐 toggle, 「创作」 button, then a 下载 action
+  const snippet = `import time, os
+# Go straight to the music view: the landing page is speech synthesis, and
+# clicking through can be blocked by a first-run modal. /audio/music works
+# directly (verified) and any lingering modal is dismissed defensively below.
+MUSIC_URL = ${pyStr(target.url)}.replace("/audio", "/audio/music")
+pg.goto(MUSIC_URL, timeout=60000)
+pg.wait_for_timeout(7000)
 steps = {}
+steps["url"] = pg.url
+# Dismiss a first-run consent dialog if it is present and actually covering.
+for sel in ["button:has-text('同意')", "button:has-text('我知道了')", "button:has-text('确定')",
+            ".ant-modal button:has-text('同意')", ".ant-modal-close"]:
+    try:
+        d = pg.query_selector(sel)
+        if d and d.is_visible():
+            d.click()
+            steps.setdefault("dialog_dismissed", sel)
+            pg.wait_for_timeout(1500)
+    except Exception:
+        pass
+# If a modal still intercepts clicks, force-remove the overlay.
+try:
+    if pg.query_selector(".ant-modal-wrap"):
+        pg.evaluate("() => document.querySelectorAll('.ant-modal-wrap,.ant-modal-mask').forEach(e => e.remove())")
+        steps["modal_removed"] = True
+except Exception:
+    pass
+# Fill the style/description box (the real one is a textarea with this hint).
 box = None
-for sel in ["textarea", "input[type='text']", "[contenteditable='true']", "[placeholder]"]:
+for sel in ["textarea[placeholder*='描述音乐风格']", "textarea[placeholder*='风格']", "textarea"]:
     try:
         el = pg.query_selector(sel)
         if el:
@@ -261,37 +324,52 @@ for sel in ["textarea", "input[type='text']", "[contenteditable='true']", "[plac
     except Exception:
         pass
 if box is None:
-    steps["prompt_selector"] = None
     result["steps"] = steps
-    result["error"] = "no prompt input found (page layout may have changed)"
+    result["error"] = "no style input found on /audio/music"
     return result
-try:
-    box.click()
-except Exception:
-    pass
 try:
     box.fill(${pyStr(prompt)})
     steps["prompt_filled"] = True
 except Exception:
-    pg.keyboard.type(${pyStr(prompt)})
-    steps["prompt_filled"] = "typed"
+    try:
+        box.click(force=True)
+        pg.keyboard.type(${pyStr(prompt)})
+        steps["prompt_filled"] = "typed"
+    except Exception as e:
+        result["steps"] = steps
+        result["error"] = "could not fill prompt: " + str(e)
+        return result
+# Turn on 纯音乐 (instrumental) when present — BGM has no vocals.
+for sel in ["text=纯音乐", "label:has-text('纯音乐')", ".ant-switch"]:
+    try:
+        t = pg.query_selector(sel)
+        if t and t.is_visible():
+            t.click(force=True)
+            steps["instrumental_toggled"] = sel
+            pg.wait_for_timeout(1200)
+            break
+    except Exception:
+        pass
+# Click 创作 / 生成. The button text may include a credit count ("600\\n创作").
 clicked = None
-for sel in ["button:has-text('生成')", "button:has-text('Generate')", "button:has-text('创建')", "button:has-text('Create')"]:
+for sel in ["button:has-text('创作')", "button:has-text('生成')", "button:has-text('Create')", "button:has-text('Generate')"]:
     try:
         b2 = pg.query_selector(sel)
-        if b2:
-            b2.click()
+        if b2 and b2.is_visible():
+            b2.click(force=True)
             clicked = sel
             break
     except Exception:
         pass
 steps["generate_clicked"] = clicked
+# Wait for a result + download control.
 deadline = time.time() + ${Math.floor(waitMs / 1000)}
 found = None
 while time.time() < deadline:
-    for sel in ["button:has-text('下载')", "button:has-text('Download')", "a[download]", "audio"]:
+    for sel in ["button:has-text('下载')", "a[download]", "button:has-text('Download')", "audio"]:
         try:
-            if pg.query_selector(sel):
+            el = pg.query_selector(sel)
+            if el and el.is_visible():
                 found = sel
                 break
         except Exception:
@@ -303,8 +381,8 @@ steps["download_ready"] = found
 if found:
     os.makedirs(${pyStr(dl)}, exist_ok=True)
     try:
-        with pg.expect_download(timeout=120000) as info:
-            pg.click(found)
+        with pg.expect_download(timeout=180000) as info:
+            pg.click(found, force=True)
         d = info.value
         saved = os.path.join(${pyStr(dl)}, d.suggested_filename or "bgm.mp3")
         d.save_as(saved)

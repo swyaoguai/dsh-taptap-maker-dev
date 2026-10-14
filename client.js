@@ -220,9 +220,25 @@ window.__ModuleLoader__.load({
         setBusy('login'); setErr('')
         fetch(`${API_BASE}/bgm-login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
           .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
-          .then(({ ok, j }) => { if (ok && j.ok) load(); else setErr(j.error || '登录启动失败') })
-          .catch(() => setErr('请求失败：宿主服务未就绪'))
-          .finally(() => setBusy(''))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
+            // Browser opens detached; poll until the saved session shows up.
+            let tries = 0
+            const timer = setInterval(() => {
+              tries += 1
+              fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
+                .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
+                .then((st) => {
+                  if (st.hasCookies === true || tries >= 100) {
+                    clearInterval(timer)
+                    setInfo(st)
+                    setBusy('')
+                  }
+                })
+                .catch(() => { if (tries >= 100) { clearInterval(timer); setBusy('') } })
+            }, 3000)
+          })
+          .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
       }, [load])
 
       if (info === null) {

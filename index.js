@@ -29,7 +29,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
@@ -433,16 +433,17 @@ export function apply(ctx, config = {}) {
           return sendJson(res, 200, { ok: true, ...st, site })
         }
         if (req.method === 'POST' && sub === 'bgm-login') {
-          // Kick off interactive login in a detached window; the request returns
-          // immediately so the UI doesn't block for minutes.
+          // Launch the interactive browser DETACHED and return immediately.
+          // spawnSync here would block the whole DSH event loop for up to
+          // 330s, which froze the settings page ("flash and gone").
           const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
           try {
-            const child = spawnSync(process.execPath, [cli, 'login', '--waitMs', '300000'],
-              { encoding: 'utf8', timeout: 330000, maxBuffer: 4 * 1024 * 1024 })
-            const out = child.stdout ?? ''
-            let parsed = {}
-            try { parsed = JSON.parse(out.slice(out.indexOf('{'))) } catch { /* ignore */ }
-            return sendJson(res, 200, { ok: child.status === 0, logged: parsed.logged === true, ...bgmStatus(home) })
+            const site = (bgmStatus(home).site) ?? (await bgmDetectSite())
+            bgmSaveSite(home, site)
+            const child = spawn(process.execPath, [cli, 'login', '--waitMs', '300000'],
+              { detached: true, stdio: 'ignore' })
+            child.unref()
+            return sendJson(res, 200, { ok: true, started: true, site, ...bgmStatus(home) })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
