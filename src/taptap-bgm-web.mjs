@@ -366,6 +366,106 @@ export function status(dshHome) {
 }
 
 /**
+ * Sign out: delete the saved browser profile so the next login can use a
+ * different account.
+ *
+ * Why this exists: the plugin originally had no way to switch accounts, so a
+ * user who ran out of credits was stuck with the same login. Removing the whole
+ * profile directory (rather than just cookies) also guarantees no stale session
+ * survives — Chromium keeps session state in several files, not only Cookies.
+ *
+ * Callers must ensure no browser is currently using the profile.
+ */
+export function logout(dshHome) {
+  const prof = profileDir(dshHome)
+  let removed = false
+  try {
+    // Make sure nothing holds the profile before deleting it.
+    releaseProfile(prof)
+    fs.rmSync(prof, { recursive: true, force: true })
+    removed = !fs.existsSync(prof)
+  } catch {
+    removed = false
+  }
+  // Also drop the remembered site? No — the site choice is independent of the
+  // account, so keep it to avoid an extra network probe on next login.
+  return { ok: removed, profile: prof }
+}
+
+/**
+ * Query the account's remaining credits from the site's own billing endpoint.
+ * Verified response shape:
+ *   { data: { total_credit: 100, sub_credits: [...], debit_credit: 0 } }
+ * Returns { ok, totalCredit, expiresAt } or { ok:false, error }.
+ */
+export async function credits(dshHome, { site } = {}) {
+  const st = status(dshHome)
+  if (!st.hasCookies) return { ok: false, error: '未登录' }
+  const target = site ?? st.site ?? (await detectSite())
+  // Build the billing URL ourselves: the page may not request it on load (so
+  // waiting to capture it failed), but the endpoint works when called with the
+  // same query params the site uses. Verified: returns
+  //   {"data":{"total_credit":100,...,"debit_credit":0}}
+  const snippet = `import time, json
+# Listener MUST be attached before goto(): the page fires the authenticated
+# requests during load, so registering afterwards misses the token entirely
+# (that was why credits() kept reporting "no token").
+cap = {"token": None}
+def _on_req(r):
+    try:
+        if cap["token"] is None:
+            t = r.headers.get("token") or r.headers.get("Token")
+            if t and t.count(".") == 2:
+                cap["token"] = t.replace("Bearer ", "").strip()
+    except Exception:
+        pass
+pg.on("request", _on_req)
+pg.goto(${pyStr(target.url.replace('/audio', '/audio/music'))}, timeout=60000)
+deadline = time.time() + 40
+while time.time() < deadline and cap["token"] is None:
+    pg.wait_for_timeout(1500)
+steps = {"got_token": cap["token"] is not None}
+if cap["token"] is None:
+    result["steps"] = steps
+    result["error"] = "没能从页面拿到 token（登录态可能已失效，请重新登录）"
+    return result
+got = pg.evaluate("""async ([t, base]) => {
+    try {
+        let uuid = '';
+        try { uuid = localStorage.getItem('UNIQUE_USER_ID') || ''; } catch (e) {}
+        const q = 'scene=1&coin_type=0&biz_line=1&device_platform=web&app_id=3001&version_code=22201&biz_id=1&uuid=' + encodeURIComponent(uuid || 'x');
+        const r = await fetch(base + '?' + q, { headers: { token: t } });
+        const txt = await r.text();
+        if (!r.ok) return { error: 'HTTP ' + r.status, body: txt.slice(0, 200) };
+        return JSON.parse(txt);
+    } catch (e) { return { error: String(e) }; }
+}""", [cap["token"], ${pyStr(target.url.replace('/audio', '/v1/api/audio/billing/credit'))}])
+d = (got or {}).get("data") or {}
+steps["total_credit"] = d.get("total_credit")
+steps["debit_credit"] = d.get("debit_credit")
+subs = d.get("sub_credits") or []
+if subs:
+    steps["expires_at"] = subs[0].get("end_time")
+if got and got.get("error"):
+    steps["error"] = got["error"]
+result["steps"] = steps
+return result`
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: 120000 })
+  if (!r.ok) return { ok: false, error: r.err }
+  const s = r.steps ?? {}
+  if (s.error) return { ok: false, error: s.error }
+  if (s.total_credit === undefined || s.total_credit === null) {
+    return { ok: false, error: '没拿到额度信息（可能需要重新登录）', steps: s }
+  }
+  return {
+    ok: true,
+    totalCredit: s.total_credit,
+    debitCredit: s.debit_credit ?? 0,
+    expiresAt: s.expires_at ?? null,
+  }
+}
+
+/**
  * Read the cookie DB and look for the site's real auth cookie (`_token`).
  *
  * Chromium encrypts cookie VALUES, but the NAMES are plaintext — and the name
@@ -676,6 +776,18 @@ async function main() {
     if (!r.ok || r.logged !== true) process.exitCode = 1
     return
   }
+  if (cmd === 'logout' || cmd === '退出') {
+    const r = logout(home)
+    process.stdout.write(`${JSON.stringify({ ok: r.ok, message: r.ok ? '已退出登录，可换账号重新登录' : '退出失败（可能有浏览器正在使用）', ...r }, null, 2)}\n`)
+    if (!r.ok) process.exitCode = 1
+    return
+  }
+  if (cmd === 'credits' || cmd === '额度') {
+    const r = await credits(home)
+    process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
+    if (!r.ok) process.exitCode = 1
+    return
+  }
   if (cmd === 'gen' || cmd === 'generate') {
     const prompt = args.prompt ?? args._?.[0]
     if (typeof prompt !== 'string' || prompt.length === 0) {
@@ -688,7 +800,7 @@ async function main() {
     if (!r.ok || r.error) process.exitCode = 1
     return
   }
-  process.stderr.write(`unknown command: ${cmd} (use status | login | gen)\n`)
+  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | credits | gen)\n`)
   process.exitCode = 2
 }
 

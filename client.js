@@ -203,6 +203,106 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // Account management IS configuration (which account to use, switching
+    // accounts), so it belongs on this page — unlike BGM generation, which is
+    // usage and therefore stays in the chat.
+    function BgmAccount() {
+      const [info, setInfo] = useState(null) // null | 'error' | status object
+      const [busy, setBusy] = useState('')
+      const [err, setErr] = useState('')
+      const [credits, setCredits] = useState(null)
+
+      const load = useCallback(() => {
+        fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
+          .then((j) => setInfo(j))
+          .catch(() => setInfo('error'))
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const post = useCallback((endpoint, body, tag) => {
+        setBusy(tag); setErr('')
+        fetch(`${API_BASE}/${endpoint}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body ?? {}),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok) { setErr(j.error || '操作失败'); return }
+            if (j.credits !== undefined) setCredits(j.credits)
+            else if (j.totalCredit !== undefined) setCredits(j)
+            else setCredits(null)
+            load()
+          })
+          .catch(() => setErr('请求失败：宿主服务未就绪'))
+          .finally(() => setBusy(''))
+      }, [load])
+
+      const doLogin = useCallback(() => {
+        setBusy('login'); setErr(''); setCredits(null)
+        fetch(`${API_BASE}/bgm-login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
+            let tries = 0
+            const timer = setInterval(() => {
+              tries += 1
+              fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
+                .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
+                .then((st) => {
+                  if (st.hasCookies === true || tries >= 60) {
+                    clearInterval(timer)
+                    setInfo(st)
+                    setBusy('')
+                    if (st.hasCookies !== true) setErr('未检测到登录：请在弹出的浏览器里完成登录，再点「刷新」。')
+                  }
+                })
+                .catch(() => { if (tries >= 60) { clearInterval(timer); setBusy('') } })
+            }, 3000)
+          })
+          .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
+      }, [])
+
+      if (info === null) {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, 'BGM 账号'),
+          h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
+      }
+      if (info === 'error') {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, 'BGM 账号'),
+          h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
+            '没连上宿主服务。可用命令 /taptap-bgm login。'))
+      }
+      const logged = info.hasCookies === true
+      return h('div', { style: S.card },
+        h('div', { style: S.rowBetween },
+          h('div', null,
+            h('h2', { style: S.cardTitle }, 'BGM 账号'),
+            h('p', { style: { ...S.sub, marginTop: 2 } },
+              '生成完整 BGM 用的 MiniMax 账号。可登录、查额度、换号。')),
+          h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
+        ),
+        info.site
+          ? h('p', { style: S.hint }, '站点：', h('span', { style: S.codeInline }, info.site.label))
+          : null,
+        h('div', { style: S.bar },
+          h('button', { style: S.btn, disabled: busy !== '', onClick: doLogin },
+            busy === 'login' ? '登录中…' : (logged ? '重新登录' : '登录')),
+          logged ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('bgm-credits', {}, 'credits') }, busy === 'credits' ? '查询中…' : '查额度') : null,
+          logged ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('bgm-logout', {}, 'logout') }, busy === 'logout' ? '退出中…' : '退出 / 换号') : null,
+          err ? h('span', { style: S.warn }, err) : null,
+        ),
+        credits !== null
+          ? h('p', { style: S.hint },
+            '剩余额度：', h('span', { style: S.codeInline }, `${credits.totalCredit ?? '?'}`),
+            credits.expiresAt ? h('span', { style: S.hint }, `（到期 ${new Date(credits.expiresAt).toLocaleDateString('zh-CN')}）`) : null)
+          : null,
+        h('p', { style: { ...S.hint, marginTop: 6 } },
+          '「退出 / 换号」会清除本机登录态，之后可用另一个账号登录。'),
+      )
+    }
+
     function AudioLibrary() {
       const [info, setInfo] = useState(null) // null | 'error' | {ready,count,cacheDir}
       const [busy, setBusy] = useState('')
@@ -463,6 +563,8 @@ window.__ModuleLoader__.load({
 
         h(ImageConfig),
 
+        h(BgmAccount),
+
         h(AudioLibrary),
 
         h(SkillManager),
@@ -477,6 +579,7 @@ window.__ModuleLoader__.load({
             h('li', null, '音效：说「加个金币音效」，或 ',
               h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
             h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
+            h('li', null, '换 BGM 账号 / 查额度：说「退出登录」或「查额度」，也在本页「BGM 账号」卡。'),
             h('li', null, '音频转格式：说「把这些音效转成 wav」，或 ',
               h('span', { style: S.codeInline }, '/taptap-audio-convert')),
             h('li', null, '初始化 Maker：说「帮我初始化 taptap maker」。'),

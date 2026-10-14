@@ -29,12 +29,12 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
-import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
+import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
@@ -155,6 +155,10 @@ function policyText(config) {
     '       用户说「要 BGM」而尚未登录时，**你直接用 pwsh 执行** `/taptap-bgm login` 对应的',
     '       `node "<插件目录>/src/taptap-bgm-web.mjs" login`（会弹出浏览器让用户登录一次），',
     '       或用 `/taptap-bgm login` 命令；登录态存本机，之后自动。**不要让用户自己去设置页点**。',
+    '     - **换号 / 退登录**：用户说「换个号」「退出登录」「登出」时，执行 `/taptap-bgm logout`',
+    '       （清掉本机登录态），然后再 login 即可用另一个账号。账号管理入口也在设置页「BGM 账号」卡。',
+    '     - **查额度**：用户问「还有多少额度」「是不是没额度了」时，执行 `/taptap-bgm credits`。',
+    '       额度为 0 或不足时如实告知，并提示可换号（logout → login），不要反复重试生成。',
     '     - **站点自动判断**：按当前网络可达性自动选国内版（minimax.cn）或国际版（minimax.io），',
     '       国际版多为 Google 登录，国内网络下选国内版。选好的站点会记住。',
     '     - **生成**：`/taptap-bgm <风格情绪描述>` —— 自动出提示词并用已登录浏览器完成生成与下载。',
@@ -436,11 +440,48 @@ export function apply(ctx, config = {}) {
             file: imageConfigPath(home),
           })
         }
-        // NOTE: bgm-scenes / bgm / bgm-login / audio-search / audio-sources were
-        // removed on purpose. The settings page no longer offers BGM or audio
-        // search (that is usage, not configuration — it belongs in the chat), so
-        // those routes had no caller. BGM now runs through /taptap-bgm and the
-        // audio library through /taptap-audio.
+        // BGM ACCOUNT routes: which account is logged in, logging in, logging
+        // out (to switch accounts), and checking remaining credits. Account
+        // management is configuration, so the settings page is the right home
+        // for it; BGM *generation* is usage and stays in the chat.
+        if (req.method === 'GET' && sub === 'bgm') {
+          const st = bgmStatus(home)
+          const site = st.site ?? (await bgmDetectSite())
+          if (!st.site) bgmSaveSite(home, site)
+          return sendJson(res, 200, { ok: true, ...st, site })
+        }
+        if (req.method === 'POST' && sub === 'bgm-login') {
+          // Launch detached and return immediately; the UI polls /bgm.
+          const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
+          try {
+            const site = (bgmStatus(home).site) ?? (await bgmDetectSite())
+            bgmSaveSite(home, site)
+            const child = spawn(process.execPath, [cli, 'login', '--waitMs', '300000'],
+              { detached: true, stdio: 'ignore' })
+            child.unref()
+            return sendJson(res, 200, { ok: true, started: true, site, ...bgmStatus(home) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        if (req.method === 'POST' && sub === 'bgm-logout') {
+          try {
+            const r = bgmLogout(home)
+            return sendJson(res, 200, { ok: r.ok, ...r })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        if (req.method === 'POST' && sub === 'bgm-credits') {
+          try {
+            const r = await bgmCredits(home)
+            return sendJson(res, 200, { ok: r.ok, credits: r, error: r.error ?? null })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // NOTE: audio-search / audio-sources were removed — the settings page no
+        // longer offers audio search (that is usage, and lives in the chat).
         if (req.method === 'GET' && sub === 'audio') {
           const ready = fs.existsSync(path.join(audioCacheDir, 'index.json'))
           return sendJson(res, 200, {
@@ -797,8 +838,8 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-bgm',
-      description: '网页 BGM：login 首次登录 / status 查看登录态 / "<描述>" 自动生成并导入',
-      input: { hint: 'login | status | "<风格描述>"' },
+      description: 'BGM 账号：login 登录 / logout 换号 / credits 查额度 / "<描述>" 生成',
+      input: { hint: 'login | logout | credits | status | <风格描述>' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
@@ -822,6 +863,21 @@ export function apply(ctx, config = {}) {
                 '请打开浏览器完成登录，登录态会保存在本机。',
               ].join('\n'),
           }
+        }
+        if (low === 'logout' || raw === '退出' || raw === '换号') {
+          const r = bgmLogout(home)
+          return {
+            kind: r.ok ? 'success' : 'error',
+            text: r.ok
+              ? '已退出登录。下次可换一个账号登录（/taptap-bgm login）。'
+              : `退出失败：可能有浏览器正在使用登录态，请先关闭再试。（${r.profile ?? ''}）`,
+          }
+        }
+        if (low === 'credits' || raw === '额度') {
+          const r = await bgmCredits(home)
+          if (!r.ok) return { kind: 'error', text: `查额度失败：${r.error ?? '未知'}` }
+          const exp = r.expiresAt ? `，到期 ${new Date(r.expiresAt).toLocaleDateString('zh-CN')}` : ''
+          return { kind: 'success', text: `剩余额度：${r.totalCredit}${exp}。额度用完可换号：/taptap-bgm logout 再 login。` }
         }
         if (low === 'status' || raw === '状态') {
           const st = bgmStatus(home)
