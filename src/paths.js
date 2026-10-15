@@ -95,6 +95,33 @@ export function writePolicyBlock(dshHome, enabled) {
   return value
 }
 
+/** Where BGM generation preferences are stored. */
+export function bgmConfigPath(dshHome) {
+  return path.join(dataDir(dshHome), 'bgm-config.json')
+}
+
+/**
+ * Read BGM generation settings. Most game BGM should have no vocals, so
+ * `instrumental` defaults to true; `count` defaults to 1 (the site's own
+ * default is 2, which silently burns double the credits).
+ */
+export function readBgmConfig(dshHome) {
+  const data = readJson(bgmConfigPath(dshHome)) ?? {}
+  return {
+    instrumental: data.instrumental !== false, // default ON
+    count: typeof data.count === 'number' && data.count >= 1 ? Math.floor(data.count) : 1,
+  }
+}
+
+/** Persist BGM settings (partial patch); returns the merged record. */
+export function writeBgmConfig(dshHome, patch = {}) {
+  const merged = { ...readBgmConfig(dshHome) }
+  if (typeof patch.instrumental === 'boolean') merged.instrumental = patch.instrumental
+  if (typeof patch.count === 'number' && patch.count >= 1) merged.count = Math.floor(patch.count)
+  writeJson(bgmConfigPath(dshHome), merged)
+  return merged
+}
+
 /** Read a JSON file, returning undefined when absent or invalid. */
 export function readJson(file) {
   try {

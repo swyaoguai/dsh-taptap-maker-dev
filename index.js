@@ -35,7 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -165,6 +165,8 @@ function policyText(config) {
     '       **提示词必须用中文**（站点是国内版、用户看中文）；用户给英文时先翻译成中文再生成，',
     '       并优先套用内置的中文场景模板（战斗/BOSS/胜利/失败/主菜单/探索/紧张/悲伤/商店/升级）。',
     '       也可先读项目里的文档（GAME_RULES.md 等）推断需要哪些场景 BGM，再据此生成提示词。',
+    '     - **纯音乐（无歌词）默认开启**：游戏 BGM 大多不需要人声，插件会默认打开该开关。',
+    '       用户明确要带人声/歌词时才加 `--lyrics` 关掉它。开关与生成数量都可在设置页「BGM 账号」调整。',
     '     - **导入项目**：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录> '
       + '--project <Maker项目目录> --kind bgm --to wav --latest`，自动转格式 + 写 `.meta`。',
     '     - 装完要**告诉用户装到了哪个文件**。' + '不要向用户长篇解释原理，只说清「需要登录账号，之后用它生成」。',
@@ -463,6 +465,19 @@ export function apply(ctx, config = {}) {
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
+        }
+        if (req.method === 'GET' && sub === 'bgm-config') {
+          return sendJson(res, 200, { ok: true, ...readBgmConfig(home) })
+        }
+        if (req.method === 'POST' && sub === 'bgm-config') {
+          const body = await readBody(req)
+          let parsed = {}
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const merged = writeBgmConfig(home, {
+            instrumental: typeof parsed.instrumental === 'boolean' ? parsed.instrumental : undefined,
+            count: typeof parsed.count === 'number' ? parsed.count : undefined,
+          })
+          return sendJson(res, 200, { ok: true, ...merged })
         }
         if (req.method === 'POST' && sub === 'bgm-logout') {
           try {
@@ -954,8 +969,11 @@ export function apply(ctx, config = {}) {
         // actively release the browser profile, or the Chromium tree survives
         // and blocks every later run.
         const BGM_TIMEOUT_MS = 12 * 60 * 1000
+        // --lyrics lets a single call override the instrumental setting (the
+        // default is ON because game BGM normally has no vocals).
+        const wantInstrumental = !/--lyrics/.test(raw)
         const r = await Promise.race([
-          bgmGenerate(home, prompt, { site: st.site ?? undefined, waitMs: 8 * 60 * 1000 }),
+          bgmGenerate(home, prompt, { site: st.site ?? undefined, waitMs: 8 * 60 * 1000, instrumental: wantInstrumental }),
           new Promise((resolve) => setTimeout(() => {
             try {
               const prof = profileDir(home)

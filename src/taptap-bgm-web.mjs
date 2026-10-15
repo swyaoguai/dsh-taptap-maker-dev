@@ -32,7 +32,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { resolveDshHome, dataDir } from './paths.js'
+import { resolveDshHome, dataDir, readBgmConfig } from './paths.js'
 
 /**
  * Two sites, chosen by network reachability — the international site forces
@@ -530,10 +530,15 @@ function findAuthCookie(cookieFile) {
  * `gen`: paste the prompt, generate, then download the newest audio into --out.
  * Selectors are best-effort; unmatched steps are reported honestly.
  */
-export async function generate(dshHome, prompt, { out, waitMs = 300000, site } = {}) {
+export async function generate(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count } = {}) {
   const target = site ?? (await detectSite())
   const dl = downloadDir(dshHome)
   fs.mkdirSync(dl, { recursive: true })
+  // Defaults come from the saved BGM settings: game BGM normally has no vocals,
+  // so instrumental is on by default, and count 1 avoids the site's wasteful 2.
+  const cfg = readBgmConfig(dshHome)
+  const instrumentalWanted = typeof instrumental === 'boolean' ? instrumental : cfg.instrumental
+  const countWanted = typeof count === 'number' ? count : cfg.count
   // Selectors calibrated against the live CN site (2026-10):
   //   /audio       → must click 「音乐创作」 to reach /audio/music
   //   /audio/music → 风格 textarea placeholder「描述音乐风格与制作要求…」
@@ -620,24 +625,65 @@ except Exception:
         result["steps"] = steps
         result["error"] = "could not fill prompt: " + str(e)
         return result
-# Turn on 纯音乐 when present — BGM should have no vocals.
-for sel in ["text=纯音乐", "label:has-text('纯音乐')"]:
+# 纯音乐 (instrumental): driven by the saved setting, default ON.
+# Clear any modal overlay FIRST: an open .ant-modal-wrap intercepts pointer
+# events, so clicking the switch silently did nothing (verified: Page.click
+# timed out with "ant-modal-wrap ... intercepts pointer events").
+try:
+    pg.evaluate("() => document.querySelectorAll('.ant-modal-wrap,.ant-modal-mask').forEach(e => e.remove())")
+except Exception:
+    pass
+# IMPORTANT: this site widget is a TOGGLE, not a checkbox — blindly clicking it
+# flips whatever state it is already in. So read its current state first and
+# only click when it disagrees with the desired setting.
+WANT_INSTRUMENTAL = ${instrumental ? 'True' : 'False'}
+steps["want_instrumental"] = WANT_INSTRUMENTAL
+steps["instrumental_before"] = None
+steps["instrumental_after"] = None
+inst_state = pg.evaluate("""() => {
+    // The 纯音乐 control is an antd Switch: <button role="switch" class="ant-switch">
+    // with aria-checked, or class contains 'ant-switch-checked' when on.
+    const sw = document.querySelector('button.ant-switch, [role=switch]');
+    if (!sw) return null;
+    const cls = sw.className || '';
+    if (typeof sw.getAttribute === 'function') {
+        const ac = sw.getAttribute('aria-checked');
+        if (ac === 'true') return true;
+        if (ac === 'false') return false;
+    }
+    if (cls.indexOf('ant-switch-checked') !== -1) return true;
+    return false;
+}""")
+steps["instrumental_before"] = inst_state
+if inst_state is not None and inst_state != WANT_INSTRUMENTAL:
     try:
-        t = pg.query_selector(sel)
+        t = pg.query_selector("button.ant-switch, [role=switch]")
         if t and t.is_visible():
+            # force=True bypasses any lingering overlay that would otherwise
+            # swallow the click.
             t.click(force=True)
-            steps["instrumental_toggled"] = sel
-            pg.wait_for_timeout(1000)
-            break
+            steps["instrumental_toggled"] = True
+            pg.wait_for_timeout(1500)
     except Exception:
         pass
-# Force 数量 = 1. The site defaults to 2, so every generation produced two
-# tracks and burned double the credits.
+# Re-read so we can report the truth rather than assuming.
+steps["instrumental_after"] = pg.evaluate("""() => {
+    const sw = document.querySelector('button.ant-switch, [role=switch]');
+    if (!sw) return null;
+    const cls = sw.className || '';
+    const ac = sw.getAttribute ? sw.getAttribute('aria-checked') : null;
+    if (ac === 'true') return true;
+    if (ac === 'false') return false;
+    return cls.indexOf('ant-switch-checked') !== -1;
+}""")
+# Force 数量 to the configured value (default 1). The site defaults to 2, so
+# every generation produced two tracks and burned double the credits.
 # Verified DOM (2026-10):
 #   <div class="bg-bg_gray_15 flex items-center gap-1 rounded-[20px] px-3 py-2">
 #     <span>数量:&nbsp;</span><button>…minus svg…</button><span>2</span><button>…plus…</button>
 #   </div>
 # So: take the 数量 label's DIRECT parent, and its first <button> is the minus.
+WANT_QTY = ${countWanted}
 QTY_READ = """() => {
     const all = Array.from(document.querySelectorAll('span,div,label'));
     const lab = all.filter(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').trim().length < 12)
@@ -652,7 +698,7 @@ try:
     steps["qty_initial"] = cur0
     for _ in range(5):
         cur = pg.evaluate(QTY_READ)
-        if cur is None or cur <= 1:
+        if cur is None or cur <= WANT_QTY:
             steps["qty_final"] = cur
             break
         clicked = pg.evaluate("""() => {

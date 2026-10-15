@@ -211,14 +211,33 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
       const [credits, setCredits] = useState(null)
+      const [cfg, setCfg] = useState(null) // { instrumental, count }
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
           .then((j) => setInfo(j))
           .catch(() => setInfo('error'))
+        fetch(`${API_BASE}/bgm-config`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
+          .then((j) => setCfg(j))
+          .catch(() => setCfg(null))
       }, [])
       useEffect(() => { load() }, [load])
+
+      const saveCfg = useCallback((patch) => {
+        setErr('')
+        fetch(`${API_BASE}/bgm-config`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(patch),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (ok && j.ok) setCfg(j)
+            else setErr(j.error || '保存失败')
+          })
+          .catch(() => setErr('保存失败：宿主服务未就绪'))
+      }, [])
 
       const post = useCallback((endpoint, body, tag) => {
         setBusy(tag); setErr('')
@@ -298,6 +317,17 @@ window.__ModuleLoader__.load({
             '剩余额度：', h('span', { style: S.codeInline }, `${credits.totalCredit ?? '?'}`),
             credits.expiresAt ? h('span', { style: S.hint }, `（到期 ${new Date(credits.expiresAt).toLocaleDateString('zh-CN')}）`) : null)
           : null,
+        // 纯音乐开关（默认开）：游戏 BGM 大多不要歌词
+        h('div', { style: { ...S.rowBetween, marginTop: 10 } },
+          h('div', null,
+            h('span', { style: { fontSize: 13, fontWeight: 600 } }, '纯音乐（无歌词）'),
+            h('p', { style: { ...S.hint, marginTop: 2 } },
+              '游戏 BGM 通常不需要人声，默认开启。')),
+          h(Toggle, {
+            on: cfg === null ? true : cfg.instrumental !== false,
+            onClick: () => saveCfg({ instrumental: !(cfg === null ? true : cfg.instrumental !== false) }),
+          }),
+        ),
         h('p', { style: { ...S.hint, marginTop: 6 } },
           '「退出 / 换号」会清除本机登录态，之后可用另一个账号登录。'),
       )
