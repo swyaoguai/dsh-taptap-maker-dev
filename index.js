@@ -36,6 +36,7 @@ import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
+import { status as gptStatus, login as gptLogin, logout as gptLogout } from './src/taptap-gpt.mjs'
 
 export const name = 'taptap-maker-dev'
 
@@ -115,6 +116,10 @@ function policyText(config) {
     '**图片资源优先走自定义通道**：需要游戏图片素材时，优先使用本插件的 OpenAI 兼容生图通道',
     '（`taptap-image` CLI / `/taptap-image` 命令，可用 `node <插件>/src/taptap-image.mjs` 调用），或复用项目内已有素材；',
     '不要默认去用内置 `generate_image`。生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
+    '**备用：ChatGPT 网页生图**（`/taptap-gpt login` 首次登录后可用）—— 当中转站生图效果不理想、或用户明确要求「用 ChatGPT 生成」时，',
+    '走 ChatGPT 网页版：首次需用户在真实浏览器里登录一次（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机。',
+    '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
+    '网页生图脚本可能失效；失效时如实报告卡在哪一步，不要假装成功，回退到中转站 `taptap-image`。免费账号有生图额度限制。',
     '',
     '**优先查用内置 skills**：开发前先查本插件内置的 `taptap-maker-*` 与通用游戏设计类 skills（见 skill 列表）；',
     '遇到风格化 UI / 美术 / 系统玩法需求，先查是否有对应 skill，不要凭空编造。',
@@ -462,6 +467,31 @@ export function apply(ctx, config = {}) {
               { detached: true, stdio: 'ignore' })
             child.unref()
             return sendJson(res, 200, { ok: true, started: true, site, ...bgmStatus(home) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // ChatGPT account routes (mirror the BGM account lane): login once, then
+        // reuse the saved session. The relay-station image API stays primary.
+        if (req.method === 'GET' && sub === 'gpt') {
+          const st = gptStatus(home)
+          return sendJson(res, 200, { ok: true, ...st })
+        }
+        if (req.method === 'POST' && sub === 'gpt-login') {
+          const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
+          try {
+            const child = spawn(process.execPath, [cli, 'login', '--waitMs', '300000'],
+              { detached: true, stdio: 'ignore' })
+            child.unref()
+            return sendJson(res, 200, { ok: true, started: true, ...gptStatus(home) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        if (req.method === 'POST' && sub === 'gpt-logout') {
+          try {
+            const r = gptLogout(home)
+            return sendJson(res, 200, { ok: r.ok, ...r })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
@@ -848,6 +878,49 @@ export function apply(ctx, config = {}) {
           }
         }
         return { kind: 'success', text: usage }
+      },
+    })
+
+    scoped.commands.register({
+      name: 'taptap-gpt',
+      description: 'ChatGPT 网页生图账号：login 登录 / logout 换号 / status 状态',
+      input: { hint: 'login | logout | status' },
+      handler: async (invocation) => {
+        const raw = (invocation?.rawInput ?? '').trim()
+        const low = raw.toLowerCase()
+        const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
+
+        if (low === 'login' || raw === '登录') {
+          const res = await gptLogin(home, { waitMs: 300000 })
+          return {
+            kind: res?.logged === true ? 'success' : 'error',
+            text: res?.logged === true
+              ? '已登录 ChatGPT，之后网页生图都用它。\n登录态保存在本机，只需登录一次。'
+              : '未完成登录（或超时）。请在打开的浏览器里完成登录（Google/Apple/手机号/邮箱均可），登录态会保存。',
+          }
+        }
+        if (low === 'logout' || raw === '退出' || raw === '换号') {
+          const r = gptLogout(home)
+          return {
+            kind: r.ok ? 'success' : 'error',
+            text: r.ok
+              ? '已退出 ChatGPT 登录态。可用另一个账号 /taptap-gpt login。'
+              : `退出失败：可能有浏览器正在占用，请先关闭再试。（${r.profile ?? ''}）`,
+          }
+        }
+        const st = gptStatus(home)
+        return {
+          kind: 'success',
+          text: [
+            `ChatGPT 登录状态：${st.loggedIn ? '已登录' : '未登录'}`,
+            `  profile: ${st.profile}`,
+            `  下载目录: ${st.downloadDir}`,
+            '',
+            st.loggedIn
+              ? '可直接说「用 ChatGPT 生成图片：<描述>」（生图仍优先走中转站，指定 ChatGPT 才走网页）'
+              : '先登录：/taptap-gpt login（只需一次）',
+          ].join('\n'),
+        }
       },
     })
 
