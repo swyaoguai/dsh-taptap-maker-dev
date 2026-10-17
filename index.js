@@ -36,8 +36,8 @@ import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generate as bgmGenerate, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation } from './src/taptap-gpt.mjs'
-import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount } from './src/paths.js'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab } from './src/taptap-gpt.mjs'
+import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -301,6 +301,9 @@ function policyText(config, gptLaneOn = true) {
       '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
       '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
       '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
+      '**超时不要重新生成（很关键，会白烧额度）**：网页出图常要 1~3 分钟，我们等不到时会返回 `pendingUrl`（那个对话的链接）。',
+      '这时**先等 1~2 分钟再 `taptap-gpt grab`**（或 `/taptap-gpt grab`）把已经生成好的图抓回来——不要立刻再跑一次 `gen`，',
+      '`gen` 自己也会先尝试续抓上一轮未完成的图。只有 grab 明确说"没有图"时才考虑重新生成。',
       '**图片落点（默认跟随项目）**：在工作目录（Maker 项目根）执行 `gen` 时，图片默认存到 `<项目>/.taptap-images/`，',
       '不再丢到 C 盘；该目录自带 `.gitignore` 防止被 Maker 自动提交。用户可在设置页「ChatGPT 网页生图」卡里自定义',
       '（支持 `{project}` / `{home}` 占位符），也可用 `/taptap-gpt dir --set <路径>`；命令行加 `--dir <目录>` 可单次覆盖。',
@@ -1242,8 +1245,7 @@ export function apply(ctx, config = {}) {
           }
         }
         // Download dir: /taptap-gpt dir | dir --set <路径> | dir --reset
-        if (low === 'dir' || low.startsWith('dir ') || raw === '目录') {
-          const setArg = (/--set\s+("[^"]+"|'[^']+'|\S+)/.exec(raw) ?? [])[1]
+        if (low === 'dir' || low.startsWith('dir ') || raw === '目录') {          const setArg = (/--set\s+("[^"]+"|'[^']+'|\S+)/.exec(raw) ?? [])[1]
           if (/--reset/.test(raw)) {
             writeGptDownloadDir(home, '')
             return { kind: 'success', text: '已恢复默认：图片存到当前项目下的 .taptap-images/（不在项目里时存到 $DSH_HOME）。' }
@@ -1274,6 +1276,35 @@ export function apply(ctx, config = {}) {
               '恢复默认：/taptap-gpt dir --reset',
             ].join('\n'),
           }
+        }
+        // 抓图：把「已经生成但没下到」的图取回来，不重新生成（省额度）。
+        //   /taptap-gpt grab                  抓 pending 记录里的那个对话
+        //   /taptap-gpt grab <对话url>         抓指定对话
+        if (low === 'grab' || low.startsWith('grab ') || raw === '抓图' || low === 'pending') {
+          const urlArg = (/https?:\/\/\S+/.exec(raw) ?? [])[1]
+          if (low === 'pending') {
+            const p = readGptPending(home)
+            return {
+              kind: 'success',
+              text: p
+                ? [`待抓取对话：${p.url}`, `提示词：${p.prompt || '(未知)'}`, `提交于：${new Date(p.at).toLocaleString('zh-CN')}`,
+                  '', '抓取：/taptap-gpt grab'].join('\n')
+                : '没有待抓取的图（上次生成要么已下载，要么还没开始过）。',
+            }
+          }
+          const r = await gptGrab(home, { url: urlArg })
+          if (!r.ok) {
+            return {
+              kind: 'error',
+              text: [
+                `抓图失败：${r.error}`,
+                r.stillGenerating ? '图可能还在生成，过 1-2 分钟再试一次（不用重新生成）。' : '',
+                r.hint ?? '',
+                r.url ? `对话：${r.url}` : '',
+              ].filter(Boolean).join('\n'),
+            }
+          }
+          return { kind: 'success', text: [`已抓取：${r.saved}`, '', '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。'].join('\n') }
         }
         // Master switch: /taptap-gpt lane on|off|status
         if (low === 'lane' || low.startsWith('lane ') || raw === '开关') {
@@ -1392,19 +1423,22 @@ export function apply(ctx, config = {}) {
               '',
               isQuota
                 ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/taptap-gpt pool list、pool unban），或回退到中转站 /taptap-image。'
-                : '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。',
+                : r.pendingUrl
+                  // The image may still be rendering: grabbing it later is free,
+                  // regenerating costs one generation.
+                  ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /taptap-gpt grab 抓同一个对话即可：${r.pendingUrl}`
+                  : '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。',
             ].filter(Boolean).join('\n'),
           }
         }
         return {
           kind: 'success',
           text: [
-            `已生成：${r.saved}`,
+            r.resumed ? `已取回上一次生成好的图（没有重新生成）：${r.saved}` : `已生成：${r.saved}`,
             r.rotated ? `（自动轮换账号：${(r.tried ?? []).join(' → ')}）` : '',
             ...(r.notes ?? []),
             '',
-            '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta：',
-            `  node "${path.join(PKG_DIR, 'src', 'taptap-audio.mjs')}" --help  # 音效走这里；图片请手动落盘`,
+            '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。',
           ].filter(Boolean).join('\n'),
         }
       },

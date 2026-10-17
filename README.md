@@ -53,6 +53,11 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 node <plugin-dir>/src/taptap-gpt.mjs login
 node <plugin-dir>/src/taptap-gpt.mjs gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
 
+# 出图慢时：把「已经生成好但没下到」的图抓回来（不重新生成，省额度）
+node <plugin-dir>/src/taptap-gpt.mjs pending   # 有没有待抓取的对话
+node <plugin-dir>/src/taptap-gpt.mjs grab      # 抓 pending 那个对话
+node <plugin-dir>/src/taptap-gpt.mjs grab --url https://chatgpt.com/c/xxxx
+
 # 网页生图总开关（关掉后改走中转站）
 node <plugin-dir>/src/taptap-gpt.mjs lane status
 node <plugin-dir>/src/taptap-gpt.mjs lane off
@@ -128,6 +133,7 @@ node <plugin-dir>/src/taptap-skills-update.mjs
 4. **设置页的保存依赖宿主 web 服务**（`webServer`）。若你的 DSH 组合没启用，卡片会提示改用命令，不会白屏。
 5. **生图 / 音乐用的是你自己的 Key**，账单在你那边；本插件不代付、不代理、不上传你的 Key 到任何第三方。
 6. **ChatGPT 网页生图依赖界面选择器**。OpenAI 改版频繁，脚本可能失效——失效时它会如实报告卡在第几步（`no_composer` / `no_image` / `download_failed`），不会假装成功；此时回退到中转站。
+7. **网页出图要 1~3 分钟**。脚本会等"生成中"结束、只认本次新出现的图再下载（不会把上一轮对话里的旧图当结果）。真等超时会记住那个对话的链接：用 `grab` 抓回来即可，**不要重新生成**（会白烧一次额度）。
 7. **多账号轮询违反 OpenAI 服务条款**。轮换账号会绕过单账号配额，可能导致账号被封。这是应要求实现的功能，**风险由你承担**；每个账号用独立浏览器 profile 隔离，且不会自动重试被标记封禁的账号。
 
 ## 关于「额度红线」

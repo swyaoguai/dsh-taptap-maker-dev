@@ -667,7 +667,7 @@ except Exception:
 # IMPORTANT: this site widget is a TOGGLE, not a checkbox — blindly clicking it
 # flips whatever state it is already in. So read its current state first and
 # only click when it disagrees with the desired setting.
-WANT_INSTRUMENTAL = ${instrumental ? 'True' : 'False'}
+WANT_INSTRUMENTAL = ${instrumentalWanted ? 'True' : 'False'}
 steps["want_instrumental"] = WANT_INSTRUMENTAL
 steps["instrumental_before"] = None
 steps["instrumental_after"] = None
@@ -1024,13 +1024,22 @@ async function main() {
   if (cmd === 'gen' || cmd === 'generate') {
     const prompt = args.prompt ?? args._?.[0]
     if (typeof prompt !== 'string' || prompt.length === 0) {
-      process.stderr.write('usage: taptap-bgm-web gen --prompt "<提示词>" [--account <名>]\n')
+      process.stderr.write('usage: taptap-bgm-web gen --prompt "<提示词>" [--account <名>] [--instrumental|--lyrics]\n')
       process.exitCode = 2
       return
+    }
+    // --instrumental / --lyrics 是显式覆盖；不传就走保存的设置（默认纯音乐）。
+    // 传布尔真值给 generateWithRotation，它会优先于 cfg.instrumental。
+    let instrumental
+    if (args.instrumental !== undefined) {
+      instrumental = !(args.instrumental === false || args.instrumental === 'false')
+    } else if (args.lyrics !== undefined) {
+      instrumental = !(args.lyrics === true || args.lyrics === 'true')
     }
     const r = await generateWithRotation(home, prompt, {
       waitMs: Number(args.waitMs ?? 300000),
       accountId: args.account,
+      instrumental,
     })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok || r.error) process.exitCode = 1

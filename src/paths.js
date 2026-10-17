@@ -131,13 +131,54 @@ export function readGptDownloadDir(dshHome) {
   const data = readJson(imageLaneConfigPath(dshHome))
   return typeof data?.downloadDir === 'string' ? data.downloadDir.trim() : ''
 }
-
 /** Persist the download dir (merge — keeps the switch); returns the value. */
 export function writeGptDownloadDir(dshHome, dir) {
   const value = typeof dir === 'string' ? dir.trim() : ''
   const merged = { ...(readJson(imageLaneConfigPath(dshHome)) ?? {}), downloadDir: value }
   writeJson(imageLaneConfigPath(dshHome), merged)
   return value
+}
+
+/* ------------------------------------------------------------------------- *
+ * PENDING WEB GENERATION — remember an in-flight ChatGPT image so a later run
+ * can FIND AND DOWNLOAD it instead of generating a second one.
+ *
+ * Why: gpt-image generation takes 1-3 minutes. If our wait expires (or the
+ * process is interrupted) the image often finishes seconds later. Without a
+ * record of WHICH conversation it belongs to, the only recovery was to
+ * generate again — burning quota for an image that already exists
+ * (user-reported 2026-10-17).
+ *
+ * Shape: { url, prompt, accountId, at, state: 'generating'|'done' }
+ * ------------------------------------------------------------------------- */
+
+export function gptPendingPath(dshHome) {
+  return path.join(dataDir(dshHome), 'gpt-pending.json')
+}
+
+/** Read the pending record, or undefined when there is none. */
+export function readGptPending(dshHome) {
+  const data = readJson(gptPendingPath(dshHome))
+  if (typeof data?.url !== 'string' || data.url.length === 0) return undefined
+  return {
+    url: data.url,
+    prompt: typeof data.prompt === 'string' ? data.prompt : '',
+    accountId: typeof data.accountId === 'string' ? data.accountId : '',
+    at: typeof data.at === 'number' ? data.at : 0,
+    state: data.state === 'done' ? 'done' : 'generating',
+  }
+}
+
+/** Persist the pending record (merge). */
+export function writeGptPending(dshHome, patch = {}) {
+  const merged = { ...(readJson(gptPendingPath(dshHome)) ?? {}), ...patch }
+  writeJson(gptPendingPath(dshHome), merged)
+  return merged
+}
+
+/** Forget the pending record. */
+export function clearGptPending(dshHome) {
+  try { fs.rmSync(gptPendingPath(dshHome), { force: true }) } catch { /* ignore */ }
 }
 
 /** Where BGM generation preferences are stored. */

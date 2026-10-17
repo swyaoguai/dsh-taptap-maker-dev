@@ -73,6 +73,14 @@ node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复�
 4. **尺寸由 ChatGPT 决定**，需要特定比例就在提示词里写明（如「1:1 方形构图」）。
 5. **目视验收每一张**，脚本不报错不代表画面对。
 6. **`lane_disabled` 不是故障**：那是用户在设置里关掉了通道，按回退走中转站即可。
+7. **出图慢（1~3 分钟），超时别重新生成**：脚本现在会等"生成中"状态结束、只认本次新出现的图再下载；
+   真等超时会返回 `pendingUrl`（那个对话的链接）。此时**先用 `grab` 把已生成好的图抓回来**：
+   ```powershell
+   node "<plugin>/src/taptap-gpt.mjs" pending        # 看有没有待抓取的对话
+   node "<plugin>/src/taptap-gpt.mjs" grab           # 抓 pending 里那个对话（不重新生成）
+   node "<plugin>/src/taptap-gpt.mjs" grab --url <对话链接>
+   ```
+   `gen` 自己也会先尝试续抓上一轮未完成的图（`--no-resume` 可关闭）。**重复 `gen` 会白烧一次生成额度。**
 
 ---
 

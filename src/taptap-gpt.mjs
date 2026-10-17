@@ -45,7 +45,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir } from './paths.js'
+import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending } from './paths.js'
 import { downscaleFile } from './taptap-image.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
@@ -501,32 +501,109 @@ steps = {}
 DL = ${pyStr(dl)}
 DEST = ${pyStr(dest)}
 pg.goto(${pyStr(GPT_URL)}, timeout=60000)
-pg.wait_for_timeout(4000)
+# Wait for the composer instead of sleeping a fixed 3.5s: on a cold profile the
+# page can take 10-20s (Cloudflare + app boot), and a fixed sleep made us report
+# "no composer found (UI changed?)" on a perfectly fine page (hit 2026-10-17).
+def _find_composer():
+    for sel in ["#prompt-textarea", "div[contenteditable='true']", "textarea"]:
+        try:
+            el = pg.query_selector(sel)
+            if el and el.is_visible():
+                return el, sel
+        except Exception:
+            pass
+    return None, None
+
+box = None
+composer_sel = None
+waited = 0
+while waited < 40:
+    box, composer_sel = _find_composer()
+    if box is not None:
+        break
+    pg.wait_for_timeout(1000)
+    waited += 1
+steps["composer_wait_s"] = waited
 # If we landed on a login wall, stop immediately and say so — silently
 # generating as an anonymous visitor is not possible and must not be faked.
-try:
-    body = pg.inner_text("body")
-except Exception:
-    body = ""
-if ("登录" in body or "Log in" in body) and pg.query_selector("#prompt-textarea, textarea, [contenteditable='true']") is None:
-    result["steps"] = {"stage": "not_logged_in"}
-    result["error"] = "not_logged_in"
-    return result
-# Type the prompt. ChatGPT's composer is a ProseMirror contenteditable.
-box = None
-for sel in ["#prompt-textarea", "div[contenteditable='true']", "textarea"]:
+if box is None:
     try:
-        el = pg.query_selector(sel)
-        if el and el.is_visible():
-            box = el
-            steps["composer"] = sel
-            break
+        body = pg.inner_text("body")
     except Exception:
-        pass
+        body = ""
+    if "登录" in body or "Log in" in body:
+        result["steps"] = {"stage": "not_logged_in"}
+        result["error"] = "not_logged_in"
+        return result
+    result["steps"] = steps
+    result["error"] = "no composer found after ${Math.floor(40)}s (page not usable / UI changed?)"
+    return result
+# CRITICAL: the persistent profile usually reopens the PREVIOUS conversation,
+# whose images were already complete. The old code accepted "any CDN <img>" as
+# this run's result — so it downloaded the previous image and closed the browser
+# while the new one was still rendering (user-reported 2026-10-17). Start a NEW
+# chat and snapshot existing images so only genuinely new ones count.
+if "/c/" in pg.url:
+    jumped = False
+    for sel in ["a[href='/']", "button[aria-label*='新聊天']", "button[aria-label*='New chat']",
+                "a[aria-label*='新聊天']", "a[aria-label*='New chat']"]:
+        try:
+            el = pg.query_selector(sel)
+            if el and el.is_visible():
+                el.click(force=True)
+                jumped = True
+                break
+        except Exception:
+            pass
+    if not jumped:
+        pg.goto(${pyStr(GPT_URL)}, timeout=60000)
+    pg.wait_for_timeout(2500)
+steps["fresh_chat"] = "/c/" not in pg.url
+
+def _img_srcs():
+    try:
+        return pg.evaluate("""() => {
+            const out = [];
+            document.querySelectorAll('img').forEach(i => {
+                const s = i.currentSrc || i.src || '';
+                if (s && s.indexOf('data:') !== 0) out.push(s);
+            });
+            return out;
+        }""")
+    except Exception:
+        return []
+
+def _busy():
+    # While ChatGPT is drawing it shows a stop button / progress state. Only
+    # treat the run as finished once that disappears (otherwise we grab a
+    # half-rendered or preview image and quit early).
+    try:
+        return pg.query_selector(
+            "button[data-testid='stop-button'], "
+            "button[aria-label*='停止'], button[aria-label*='Stop generating'], "
+            "[data-testid='stop-button']"
+        ) is not None
+    except Exception:
+        return False
+
+before = set(_img_srcs() or [])
+steps["images_before"] = len(before)
+# Re-acquire the composer: the "new chat" click above reloads the SPA, so the
+# earlier handle is stale. Wait briefly rather than failing instantly.
+box = None
+composer_sel = None
+waited2 = 0
+while waited2 < 20:
+    box, composer_sel = _find_composer()
+    if box is not None:
+        break
+    pg.wait_for_timeout(1000)
+    waited2 += 1
 if box is None:
     result["steps"] = steps
-    result["error"] = "no composer found (UI changed?)"
+    result["error"] = "no composer found after new chat"
     return result
+steps["composer"] = composer_sel
 try:
     box.click(force=True)
     pg.wait_for_timeout(500)
@@ -557,46 +634,69 @@ if sent is None:
         result["error"] = "could not submit: " + str(e)
         return result
 steps["sent"] = sent
-# Wait for generation. Two independent signals:
-#  (a) an <img> that appeared after submit (the rendered image), and
-#  (b) a quota / rate-limit / error banner (means: stop, this account is out).
+# Remember the conversation URL as soon as it appears: this is what lets a
+# later run FIND this image instead of generating a duplicate.
+conv_url = None
+for _ in range(40):
+    pg.wait_for_timeout(1000)
+    if "/c/" in pg.url:
+        conv_url = pg.url.split("?")[0]
+        break
+steps["conv_url"] = conv_url
+result["conv_url"] = conv_url
+# Wait for generation. Signals:
+#  (a) a NEW <img> (not in the pre-submit snapshot) that is large enough,
+#  (b) the page is no longer "generating",
+#  (c) a quota / rate-limit banner (means: stop, this account is out).
 deadline = time.time() + ${Math.floor(waitMs / 1000)}
 img_src = None
 quota_hit = None
 polls = 0
+stable = 0
+last_src = None
 while time.time() < deadline:
     polls += 1
-    try:
-        txt = pg.inner_text("body")
-    except Exception:
-        txt = ""
-    for kw in ["达到上限", "已达上限", "rate limit", "Rate limit", "too many requests",
-               "稍后再试", "limit reached", "quota", "用量"]:
-        if kw in txt:
-            # Only trust it when no image so far: ChatGPT shows some of these
-            # words in unrelated helper copy.
-            if pg.query_selector("img[src*='oaiusercontent'], img[alt*='Generated']") is None:
+    new_img = pg.evaluate("""(before) => {
+        const out = [];
+        document.querySelectorAll('img').forEach(i => {
+            const s = i.currentSrc || i.src || '';
+            if (!s || before.indexOf(s) !== -1) return;
+            if (s.indexOf('data:') === 0) return;
+            const w = i.naturalWidth || 0, h = i.naturalHeight || 0;
+            if (w < 200 || h < 200) return;   // avatars / icons
+            out.push({ src: s, w: w, h: h });
+        });
+        out.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+        return out.length ? out[0] : null;
+    }""", list(before))
+    busy = _busy()
+    if new_img and new_img.get("src"):
+        # Two consecutive polls with the SAME src and no "generating" state:
+        # the image is final (a preview would still be changing).
+        if new_img["src"] == last_src and not busy:
+            stable += 1
+        else:
+            stable = 0
+        last_src = new_img["src"]
+        if stable >= 2:
+            img_src = new_img["src"]
+            steps["image"] = {"w": new_img.get("w"), "h": new_img.get("h")}
+            break
+    else:
+        stable = 0
+    if not new_img:
+        try:
+            txt = pg.inner_text("body")
+        except Exception:
+            txt = ""
+        for kw in ["达到上限", "已达上限", "rate limit", "Rate limit", "too many requests",
+                   "稍后再试", "limit reached", "quota"]:
+            if kw in txt:
                 quota_hit = kw
                 break
-    if quota_hit:
-        break
-    got = pg.evaluate("""() => {
-        const imgs = Array.from(document.querySelectorAll('img'));
-        // Generated images live on the OpenAI CDN; avatars/icons do not.
-        const cands = imgs.filter(i => {
-            const s = i.currentSrc || i.src || '';
-            return s.indexOf('oaiusercontent.com') !== -1 || s.indexOf('/images/') !== -1 ||
-                   s.indexOf('sdmntpr') !== -1 || s.indexOf('v1/files') !== -1;
-        });
-        if (cands.length === 0) return null;
-        const last = cands[cands.length - 1];
-        return { src: last.currentSrc || last.src, w: last.naturalWidth, h: last.naturalHeight };
-    }""")
-    if got and got.get("src") and (got.get("w") or 1) > 64:
-        img_src = got["src"]
-        steps["image"] = {"w": got.get("w"), "h": got.get("h")}
-        break
-    pg.wait_for_timeout(4000)
+        if quota_hit:
+            break
+    pg.wait_for_timeout(2000)
 steps["polls"] = polls
 if quota_hit:
     steps["quota_signal"] = quota_hit
@@ -604,8 +704,11 @@ if quota_hit:
     result["error"] = "quota:" + quota_hit
     return result
 if img_src is None:
-    steps["note"] = "no image element appeared before the deadline"
+    steps["note"] = "no NEW image reached a stable state before the deadline"
+    steps["still_generating"] = _busy()
     result["steps"] = steps
+    # Might still be rendering: tell the caller WHERE it is so it can grab the
+    # finished image later instead of burning quota on a second generation.
     result["error"] = "no_image"
     return result
 # Fetch the bytes THROUGH THE PAGE (same origin/cookies), then write locally.
@@ -648,6 +751,21 @@ return result`
   if (!r.ok) return { ok: false, error: r.err, account: accountId ?? null }
   const steps = r.steps ?? {}
   touchGptAccount(dshHome, accountId ?? '', { lastUsedAt: Date.now() })
+  // Record the conversation as soon as we know it: if this run ends up timing
+  // out, the NEXT run can download the finished image from here instead of
+  // generating a duplicate (which silently burns one generation).
+  const convUrl = typeof r.conv_url === 'string' && r.conv_url.length > 0
+    ? r.conv_url
+    : (typeof steps.conv_url === 'string' && steps.conv_url.length > 0 ? steps.conv_url : null)
+  if (convUrl !== null && steps.saved === undefined) {
+    writeGptPending(dshHome, {
+      url: convUrl,
+      prompt,
+      accountId: accountId ?? '',
+      at: Date.now(),
+      state: r.error ? 'generating' : 'done',
+    })
+  }
   // A quota signal means this account is spent for now: mark it and let the
   // caller rotate. `banned` would be permanent; `cooling` keeps it in the pool.
   const isQuota = typeof r.error === 'string' && r.error.startsWith('quota:')
@@ -655,11 +773,23 @@ return result`
     touchGptAccount(dshHome, accountId, { status: 'cooling', note: r.error })
   }
   if (typeof r.error === 'string' && r.error.length > 0 && !isQuota) {
-    return { ok: false, error: r.error, steps, account: accountId ?? null }
+    return {
+      ok: false,
+      error: r.error,
+      steps,
+      account: accountId ?? null,
+      // Tell the caller how to recover the image WITHOUT regenerating.
+      pendingUrl: convUrl,
+      hint: convUrl !== null
+        ? `这张图可能还在生成：稍后用 grab 抓取同一个对话即可（不用重新生成，省额度）：taptap-gpt grab --url "${convUrl}"`
+        : undefined,
+    }
   }
   if (steps.saved === undefined) {
-    return { ok: false, error: r.error ?? 'no file saved', steps, account: accountId ?? null }
+    return { ok: false, error: r.error ?? 'no file saved', steps, account: accountId ?? null, pendingUrl: convUrl }
   }
+  // Downloaded successfully → the pending record has served its purpose.
+  clearGptPending(dshHome)
 
   // Optional downscale for small assets (icons / UI): keep the full render.
   let saved = steps.saved
@@ -700,7 +830,7 @@ return result`
  * ToS and risks bans. The user asked for this explicitly (2026-10) and owns the
  * risk; we do NOT hide it and we do NOT retry a banned account.
  */
-export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir } = {}) {
+export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir, noResume = false } = {}) {
   // Master switch first: never open a browser for a lane the user turned off.
   if (!readGptLaneEnabled(dshHome)) {
     return {
@@ -713,6 +843,22 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     }
   }
   const pool = readGptPool(dshHome)
+  // Auto-resume FIRST: if a previous run left a conversation behind (its image
+  // may have finished after we closed the browser), download that instead of
+  // generating a duplicate. `--no-resume` opts out.
+  if (!noResume) {
+    const pending = readGptPending(dshHome)
+    if (pending && Date.now() - pending.at < 30 * 60 * 1000) {
+      const got = await grab(dshHome, {
+        url: pending.url,
+        accountId: pending.accountId || accountId || undefined,
+      })
+      if (got.ok) {
+        return { ...got, resumed: true, rotated: false, tried: [pending.accountId || null] }
+      }
+      // Still generating / not ready → fall through to a normal generation.
+    }
+  }
   // No pool configured → fall back to the single default profile.
   if (pool.accounts.length === 0) {
     const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size, dir, projectDir })
@@ -753,6 +899,139 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     failures,
     hint: 'pool: /taptap-gpt pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
   }
+}
+
+/**
+ * `grab`: download the finished image from a conversation we ALREADY started,
+ * without generating anything new. This is the recovery path when a generation
+ * outlives our wait window — the image usually lands seconds later, and
+ * regenerating would waste one generation for nothing.
+ *
+ * `url` may be omitted: then the pending record's conversation is used.
+ * `requireNew` (used by gen's auto-resume) only accepts images that were not
+ * already on the page before the run; `grab` itself accepts the newest large
+ * image in the conversation.
+ */
+export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 180000 } = {}) {
+  const pending = readGptPending(dshHome)
+  const target = (typeof url === 'string' && url.length > 0) ? url : pending?.url
+  if (typeof target !== 'string' || target.length === 0) {
+    return { ok: false, error: 'no_url', hint: '还没有待抓取的对话：先用 gen 生成，或 grab --url <对话链接>。' }
+  }
+  const account = accountId ?? pending?.accountId ?? undefined
+  const resolved = resolveDownloadDir(dshHome, {})
+  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+  const dest = out || path.join(resolved.dir, `gpt-${stamp}.png`)
+  fs.mkdirSync(path.dirname(dest), { recursive: true })
+
+  const snippet = `import time, os, base64 as _b64
+steps = {}
+DEST = ${pyStr(dest)}
+pg.goto(${pyStr(target)}, timeout=60000)
+pg.wait_for_timeout(3500)
+def _busy():
+    try:
+        return pg.query_selector(
+            "button[data-testid='stop-button'], "
+            "button[aria-label*='停止'], button[aria-label*='Stop generating']"
+        ) is not None
+    except Exception:
+        return False
+def _best():
+    return pg.evaluate("""() => {
+        const out = [];
+        document.querySelectorAll('img').forEach(i => {
+            const s = i.currentSrc || i.src || '';
+            if (!s || s.indexOf('data:') === 0) return;
+            const w = i.naturalWidth || 0, h = i.naturalHeight || 0;
+            if (w < 200 || h < 200) return;
+            out.push({ src: s, w: w, h: h });
+        });
+        out.sort((a, b) => (b.w * b.h) - (a.w * a.h));
+        return out.length ? out[0] : null;
+    }""")
+# Wait for the page to stop generating and settle on a final image.
+deadline = time.time() + ${Math.floor(waitMs / 1000)}
+img = None
+stable = 0
+last = None
+while time.time() < deadline:
+    cur = _best()
+    if cur and cur.get("src"):
+        if cur["src"] == last and not _busy():
+            stable += 1
+        else:
+            stable = 0
+        last = cur["src"]
+        if stable >= 2:
+            img = cur
+            break
+    else:
+        stable = 0
+    pg.wait_for_timeout(2000)
+steps["still_generating"] = _busy()
+if img is None:
+    result["steps"] = steps
+    result["error"] = "no_image"
+    return result
+steps["image"] = {"w": img.get("w"), "h": img.get("h")}
+got = pg.evaluate("""async (u) => {
+    try {
+        const r = await fetch(u, { mode: 'cors', credentials: 'include' });
+        if (!r.ok) return { error: 'HTTP ' + r.status };
+        const b = await r.blob();
+        const buf = await b.arrayBuffer();
+        const by = new Uint8Array(buf);
+        let s = '';
+        const CH = 8192;
+        for (let i = 0; i < by.length; i += CH) {
+            s += String.fromCharCode.apply(null, by.subarray(i, i + CH));
+        }
+        return { b64: btoa(s), len: by.length };
+    } catch (e) { return { error: String(e) }; }
+}""", img["src"])
+if not got or not got.get("b64"):
+    steps["fetch_error"] = (got or {}).get("error", "no data")
+    result["steps"] = steps
+    result["error"] = "download_failed"
+    return result
+try:
+    open(DEST, "wb").write(_b64.b64decode(got["b64"]))
+    steps["saved"] = DEST
+    steps["bytes"] = got.get("len")
+except Exception as e:
+    steps["write_error"] = str(e)
+    result["steps"] = steps
+    result["error"] = "write_failed"
+    return result
+result["steps"] = steps
+result["saved"] = DEST
+return result`
+
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000, accountId: account })
+  if (!r.ok) return { ok: false, error: r.err, steps: null, url: target }
+  const steps = r.steps ?? {}
+  if (typeof r.error === 'string' && r.error.length > 0 && steps.saved === undefined) {
+    return { ok: false, error: r.error, steps, url: target, stillGenerating: steps.still_generating === true }
+  }
+  if (steps.saved === undefined) return { ok: false, error: 'no file saved', steps, url: target }
+  clearGptPending(dshHome)
+  let saved = steps.saved
+  const notes = []
+  if (downscale) {
+    const ext = path.extname(saved)
+    const full = saved.replace(/(\.[a-z0-9]+)?$/i, `.full${ext || '.png'}`)
+    fs.copyFileSync(saved, full)
+    const res = downscaleFile(full, saved, downscale)
+    if (res.ok) notes.push(`downscaled → ${downscale} via ${res.tool} (full kept: ${full})`)
+    else { fs.rmSync(full, { force: true }); notes.push(res.hint) }
+  }
+  if (out && saved !== out) {
+    fs.mkdirSync(path.dirname(out), { recursive: true })
+    fs.copyFileSync(saved, out)
+    saved = out
+  }
+  return { ok: true, saved, grabbed: true, url: target, steps, notes }
 }
 
 async function main() {
@@ -817,7 +1096,7 @@ async function main() {
   if (cmd === 'gen' || cmd === 'generate') {
     const prompt = args.prompt
     if (typeof prompt !== 'string' || prompt.length === 0) {
-      process.stderr.write('usage: taptap-gpt gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>]\n')
+      process.stderr.write('usage: taptap-gpt gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>] [--no-resume]\n')
       process.exitCode = 2
       return
     }
@@ -827,9 +1106,27 @@ async function main() {
       out: args.out,
       downscale: args.downscale,
       size: args.size,
+      noResume: args['no-resume'] === true,
     })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok) process.exitCode = 1
+    return
+  }
+  if (cmd === 'grab' || cmd === '抓图' || cmd === '下载') {
+    const r = await grab(home, {
+      url: typeof args.url === 'string' ? args.url : undefined,
+      out: args.out,
+      downscale: args.downscale,
+      accountId: args.account,
+      waitMs: Number(args.waitMs ?? 180000),
+    })
+    process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
+    if (!r.ok) process.exitCode = 1
+    return
+  }
+  if (cmd === 'pending' || cmd === '待抓取') {
+    const p = readGptPending(home) ?? null
+    process.stdout.write(`${JSON.stringify({ ok: true, pending: p }, null, 2)}\n`)
     return
   }
 
