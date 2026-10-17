@@ -37,7 +37,7 @@ import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
 import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation } from './src/taptap-gpt.mjs'
-import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled } from './src/paths.js'
+import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -218,7 +218,11 @@ function policyText(config, gptLaneOn = true) {
       '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
       '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
       '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
-      '生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
+      '**图片落点（默认跟随项目）**：在工作目录（Maker 项目根）执行 `gen` 时，图片默认存到 `<项目>/.taptap-images/`，',
+      '不再丢到 C 盘；该目录自带 `.gitignore` 防止被 Maker 自动提交。用户可在设置页「ChatGPT 网页生图」卡里自定义',
+      '（支持 `{project}` / `{home}` 占位符），也可用 `/taptap-gpt dir --set <路径>`；命令行加 `--dir <目录>` 可单次覆盖。',
+      '告诉用户图片存到了哪里（结果里的 `saved` 就是真实路径）。中间产物留在该目录或 `assets/` 之外，',
+      '裁好后再搬进 `assets/`，并补同名 `.meta`。',
     ]
     : [
       '**图片资源：ChatGPT 网页生图已被用户在设置里关闭**（总开关 OFF）——',
@@ -226,7 +230,7 @@ function policyText(config, gptLaneOn = true) {
       '`node "<插件目录>/src/taptap-image.mjs" --prompt "…" --out <文件>`（或 `/taptap-image <描述>`），',
       '或复用项目内已有素材；仍然不要用内置 `generate_image`。',
       '若用户想重新启用网页生图，引导他去设置页「ChatGPT 网页生图」卡打开开关（或 `/taptap-gpt` 里说明），不要自己去改状态。',
-      '生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
+      '中转站保存位置可用 `--out` 或 `/taptap-gpt dir` 控制的目录约定；中间产物仍放在 `assets/` 之外，裁好后再搬进 `assets/` 并补 `.meta`。',
     ]
   return [
     '## TapTap Maker 开发守则（dsh-taptap-maker-dev 插件注入）',
@@ -644,6 +648,20 @@ export function apply(ctx, config = {}) {
           try {
             const on = setGptLane(parsed?.enabled !== false)
             return sendJson(res, 200, { ok: true, laneEnabled: on, ...gptStatus(home) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // Download dir for generated images: '' follows the project, a path
+        // pins it. Merge-writes imageLane.json so the lane switch survives.
+        if (req.method === 'POST' && sub === 'gpt-dir') {
+          const body = await readBody(req)
+          let parsed = {}
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          try {
+            const value = typeof parsed?.dir === 'string' ? parsed.dir : ''
+            writeGptDownloadDir(home, value)
+            return sendJson(res, 200, { ok: true, ...gptStatus(home) })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
@@ -1078,6 +1096,40 @@ export function apply(ctx, config = {}) {
             text: r.ok
               ? `已退出${acct ? `账号「${acct}」` : ''}登录态。可用另一个账号 /taptap-gpt login。`
               : `退出失败：可能有浏览器正在占用，请先关闭再试。（${r.profile ?? ''}）`,
+          }
+        }
+        // Download dir: /taptap-gpt dir | dir --set <路径> | dir --reset
+        if (low === 'dir' || low.startsWith('dir ') || raw === '目录') {
+          const setArg = (/--set\s+("[^"]+"|'[^']+'|\S+)/.exec(raw) ?? [])[1]
+          if (/--reset/.test(raw)) {
+            writeGptDownloadDir(home, '')
+            return { kind: 'success', text: '已恢复默认：图片存到当前项目下的 .taptap-images/（不在项目里时存到 $DSH_HOME）。' }
+          }
+          if (setArg) {
+            const value = setArg.replace(/^["']|["']$/g, '')
+            writeGptDownloadDir(home, value)
+            const st = gptStatus(home)
+            return {
+              kind: 'success',
+              text: [
+                `图片下载目录已设为：${value}`,
+                `当前生效：${st.downloadDir}`,
+                '',
+                '支持占位符 {project}（当前项目目录）、{home}（$DSH_HOME）。恢复默认：/taptap-gpt dir --reset',
+              ].join('\n'),
+            }
+          }
+          const st = gptStatus(home)
+          return {
+            kind: 'success',
+            text: [
+              `图片下载目录：${st.downloadDir}`,
+              `来源：${st.downloadDirSource === 'project' ? '跟随当前项目（默认）' : st.downloadDirSource === 'config' ? '自定义' : '默认（$DSH_HOME）'}`,
+              st.downloadDirConfigured ? `自定义值：${st.downloadDirConfigured}` : '自定义值：未设置（跟随项目）',
+              '',
+              '设置：/taptap-gpt dir --set "D:\\my-images" 或 --set "{project}/imgs"',
+              '恢复默认：/taptap-gpt dir --reset',
+            ].join('\n'),
           }
         }
         // Master switch: /taptap-gpt lane on|off|status

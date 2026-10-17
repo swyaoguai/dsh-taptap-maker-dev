@@ -96,10 +96,16 @@ export function writePolicyBlock(dshHome, enabled) {
 }
 
 /**
- * Image-lane master switch — stored in imageLane.json as
- * { gptWebEnabled: boolean }. When false, the ChatGPT web lane is OFF: the
- * agent must fall back to the relay lane (taptap-image) and /taptap-gpt gen
- * refuses to run. Default true (the web lane is primary since 2026-10).
+ * Image-lane settings — stored in ONE file (imageLane.json):
+ *   { gptWebEnabled: boolean, downloadDir: string }
+ *
+ * - gptWebEnabled: master switch for the ChatGPT web lane (default true).
+ * - downloadDir:   where generated images land. Empty means "auto": the
+ *                  project directory when the caller is inside a Maker project
+ *                  (…<project>/.taptap-images), otherwise $DSH_HOME/…/gpt-images.
+ *                  Supports {project} and {home} placeholders.
+ *
+ * Writing MERGES: flipping one setting must never wipe the other.
  */
 export function imageLaneConfigPath(dshHome) {
   return path.join(dataDir(dshHome), 'imageLane.json')
@@ -112,10 +118,25 @@ export function readGptLaneEnabled(dshHome, fallback = true) {
   return fallback !== false
 }
 
-/** Persist the master switch; returns the stored boolean. */
+/** Persist the master switch (merge — keeps downloadDir); returns the value. */
 export function writeGptLaneEnabled(dshHome, enabled) {
   const value = enabled !== false
-  writeJson(imageLaneConfigPath(dshHome), { gptWebEnabled: value })
+  const merged = { ...(readJson(imageLaneConfigPath(dshHome)) ?? {}), gptWebEnabled: value }
+  writeJson(imageLaneConfigPath(dshHome), merged)
+  return value
+}
+
+/** Raw configured download dir ('' = follow the project / auto). */
+export function readGptDownloadDir(dshHome) {
+  const data = readJson(imageLaneConfigPath(dshHome))
+  return typeof data?.downloadDir === 'string' ? data.downloadDir.trim() : ''
+}
+
+/** Persist the download dir (merge — keeps the switch); returns the value. */
+export function writeGptDownloadDir(dshHome, dir) {
+  const value = typeof dir === 'string' ? dir.trim() : ''
+  const merged = { ...(readJson(imageLaneConfigPath(dshHome)) ?? {}), downloadDir: value }
+  writeJson(imageLaneConfigPath(dshHome), merged)
   return value
 }
 

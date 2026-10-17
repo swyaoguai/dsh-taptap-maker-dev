@@ -37,6 +37,7 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 - **额度红线** — 开关，关之前会弹确认
 - **ChatGPT 生图（首选）** — **总开关**（关掉后整条通道停用，模型改走中转站）+ 账号列表（主账号常驻，
   退出后可再登；「+ 添加账号」一步完成"建条目 + 打开登录"）+ 多账号轮询开关
+  + **图片下载目录**（默认跟随项目 `<项目>/.taptap-images`，可自定义，支持 `{project}` / `{home}`）
 - **中转站（回退）** — Base URL / Key / Model（「获取模型」按钮自动拉取）/ 缺省尺寸
 - **完整 BGM** — 填风格描述 → 生成提示词 → 一键打开网页 → 下载后自动导入
 - **CC0 音效库** — 状态、搜索、「更新库」
@@ -53,6 +54,12 @@ node <plugin-dir>/src/taptap-gpt.mjs gen --prompt "蓝色盾牌图标，扁平�
 # 网页生图总开关（关掉后改走中转站）
 node <plugin-dir>/src/taptap-gpt.mjs lane status
 node <plugin-dir>/src/taptap-gpt.mjs lane off
+
+# 图片存放位置：默认跟随当前项目（<项目>/.taptap-images），也可自定义
+node <plugin-dir>/src/taptap-gpt.mjs dir                 # 看当前解析结果
+node <plugin-dir>/src/taptap-gpt.mjs dir --set "D:\my-images"
+node <plugin-dir>/src/taptap-gpt.mjs dir --set "{project}/imgs"
+node <plugin-dir>/src/taptap-gpt.mjs dir --reset         # 恢复跟随项目
 
 # 账号轮询：添加账号 → 各登录一次 → 之后自动轮换
 node <plugin-dir>/src/taptap-gpt.mjs pool add --id a2 --label "小号"

@@ -33,10 +33,11 @@ node "<plugin>/src/taptap-gpt.mjs" lane status   # 查开关
 # 首次：登录一次（会开真实浏览器，Google/Apple/手机号/邮箱均可，免费账号即可生图）
 node "<plugin>/src/taptap-gpt.mjs" login
 
-# 生成
-node "<plugin>/src/taptap-gpt.mjs" gen --prompt "一只橙色小猫，扁平矢量风格" --out D:\tmp\cat.png
-node "<plugin>/src/taptap-gpt.mjs" gen --prompt "蓝色盾牌图标，扁平，居中留白" --out D:\tmp\icon.png --downscale 128x128
-node "<plugin>/src/taptap-gpt.mjs" status      # 登录状态 + 账号池
+# 生成（不给 --out 时自动存到 <项目>/.taptap-images/，跟随项目）
+node "<plugin>/src/taptap-gpt.mjs" gen --prompt "一只橙色小猫，扁平矢量风格"
+node "<plugin>/src/taptap-gpt.mjs" gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
+node "<plugin>/src/taptap-gpt.mjs" status      # 登录状态 + 账号池 + 下载目录
+node "<plugin>/src/taptap-gpt.mjs" dir         # 看图片存到哪
 ```
 
 对话里直接说「生成一个蓝色盾牌图标」即可，模型默认走这条。
@@ -104,7 +105,13 @@ node "<plugin>/src/taptap-image.mjs" --config    # 查看生效配置（key 掩�
 
 ## 落盘规范（Maker 工作区，两条通道通用）
 
-- 生成/抠图全程在 `assets/` **之外**的临时目录（如 `<project>/.tmp/`）做。
+- **图片落点默认跟随项目**：在项目根执行 `gen` 时存到 `<项目>/.taptap-images/`，不再丢到 C 盘。
+  该目录自带一个 `.gitignore`（内容 `*`），避免被 Maker 运行时自动提交。
+  - 看当前解析：`node "<plugin>/src/taptap-gpt.mjs" dir`
+  - 自定义：`dir --set "D:\my-images"` 或 `dir --set "{project}/imgs"`（支持 `{project}` / `{home}`）
+  - 恢复跟随项目：`dir --reset`；单次覆盖：`gen --dir <目录>`
+  - 设置页「ChatGPT 网页生图」卡里也有同样的输入框
+- 生成/抠图全程在 `assets/` **之外**的临时目录做（`.taptap-images/` 就是现成的）。
 - 裁好的成品才搬进 `assets/image/...`，并**补同名 `.meta`**：`{"uuid":"<27位随机串>"}`。
 - 两条通道都无远程映射，后续改图只能重新生成（`edit_image` 对它们无效）。
 - 小资源（图标 / 小 UI）：出干净大图（构图留白、主体居中），再用 `--downscale <宽>x<高>`（128x128 / 64x64）高质量缩小，切忌直接让模型出极小尺寸。

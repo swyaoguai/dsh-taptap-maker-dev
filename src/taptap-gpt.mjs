@@ -45,7 +45,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled } from './paths.js'
+import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir } from './paths.js'
 import { downscaleFile } from './taptap-image.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
@@ -67,8 +67,70 @@ export function gptAccountProfileDir(dshHome, accountId) {
   return path.join(dataDir(dshHome), `browser-profile-gpt-${id}`)
 }
 
+/** Fallback download dir (used when not inside a Maker project). */
 export function imageDownloadDir(dshHome) {
   return path.join(dataDir(dshHome), 'gpt-images')
+}
+
+/** Does `dir` look like a TapTap Maker project root? (has assets/) */
+function isMakerProject(dir) {
+  try {
+    return fs.existsSync(path.join(dir, 'assets'))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Ensure a generated-image folder exists AND cannot be committed by accident.
+ * The Maker runtime auto-commits the whole workspace, so anything we drop
+ * inside a project must be git-ignored — a self-ignoring .gitignore does that
+ * without touching the user's root .gitignore.
+ */
+function ensureImageDir(dir, { insideProject }) {
+  fs.mkdirSync(dir, { recursive: true })
+  if (insideProject) {
+    const gi = path.join(dir, '.gitignore')
+    try {
+      if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n!.gitignore\n', 'utf8')
+    } catch { /* best effort */ }
+  }
+  return dir
+}
+
+/**
+ * Resolve WHERE generated images go. Precedence:
+ *   1. explicit `--dir` (this call only)
+ *   2. configured `downloadDir` in imageLane.json (supports {project} / {home},
+ *      relative paths resolve against the project dir)
+ *   3. auto: inside a Maker project → <project>/.taptap-images
+ *            otherwise          → $DSH_HOME/taptap-maker-dev/gpt-images
+ *
+ * "Follow the project" is the DEFAULT because dumping game assets into C:\ by
+ * surprise is exactly what the user objected to (2026-10-17).
+ */
+export function resolveDownloadDir(dshHome, { explicit, projectDir } = {}) {
+  const cwd = path.resolve(projectDir ?? process.cwd())
+  const home = path.join(dataDir(dshHome))
+  const expand = (raw) => String(raw)
+    .replace(/\{project\}/gi, cwd)
+    .replace(/\{home\}/gi, home)
+    .trim()
+  const configured = (typeof explicit === 'string' && explicit.trim().length > 0)
+    ? explicit
+    : readGptDownloadDir(dshHome)
+  if (configured.length > 0) {
+    let dir = expand(configured)
+    if (!path.isAbsolute(dir)) dir = path.resolve(cwd, dir)
+    // Only treat it as "inside a project" when it really sits under one.
+    const insideProject = isMakerProject(cwd) && path.resolve(dir).toLowerCase().startsWith(path.resolve(cwd).toLowerCase())
+    return { dir: ensureImageDir(dir, { insideProject }), source: explicit ? 'flag' : 'config', projectDir: cwd }
+  }
+  if (isMakerProject(cwd)) {
+    const dir = path.join(cwd, '.taptap-images')
+    return { dir: ensureImageDir(dir, { insideProject: true }), source: 'project', projectDir: cwd }
+  }
+  return { dir: ensureImageDir(imageDownloadDir(dshHome), { insideProject: false }), source: 'default', projectDir: cwd }
 }
 
 /** Escape a string into a python single-quoted literal. */
@@ -245,13 +307,25 @@ export function statusFor(dshHome, accountId) {
       sample = 'cookie-db-unreadable'
     }
   }
+  // Report the EFFECTIVE download dir (following the project when applicable)
+  // plus the raw configured value, so the settings page can show both.
+  let resolvedDir = imageDownloadDir(dshHome)
+  let dirSource = 'default'
+  try {
+    const r = resolveDownloadDir(dshHome)
+    resolvedDir = r.dir
+    dirSource = r.source
+  } catch { /* keep the fallback */ }
   return {
     profile: prof,
     exists,
     loggedIn,
     authSample: sample,
     cookieFile: cookieFile ?? null,
-    downloadDir: imageDownloadDir(dshHome),
+    downloadDir: resolvedDir,
+    downloadDirDefault: imageDownloadDir(dshHome),
+    downloadDirConfigured: readGptDownloadDir(dshHome),
+    downloadDirSource: dirSource,
     laneEnabled: laneOn,
   }
 }
@@ -407,15 +481,16 @@ return result`
  * Account rotation: on a quota / rate-limit signal we ban the account and the
  * caller (generateWithRotation) retries with the next pool account.
  */
-export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size } = {}) {
+export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, dir, projectDir } = {}) {
   // Master switch: when the lane is off, refuse honestly instead of opening a
   // browser. The relay lane (taptap-image) is the documented fallback.
   if (!readGptLaneEnabled(dshHome)) {
     return { ok: false, error: 'lane_disabled', hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。' }
   }
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
-  const dl = imageDownloadDir(dshHome)
-  fs.mkdirSync(dl, { recursive: true })
+  // Follow the project by default; --dir / config override it.
+  const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
+  const dl = resolved.dir
   // Unique per run so a retry never collides with a previous download.
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const dest = out || path.join(dl, `gpt-${stamp}.png`)
@@ -602,7 +677,19 @@ return result`
     fs.copyFileSync(saved, out)
     saved = out
   }
-  return { ok: true, saved, bytes: steps.bytes ?? null, size: size ?? null, steps, account: accountId ?? null, notes }
+  return {
+    ok: true,
+    saved,
+    bytes: steps.bytes ?? null,
+    size: size ?? null,
+    steps,
+    account: accountId ?? null,
+    notes,
+    // Where it landed and why — so the caller can tell the user the real path.
+    downloadDir: dl,
+    dirSource: resolved.source, // project | config | flag | default
+    projectDir: resolved.projectDir,
+  }
 }
 
 /**
@@ -613,7 +700,7 @@ return result`
  * ToS and risks bans. The user asked for this explicitly (2026-10) and owns the
  * risk; we do NOT hide it and we do NOT retry a banned account.
  */
-export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4 } = {}) {
+export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir } = {}) {
   // Master switch first: never open a browser for a lane the user turned off.
   if (!readGptLaneEnabled(dshHome)) {
     return {
@@ -628,11 +715,11 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
   const pool = readGptPool(dshHome)
   // No pool configured → fall back to the single default profile.
   if (pool.accounts.length === 0) {
-    const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size })
+    const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size, dir, projectDir })
     return { ...r, rotated: false, tried: [r.account] }
   }
   if (pool.autoRotate === false && accountId) {
-    const r = await gen(dshHome, prompt, { accountId, waitMs, out, downscale, size })
+    const r = await gen(dshHome, prompt, { accountId, waitMs, out, downscale, size, dir, projectDir })
     return { ...r, rotated: false, tried: [accountId] }
   }
   const tried = []
@@ -650,7 +737,7 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
       continue
     }
     tried.push(acct.id)
-    last = await gen(dshHome, prompt, { accountId: acct.id, waitMs, out, downscale, size })
+    last = await gen(dshHome, prompt, { accountId: acct.id, waitMs, out, downscale, size, dir, projectDir })
     if (last.ok) return { ...last, rotated: tried.length > 1, tried, failures }
     skip.add(acct.id)
     failures.push({ account: acct.id, error: last.error })
@@ -681,6 +768,34 @@ async function main() {
     else { args[key] = next; i += 1 }
   }
   const home = args.dshHome
+
+  // Download dir: `dir` (show) | `dir --set <路径>` | `dir --reset`.
+  // Empty config = follow the project (…<project>/.taptap-images).
+  if (cmd === 'dir' || cmd === '目录') {
+    if (args.reset === true) {
+      writeGptDownloadDir(home, '')
+      const r = resolveDownloadDir(home)
+      process.stdout.write(`${JSON.stringify({ ok: true, reset: true, dir: r.dir, source: r.source }, null, 2)}\n`)
+      return
+    }
+    if (typeof args.set === 'string' || typeof args.dir === 'string') {
+      const value = args.set ?? args.dir
+      writeGptDownloadDir(home, value)
+      const r = resolveDownloadDir(home)
+      process.stdout.write(`${JSON.stringify({ ok: true, configured: readGptDownloadDir(home), dir: r.dir, source: r.source }, null, 2)}\n`)
+      return
+    }
+    const r = resolveDownloadDir(home)
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      configured: readGptDownloadDir(home) || '(空 = 跟随项目)',
+      dir: r.dir,
+      source: r.source,
+      fallback: imageDownloadDir(home),
+      hint: '设置：taptap-gpt dir --set "<路径或 {project}/imgs>"；恢复默认：taptap-gpt dir --reset',
+    }, null, 2)}\n`)
+    return
+  }
 
   // Master switch: `lane on|off|status`.
   if (cmd === 'lane' || cmd === '开关') {
@@ -808,7 +923,7 @@ async function main() {
     process.exitCode = 2
     return
   }
-  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | gen | lane | pool)\n`)
+  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | gen | dir | lane | pool)\n`)
   process.exitCode = 2
 }
 

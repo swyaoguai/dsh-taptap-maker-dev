@@ -343,6 +343,8 @@ window.__ModuleLoader__.load({
       const [err, setErr] = useState('')
       const [newId, setNewId] = useState('')
       const [showAdd, setShowAdd] = useState(false)
+      // null = 用 info 里的自定义值；用户一编辑就用自己的输入
+      const [dirInput, setDirInput] = useState(null)
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
@@ -544,7 +546,38 @@ window.__ModuleLoader__.load({
             err ? h('span', { style: S.warn }, err) : null,
           ),
           h('p', { style: S.hint }, '登录会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可。'),
-          h('p', { style: S.hint }, '图片下载目录：', h('span', { style: S.codeInline }, info.downloadDir || '')),
+
+          // 图片落点：默认跟随项目目录（不再丢到 C 盘），也可以自定义。
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '图片下载目录（默认跟随项目）'),
+            h('input', {
+              style: S.input,
+              value: dirInput === null ? (info.downloadDirConfigured || '') : dirInput,
+              placeholder: '留空 = <当前项目>/.taptap-images',
+              spellCheck: false, autoComplete: 'off',
+              onChange: (e) => setDirInput(e.target.value),
+              onKeyDown: (e) => {
+                if (e.key === 'Enter') post('gpt-dir', { dir: dirInput === null ? (info.downloadDirConfigured || '') : dirInput })
+              },
+            }),
+            h('div', { style: S.bar },
+              h('button', {
+                style: S.ghostBtn, disabled: busy !== '',
+                onClick: () => post('gpt-dir', { dir: dirInput === null ? (info.downloadDirConfigured || '') : dirInput }),
+              }, '保存目录'),
+              h('button', {
+                style: S.ghostBtn, disabled: busy !== '',
+                onClick: () => { setDirInput(''); post('gpt-dir', { dir: '' }) },
+              }, '恢复默认（跟随项目）'),
+            ),
+            h('p', { style: S.hint },
+              '留空就跟随当前项目目录（不在项目里时用 $DSH_HOME）。支持 {project}（项目目录）和 {home}（$DSH_HOME）。'),
+            h('p', { style: S.hint },
+              '当前解析：', h('span', { style: S.codeInline }, info.downloadDir || ''),
+              info.downloadDirSource === 'project' ? '（跟随项目）' : info.downloadDirSource === 'config' ? '（自定义）' : '（默认）'),
+            h('p', { style: S.hint },
+              '目录里会自动放一个 .gitignore，防止生成的图片被 Maker 自动提交。'),
+          ),
 
           // 轮询只在有附加账号时可调；「附加账号 N 个」的口径和主账号分开说，
           // 避免又出现「已登录 / 已登录 0 个」并排的误导。
