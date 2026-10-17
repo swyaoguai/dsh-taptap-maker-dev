@@ -55,8 +55,8 @@ node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复�
 
 - 每个账号有**独立浏览器 profile**，一个被封不会污染其他账号。
 - 状态：`ok`（可用）/ `cooling`（本次触配额，冷却 6h 后可再用）/ `banned`（人工标记，永不自动选中）。
-- **设置页不提供「+ 账号」按钮**（用户反馈鸡肋，已移除）。加附加账号只能走 CLI：
-  `node "<plugin>/src/taptap-gpt.mjs" pool add --id a2`，然后设置页会出现该账号的管理项。
+- **设置页就是账号列表**：主账号那一行常驻（退出登录后行还在，可以再登回去）；
+  「+ 添加账号」一步完成"建条目 + 打开登录"（不是空点一下的按钮）。CLI 也可：`pool add --id a2`。
 - **登录判定只认会话 cookie**（`__Secure-next-auth.session-token`）。匿名访问 ChatGPT 也能用输入框，
   且匿名访客本身就有 `ajs_anonymous_id` / `oai-dm` / `_puid` 这些统计 cookie —— 都不能当成"已登录"。
   中途关掉登录窗口 = 未登录，如实报告，不要谎报成功。

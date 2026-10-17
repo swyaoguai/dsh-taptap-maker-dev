@@ -341,6 +341,8 @@ window.__ModuleLoader__.load({
       const [info, setInfo] = useState(null) // null | 'error' | status
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
+      const [newId, setNewId] = useState('')
+      const [showAdd, setShowAdd] = useState(false)
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
@@ -415,6 +417,27 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(''))
       }, [load])
 
+      // 添加账号 = 建条目 + 立刻打开登录，一步到位。
+      // 之前那个只建不登的「加号」正是被嫌弃鸡肋的原因；这里补上了真正的后半步。
+      const addAndLogin = useCallback(() => {
+        const id = (newId || '').trim()
+        if (!id) { setErr('请填账号短名（如 a2、小号）'); return }
+        setBusy('add'); setErr('')
+        fetch(`${API_BASE}/gpt-pool`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'add', id }),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok) { setErr(j.error || '添加失败'); setBusy(''); return }
+            setInfo(j)
+            setNewId(''); setShowAdd(false)
+            // 紧接着为该账号打开登录浏览器。
+            doLogin(id)
+          })
+          .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
+      }, [newId, doLogin])
+
       if (info === null) {
         return h('div', { style: S.card },
           h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图'),
@@ -432,6 +455,14 @@ window.__ModuleLoader__.load({
       const laneOn = info.laneEnabled !== false
       const logged = info.loggedIn === true || pool.loggedIn > 0
       const dim = { display: 'flex', flexDirection: 'column', gap: 10, opacity: laneOn ? 1 : 0.45 }
+      // 账号列表永远是「主账号 + 附加账号」。主账号那一行常驻 —— 退出登录后
+      // 行还在，可以直接再登回去。之前的版本把「+ 账号」删了，结果用户点
+      // 「退出/换号」后就再也没有入口，等于把换号变成单向操作（2026-10-17 反馈）。
+      const rows = [
+        { id: null, key: '__main__', name: '主账号', isMain: true, loggedIn: info.loggedIn === true, status: 'ok' },
+        ...pool.accounts.map((a) => ({ ...a, key: a.id, name: a.label !== a.id ? `${a.id}（${a.label}）` : a.id, isMain: false })),
+      ]
+      const busyKey = (r) => (r.isMain ? '' : r.id)
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
@@ -459,29 +490,69 @@ window.__ModuleLoader__.load({
             h('div', null,
               h('span', { style: { fontSize: 13, fontWeight: 600 } }, '账号'),
               h('p', { style: { ...S.hint, marginTop: 2 } },
-                logged ? '已登录，可生成图片。' : '未登录：先登录一次（Google / Apple / 手机号 / 邮箱均可）。')),
+                logged ? '已登录，可生成图片。' : '未登录：点账号那一行的「登录」，或「+ 添加账号」')),
             h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
           ),
+
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            rows.map((r) => h('div', {
+              key: r.key,
+              style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 },
+            },
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+                h('span', { style: { fontSize: 13, fontWeight: 600 } }, r.name),
+                h('span', { style: S.hint },
+                  r.loggedIn ? '已登录' : '未登录',
+                  r.status === 'banned' ? ' · 已封禁' : r.status === 'cooling' ? ' · 冷却中' : '')),
+              h('div', { style: { display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' } },
+                h('button', {
+                  style: S.ghostBtn, disabled: busy !== '' || !laneOn,
+                  onClick: () => doLogin(busyKey(r) || undefined),
+                }, busy === (r.isMain ? 'login' : `login:${r.id}`) ? '登录中…' : (r.loggedIn ? '重登' : '登录')),
+                r.loggedIn
+                  ? h('button', {
+                    style: S.ghostBtn, disabled: busy !== '' || !laneOn,
+                    onClick: () => doLogout(busyKey(r) || undefined),
+                  }, busy === (r.isMain ? 'logout' : `logout:${r.id}`) ? '退出中…' : '退出')
+                  : null,
+                r.isMain
+                  ? null
+                  : h('button', {
+                    style: S.ghostBtn, disabled: busy !== '' || !laneOn,
+                    onClick: () => post('gpt-pool', { action: r.status === 'banned' || r.status === 'cooling' ? 'unban' : 'ban', id: r.id }),
+                  }, r.status === 'banned' || r.status === 'cooling' ? '恢复' : '封禁'),
+                r.isMain
+                  ? null
+                  : h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'remove', id: r.id }) }, '移除'),
+              )),
+            )),
+          // 添加账号：一步完成「建条目 + 打开登录」。不再是空点一下的按钮，
+          // 加完立刻进入登录，登完就能用（之前那次删掉就是漏了这层价值）。
           h('div', { style: S.bar },
-            h('button', {
-              style: S.btn,
-              disabled: busy !== '' || !laneOn,
-              onClick: () => doLogin(undefined),
-            }, busy === 'login' ? '登录中…' : (info.loggedIn ? '重新登录' : '登录')),
-            info.loggedIn ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => doLogout(undefined) }, busy === 'logout' ? '退出中…' : '退出 / 换号') : null,
+            showAdd
+              ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+                h('input', {
+                  style: { ...S.search, flex: '0 0 auto', width: 170 }, value: newId,
+                  placeholder: '账号短名，如 a2', spellCheck: false, autoComplete: 'off',
+                  onChange: (e) => setNewId(e.target.value),
+                  onKeyDown: (e) => { if (e.key === 'Enter') addAndLogin() },
+                }),
+                h('button', { style: S.btn, disabled: busy !== '' || !laneOn || !(newId || '').trim(), onClick: addAndLogin },
+                  '添加并登录'),
+                h('button', { style: S.ghostBtn, onClick: () => { setShowAdd(false); setNewId('') } }, '取消'))
+              : h('button', { style: S.ghostBtn, disabled: !laneOn || busy !== '', onClick: () => setShowAdd(true) }, '+ 添加账号'),
             err ? h('span', { style: S.warn }, err) : null,
           ),
-          h('p', { style: S.hint }, '登录后会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可。'),
+          h('p', { style: S.hint }, '登录会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可。'),
           h('p', { style: S.hint }, '图片下载目录：', h('span', { style: S.codeInline }, info.downloadDir || '')),
 
-          // 账号池区块只在真的加了附加账号时才出现。单账号模式下显示
-          // 「共 0 个（已登录 0）」会和上面的「已登录」打架——用户实测
-          // 反馈过这个误导（2026-10-17），所以池为空时完全不渲染它。
+          // 轮询只在有附加账号时可调；「附加账号 N 个」的口径和主账号分开说，
+          // 避免又出现「已登录 / 已登录 0 个」并排的误导。
           pool.total > 0
             ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 4 } },
               h('div', { style: S.rowBetween },
                 h('div', null,
-                  h('span', { style: { fontSize: 13, fontWeight: 600 } }, '附加账号（轮询）'),
+                  h('span', { style: { fontSize: 13, fontWeight: 600 } }, '轮询'),
                   h('p', { style: { ...S.hint, marginTop: 2 } },
                     `附加账号 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling ?? 0}，封禁 ${pool.banned ?? 0}）。`
                     + '一个触配额自动换下一个。')),
@@ -493,36 +564,15 @@ window.__ModuleLoader__.load({
                     onClick: () => post('gpt-pool', { action: 'rotate', on: pool.autoRotate === false }),
                   })),
               ),
-              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-                pool.accounts.map((a) => h('div', { key: a.id, style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 } },
-                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
-                    h('span', { style: { fontSize: 13, fontWeight: 600 } }, a.label !== a.id ? `${a.id}（${a.label}）` : a.id),
-                    h('span', { style: S.hint },
-                      a.loggedIn ? '已登录' : '未登录',
-                      a.status === 'banned' ? ' · 已封禁' : a.status === 'cooling' ? ' · 冷却中' : '')),
-                  h('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-                    h('button', {
-                      style: S.ghostBtn, disabled: busy !== '' || !laneOn,
-                      onClick: () => doLogin(a.id),
-                    }, busy === `login:${a.id}` ? '登录中…' : (a.loggedIn ? '重登' : '登录')),
-                    a.status === 'banned' || a.status === 'cooling'
-                      ? h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban', id: a.id }) }, '恢复')
-                      : h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'ban', id: a.id }) }, '封禁'),
-                    h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'remove', id: a.id }) }, '移除'),
-                  )),
-                )),
               (pool.banned > 0 || pool.cooling > 0)
                 ? h('div', { style: S.bar },
-                  h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban' }) }, '恢复全部'))
+                  h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban' }) }, '恢复全部冷却/封禁'))
                 : null,
-            )
-            : null,
-          // 轮询风险只在真的用了附加账号时才需要提醒；单账号模式不吓人。
-          pool.total > 0
-            ? h('div', { style: { ...S.warnBox, marginTop: 4 } },
-              h('span', { style: S.warnTitle }, '⚠️ 轮询风险'),
-              h('p', { style: { ...S.hint, margin: 0 } },
-                '多账号轮流使用会绕过单账号配额，违反 OpenAI 服务条款，且可能导致账号被封。这是你要求的功能，风险由你承担。'),
+              h('div', { style: { ...S.warnBox, marginTop: 2 } },
+                h('span', { style: S.warnTitle }, '⚠️ 轮询风险'),
+                h('p', { style: { ...S.hint, margin: 0 } },
+                  '多账号轮流使用会绕过单账号配额，违反 OpenAI 服务条款，且可能导致账号被封。这是你要求的功能，风险由你承担。'),
+              ),
             )
             : null,
         ),
