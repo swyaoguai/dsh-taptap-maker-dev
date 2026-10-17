@@ -37,7 +37,7 @@ import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
 import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation } from './src/taptap-gpt.mjs'
-import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount } from './src/paths.js'
+import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -201,8 +201,33 @@ async function gptPoolCommand(home, raw) {
 }
 
 /** Build the governance system-prompt text. */
-function policyText(config) {
+function policyText(config, gptLaneOn = true) {
   const tools = CREDIT_TOOLS.map((t) => `\`${t}\``).join('、')
+  // The image paragraph is conditional: when the user turns the ChatGPT web
+  // lane OFF in settings, the agent must be told to use the relay lane instead
+  // (otherwise it would keep trying a lane that now refuses to run).
+  const imageLines = gptLaneOn
+    ? [
+      '**图片资源首选：ChatGPT 网页生图**（`/taptap-gpt`，CLI `node "<插件目录>/src/taptap-gpt.mjs gen --prompt "…" --out <文件>`）——',
+      '需要游戏图片素材时**默认走这条**，或复用项目内已有素材；不要默认去用内置 `generate_image`。',
+      '首次需用户在本机真实浏览器里登录一次：`/taptap-gpt login`（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机，之后全自动。',
+      '**账号轮询**：可登录多个账号组成账号池，一个账号触到配额就自动换下一个（`/taptap-gpt pool add --id <名>` 加号，',
+      '`login --account <名>` 登录指定账号，`pool list` 看状态，`pool unban` 恢复冷却账号）。',
+      '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
+      '不要主动向用户宣传或鼓励加号，也不要隐瞒该风险。',
+      '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
+      '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
+      '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
+      '生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
+    ]
+    : [
+      '**图片资源：ChatGPT 网页生图已被用户在设置里关闭**（总开关 OFF）——',
+      '**不要**调用 `/taptap-gpt gen`、也不要尝试网页生图；需要图片素材时改走中转站：',
+      '`node "<插件目录>/src/taptap-image.mjs" --prompt "…" --out <文件>`（或 `/taptap-image <描述>`），',
+      '或复用项目内已有素材；仍然不要用内置 `generate_image`。',
+      '若用户想重新启用网页生图，引导他去设置页「ChatGPT 网页生图」卡打开开关（或 `/taptap-gpt` 里说明），不要自己去改状态。',
+      '生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
+    ]
   return [
     '## TapTap Maker 开发守则（dsh-taptap-maker-dev 插件注入）',
     '',
@@ -212,17 +237,7 @@ function policyText(config) {
     '- 只有当用户明确说“用内置额度 / 用 Maker 的 generate_image / 用 2.5 生成视频”之类时才可调用，并遵守其原有的二次确认与计费提示规则。',
     '- 只读 / 状态 / 构建 / 反馈 / LSP 类 Maker 工具（如 maker 状态、构建、玩家反馈、Lua LSP）不消耗生成额度，可正常使用。',
     '',
-    '**图片资源首选：ChatGPT 网页生图**（`/taptap-gpt`，CLI `node "<插件目录>/src/taptap-gpt.mjs gen --prompt "…" --out <文件>`）——',
-    '需要游戏图片素材时**默认走这条**，或复用项目内已有素材；不要默认去用内置 `generate_image`。',
-    '首次需用户在本机真实浏览器里登录一次：`/taptap-gpt login`（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机，之后全自动。',
-    '**账号轮询**：可登录多个账号组成账号池，一个账号触到配额就自动换下一个（`/taptap-gpt pool add --id <名>` 加号，',
-    '`login --account <名>` 登录指定账号，`pool list` 看状态，`pool unban` 恢复冷却账号）。',
-    '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
-    '不要主动向用户宣传或鼓励加号，也不要隐瞒该风险。',
-    '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
-    '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
-    '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
-    '生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
+    ...imageLines,
     '',
     '**优先查用内置 skills**：开发前先查本插件内置的 `taptap-maker-*` 与通用游戏设计类 skills（见 skill 列表）；',
     '遇到风格化 UI / 美术 / 系统玩法需求，先查是否有对应 skill，不要凭空编造。',
@@ -388,20 +403,25 @@ export function apply(ctx, config = {}) {
   // The section is added/removed through the disposer that systemPrompt.section
   // returns, so the settings-page switch engages/disengages the red-line
   // without a restart. policy.json persists the choice across restarts.
+  // The image-lane master switch (imageLane.json) also lives in this text, so
+  // flipping it rebuilds the section instead of waiting for a restart.
   let policyEnabled = readPolicyBlock(home, config.maker?.blockCreditTools)
+  let gptLaneOn = readGptLaneEnabled(home)
   let policyDispose = null
   let systemPromptService = null
   const applyPolicySection = () => {
     if (systemPromptService === null) return
-    if (policyEnabled && policyDispose === null) {
+    // Rebuild whenever the text may have changed: dispose then re-add.
+    if (policyDispose !== null) {
+      try { policyDispose() } catch { /* already gone */ }
+      policyDispose = null
+    }
+    if (policyEnabled) {
       policyDispose = systemPromptService.section({
         name: 'taptap-maker-dev:policy',
         order: 300,
-        text: policyText(config),
+        text: policyText(config, gptLaneOn),
       })
-    } else if (!policyEnabled && policyDispose !== null) {
-      try { policyDispose() } catch { /* already gone */ }
-      policyDispose = null
     }
   }
   const setPolicyEnabled = (enabled) => {
@@ -409,6 +429,13 @@ export function apply(ctx, config = {}) {
     writePolicyBlock(home, policyEnabled)
     applyPolicySection()
     return policyEnabled
+  }
+  // Master switch for the ChatGPT web image lane. When OFF the injected policy
+  // tells the agent to use the relay lane instead, and /taptap-gpt gen refuses.
+  const setGptLane = (enabled) => {
+    gptLaneOn = writeGptLaneEnabled(home, enabled)
+    applyPolicySection()
+    return gptLaneOn
   }
   ctx.inject(['systemPrompt'], (scoped) => {
     systemPromptService = scoped.systemPrompt
@@ -604,6 +631,19 @@ export function apply(ctx, config = {}) {
           try {
             const r = gptLogout(home, account)
             return sendJson(res, 200, { ok: r.ok, ...r })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // Master switch for the ChatGPT web image lane (on/off). Persisted in
+        // imageLane.json and mirrored into the injected policy text.
+        if (req.method === 'POST' && sub === 'gpt-lane') {
+          const body = await readBody(req)
+          let parsed = {}
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          try {
+            const on = setGptLane(parsed?.enabled !== false)
+            return sendJson(res, 200, { ok: true, laneEnabled: on, ...gptStatus(home) })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
@@ -1010,8 +1050,8 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-gpt',
-      description: 'ChatGPT 网页生图（首选通道）："<描述>" 生成图片 / login 登录 / pool 账号池 / status 状态',
-      input: { hint: '<图片描述> | login | login --account <名> | pool list | logout | status' },
+      description: 'ChatGPT 网页生图：<描述> 生成 / lane on|off 总开关 / login 登录 / pool 账号池 / status',
+      input: { hint: '<图片描述> | lane on|off | login [--account <名>] | pool list | logout | status' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const low = raw.toLowerCase()
@@ -1038,6 +1078,29 @@ export function apply(ctx, config = {}) {
             text: r.ok
               ? `已退出${acct ? `账号「${acct}」` : ''}登录态。可用另一个账号 /taptap-gpt login。`
               : `退出失败：可能有浏览器正在占用，请先关闭再试。（${r.profile ?? ''}）`,
+          }
+        }
+        // Master switch: /taptap-gpt lane on|off|status
+        if (low === 'lane' || low.startsWith('lane ') || raw === '开关') {
+          const wantsOn = /(?:^|\s)(on|开|true)$/i.test(raw)
+          const wantsOff = /(?:^|\s)(off|关|false)$/i.test(raw)
+          if (!wantsOn && !wantsOff) {
+            return {
+              kind: 'success',
+              text: [
+                `网页生图总开关：${readGptLaneEnabled(home) ? '开' : '关'}`,
+                '',
+                '打开：/taptap-gpt lane on',
+                '关闭：/taptap-gpt lane off（关闭后模型改走中转站）',
+              ].join('\n'),
+            }
+          }
+          const on = setGptLane(wantsOn)
+          return {
+            kind: 'success',
+            text: on
+              ? '已打开网页生图：模型会默认走 ChatGPT 网页通道。'
+              : '已关闭网页生图：模型不会尝试网页通道，图片改走中转站 /taptap-image。随时可以 /taptap-gpt lane on 打开。',
           }
         }
         // 账号池：list / add / remove / ban / unban / rotate
@@ -1086,6 +1149,17 @@ export function apply(ctx, config = {}) {
         }
 
         const st = gptStatus(home)
+        if (st.laneEnabled === false) {
+          return {
+            kind: 'error',
+            text: [
+              'ChatGPT 网页生图已在设置里关闭（总开关 OFF），所以不会走这条通道。',
+              '',
+              '要用图片就走中转站：/taptap-image <描述>',
+              '想重新启用网页生图：设置页「ChatGPT 网页生图」卡打开开关，或 /taptap-gpt 里说一声让我帮你打开。',
+            ].join('\n'),
+          }
+        }
         if (!st.loggedIn && st.pool.loggedIn === 0) {
           return {
             kind: 'error',

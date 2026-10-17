@@ -35,7 +35,7 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 设置 → **TapTap Maker** 页，直接填并保存（存到 `$DSH_HOME/taptap-maker-dev/`，不进任何 Maker 工作区）：
 
 - **额度红线** — 开关，关之前会弹确认
-- **ChatGPT 生图（首选）** — 登录 / 换号，账号池（加号、封禁、恢复、轮换开关）
+- **ChatGPT 生图（首选）** — **总开关**（关掉后整条通道停用，模型改走中转站）+ 登录 / 换号 + 账号池（加号、封禁、恢复、轮换开关）
 - **中转站（回退）** — Base URL / Key / Model（「获取模型」按钮自动拉取）/ 缺省尺寸
 - **完整 BGM** — 填风格描述 → 生成提示词 → 一键打开网页 → 下载后自动导入
 - **CC0 音效库** — 状态、搜索、「更新库」
@@ -48,6 +48,10 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 # 生图首选：ChatGPT 网页（首次登录一次）
 node <plugin-dir>/src/taptap-gpt.mjs login
 node <plugin-dir>/src/taptap-gpt.mjs gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
+
+# 网页生图总开关（关掉后改走中转站）
+node <plugin-dir>/src/taptap-gpt.mjs lane status
+node <plugin-dir>/src/taptap-gpt.mjs lane off
 
 # 账号轮询：加号 → 各登录一次 → 之后自动轮换
 node <plugin-dir>/src/taptap-gpt.mjs pool add --id a2 --label "小号"

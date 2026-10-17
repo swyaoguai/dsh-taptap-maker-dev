@@ -45,7 +45,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount } from './paths.js'
+import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled } from './paths.js'
 import { downscaleFile } from './taptap-image.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
@@ -208,6 +208,8 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
  */
 export function statusFor(dshHome, accountId) {
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
+  let laneOn = true
+  try { laneOn = readGptLaneEnabled(dshHome) } catch { /* default on */ }
   const exists = fs.existsSync(prof)
   const cookieCandidates = [
     path.join(prof, 'Default', 'Network', 'Cookies'),
@@ -225,14 +227,22 @@ export function statusFor(dshHome, accountId) {
         const db = new DatabaseSync(tmp)
         const names = db.prepare('SELECT name FROM cookies').all().map((r) => r.name)
         db.close()
-        // OpenAI's authenticated session carries these; anonymous sessions do not.
-        const hit = names.find((n) => ['__Secure-next-auth.session-token', 'oai-dm', '_puid', 'ajs_anonymous_id'].includes(n))
+        // ONLY the next-auth session token proves a login. Everything else in
+        // this jar (ajs_anonymous_id, oai-dm, _puid) is set for ANONYMOUS
+        // visitors too — verified with a real cookie DB on 2026-10-17, after
+        // the settings page wrongly showed 「已登录」 when the user closed the
+        // login window mid-verification.
+        const hit = names.find((n) => n.startsWith('__Secure-next-auth.session-token'))
         if (hit) { loggedIn = true; sample = hit }
       } finally {
         fs.rmSync(tmp, { force: true })
       }
     } catch {
-      loggedIn = fs.existsSync(cookieFile) && fs.statSync(cookieFile).size > 20480
+      // DB unreadable → fall back to a size heuristic, but cap it at "maybe":
+      // report not-logged-in unless a previous status proved otherwise. A
+      // large anonymous cookie jar still must NOT count as a login.
+      loggedIn = false
+      sample = 'cookie-db-unreadable'
     }
   }
   return {
@@ -242,6 +252,7 @@ export function statusFor(dshHome, accountId) {
     authSample: sample,
     cookieFile: cookieFile ?? null,
     downloadDir: imageDownloadDir(dshHome),
+    laneEnabled: laneOn,
   }
 }
 
@@ -261,6 +272,7 @@ export function status(dshHome) {
   }))
   return {
     ...base,
+    laneEnabled: base.laneEnabled ?? true,
     pool: {
       autoRotate: pool.autoRotate !== false,
       total: accounts.length,
@@ -270,6 +282,18 @@ export function status(dshHome) {
       accounts,
     },
   }
+}
+
+/**
+ * Master switch for the whole web lane (CLI + slash command + agent policy).
+ * When off, `gen` refuses to run and the agent must fall back to the relay.
+ */
+export function laneEnabled(dshHome) {
+  return readGptLaneEnabled(dshHome)
+}
+
+export function setLaneEnabled(dshHome, enabled) {
+  return writeGptLaneEnabled(dshHome, enabled)
 }
 
 /**
@@ -295,37 +319,49 @@ export async function login(dshHome, { waitMs = 300000, graceSec = 8, accountId 
 pg.goto(${pyStr(GPT_URL)}, timeout=60000)
 result["log"].append("opened " + pg.url)
 pg.wait_for_timeout(8000)
+# IMPORTANT: chatgpt.com now lets ANONYMOUS visitors use the composer, and the
+# page already carries analytics cookies (ajs_anonymous_id / oai-dm) when
+# logged out. So neither "composer visible" nor "cookie DB is big" proves a
+# login. The ONLY trustworthy signal is the real session cookie — verified
+# 2026-10-17 after the old heuristic reported 已登录 the moment the user
+# closed the login window mid-verification.
+SESSION_PREFIX = "__Secure-next-auth.session-token"
+def _session_present():
+    try:
+        cks = b.cookies()
+    except Exception:
+        return None  # browser closed / context gone
+    for c in cks:
+        if (c.get("name") or "").startswith(SESSION_PREFIX):
+            return True
+    return False
 deadline = time.time() + ${Math.floor(waitMs / 1000)}
 logged = False
+closed_early = False
 while time.time() < deadline:
-    # A signed-in ChatGPT shows the composer and no prominent 登录/登录按钮.
-    try:
-        body = pg.inner_text("body")
-    except Exception:
-        body = ""
-    has_login_button = False
-    try:
-        for el in pg.query_selector_all("button, a"):
-            t = (el.inner_text() or "").strip()
-            if t in ("登录", "Log in", "Sign up", "免费注册"):
-                has_login_button = True
-                break
-    except Exception:
-        pass
-    # Authenticated pages expose the message composer.
-    has_composer = pg.query_selector("#prompt-textarea, textarea, [contenteditable='true']") is not None
-    if has_composer and not has_login_button:
+    state = _session_present()
+    if state is None:
+        closed_early = True
+        result["log"].append("browser closed by user before a session token appeared")
+        break
+    if state:
         logged = True
-        result["log"].append("composer visible and no login button")
+        result["log"].append("session token present")
         break
     try:
         if len(b.pages) == 0:
-            result["log"].append("browser closed by user")
+            closed_early = True
+            result["log"].append("no pages left (window closed)")
             break
     except Exception:
+        closed_early = True
         break
     pg.wait_for_timeout(3000)
+# A cookie can land exactly as the loop exits — check once more.
+if not logged:
+    logged = _session_present() is True
 result["logged"] = logged
+result["closed_early"] = closed_early
 result["url"] = pg.url
 if logged:
     # Grace period so the window does not flash past before the user sees it.
@@ -350,7 +386,14 @@ return result`
   if (r.logged === true && accountId) {
     touchGptAccount(dshHome, accountId, { status: 'ok', lastUsedAt: 0, note: '' })
   }
-  return { ok: true, logged: r.logged === true, log: r.log, profile: prof, account: accountId ?? null }
+  return {
+    ok: true,
+    logged: r.logged === true,
+    closedEarly: r.closed_early === true,
+    log: r.log,
+    profile: prof,
+    account: accountId ?? null,
+  }
 }
 
 /**
@@ -365,6 +408,11 @@ return result`
  * caller (generateWithRotation) retries with the next pool account.
  */
 export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size } = {}) {
+  // Master switch: when the lane is off, refuse honestly instead of opening a
+  // browser. The relay lane (taptap-image) is the documented fallback.
+  if (!readGptLaneEnabled(dshHome)) {
+    return { ok: false, error: 'lane_disabled', hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。' }
+  }
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
   const dl = imageDownloadDir(dshHome)
   fs.mkdirSync(dl, { recursive: true })
@@ -566,6 +614,17 @@ return result`
  * risk; we do NOT hide it and we do NOT retry a banned account.
  */
 export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4 } = {}) {
+  // Master switch first: never open a browser for a lane the user turned off.
+  if (!readGptLaneEnabled(dshHome)) {
+    return {
+      ok: false,
+      error: 'lane_disabled',
+      hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。',
+      rotated: false,
+      tried: [],
+      failures: [],
+    }
+  }
   const pool = readGptPool(dshHome)
   // No pool configured → fall back to the single default profile.
   if (pool.accounts.length === 0) {
@@ -622,6 +681,23 @@ async function main() {
     else { args[key] = next; i += 1 }
   }
   const home = args.dshHome
+
+  // Master switch: `lane on|off|status`.
+  if (cmd === 'lane' || cmd === '开关') {
+    const sub = (argv[1] ?? 'status').toLowerCase()
+    if (sub === 'on' || sub === '开') {
+      const on = setLaneEnabled(home, true)
+      process.stdout.write(`${JSON.stringify({ ok: true, laneEnabled: on }, null, 2)}\n`)
+      return
+    }
+    if (sub === 'off' || sub === '关') {
+      const on = setLaneEnabled(home, false)
+      process.stdout.write(`${JSON.stringify({ ok: true, laneEnabled: on, hint: '网页生图已关闭，图片将回退到中转站 taptap-image' }, null, 2)}\n`)
+      return
+    }
+    process.stdout.write(`${JSON.stringify({ ok: true, laneEnabled: laneEnabled(home) }, null, 2)}\n`)
+    return
+  }
 
   if (cmd === 'gen' || cmd === 'generate') {
     const prompt = args.prompt
@@ -732,7 +808,7 @@ async function main() {
     process.exitCode = 2
     return
   }
-  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | gen | pool)\n`)
+  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | gen | lane | pool)\n`)
   process.exitCode = 2
 }
 

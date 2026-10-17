@@ -95,6 +95,30 @@ export function writePolicyBlock(dshHome, enabled) {
   return value
 }
 
+/**
+ * Image-lane master switch — stored in imageLane.json as
+ * { gptWebEnabled: boolean }. When false, the ChatGPT web lane is OFF: the
+ * agent must fall back to the relay lane (taptap-image) and /taptap-gpt gen
+ * refuses to run. Default true (the web lane is primary since 2026-10).
+ */
+export function imageLaneConfigPath(dshHome) {
+  return path.join(dataDir(dshHome), 'imageLane.json')
+}
+
+/** Read the master switch; live file wins, default ON. */
+export function readGptLaneEnabled(dshHome, fallback = true) {
+  const data = readJson(imageLaneConfigPath(dshHome))
+  if (typeof data?.gptWebEnabled === 'boolean') return data.gptWebEnabled
+  return fallback !== false
+}
+
+/** Persist the master switch; returns the stored boolean. */
+export function writeGptLaneEnabled(dshHome, enabled) {
+  const value = enabled !== false
+  writeJson(imageLaneConfigPath(dshHome), { gptWebEnabled: value })
+  return value
+}
+
 /** Where BGM generation preferences are stored. */
 export function bgmConfigPath(dshHome) {
   return path.join(dataDir(dshHome), 'bgm-config.json')
