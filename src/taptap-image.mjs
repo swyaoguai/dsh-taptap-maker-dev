@@ -78,7 +78,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
  * Downscale an image file to fit within WxH using the first available tool.
  * Keeps aspect ratio. Returns { ok, tool, hint }.
  */
-function downscaleFile(src, dst, spec) {
+export function downscaleFile(src, dst, spec) {
   const wh = parseWH(spec)
   if (wh === null) return { ok: false, hint: `invalid --downscale "${spec}" (expected WxH)` }
   const quiet = { stdio: 'ignore' }

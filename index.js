@@ -36,7 +36,8 @@ import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
-import { status as gptStatus, login as gptLogin, logout as gptLogout } from './src/taptap-gpt.mjs'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation } from './src/taptap-gpt.mjs'
+import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -101,6 +102,104 @@ const CREDIT_TOOLS = [
   'create_3d_asset',
 ]
 
+/** Where relay-lane (fallback) images land before being moved into a project. */
+function tmpImageDir(home) {
+  const dir = path.join(dataDir(home), 'relay-images')
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** Wrap a gpt gen call and report honestly; never fabricate a file path. */
+async function gptGen(home, prompt, { accountId, downscale } = {}) {
+  return gptGenerateWithRotation(home, prompt, { accountId, downscale })
+}
+
+/** Handle `/taptap-gpt pool …` subcommands and render them as human text. */
+async function gptPoolCommand(home, raw) {
+  const parts = raw.split(/\s+/).filter(Boolean)
+  const sub = (parts[1] ?? 'list').toLowerCase()
+  const flag = (name) => {
+    const m = new RegExp(`(?:--${name})\\s+(\\S+)`).exec(raw)
+    return m === null ? undefined : m[1]
+  }
+  if (sub === 'add' || sub === '加号' || sub === '新增') {
+    const id = flag('id')
+    if (typeof id !== 'string' || id.length === 0) {
+      return { ok: false, text: '用法：/taptap-gpt pool add --id <短名> [--label 备注]' }
+    }
+    const pool = readGptPool(home)
+    if (pool.accounts.some((a) => a.id === id)) {
+      return { ok: false, text: `账号「${id}」已存在。加完记得登录：/taptap-gpt login --account ${id}` }
+    }
+    const label = flag('label') ?? id
+    writeGptPool(home, { accounts: [...pool.accounts, { id, label, status: 'unknown', lastUsedAt: null, note: '' }] })
+    return {
+      ok: true,
+      text: [
+        `已加账号「${id}」，现在共 ${readGptPool(home).accounts.length} 个。`,
+        '',
+        `登录它：/taptap-gpt login --account ${id}`,
+        '',
+        '⚠️ 多账号轮换会绕过单账号配额，违反 OpenAI 服务条款且有封号风险——风险由你承担。',
+      ].join('\n'),
+    }
+  }
+  if (sub === 'remove' || sub === 'rm' || sub === '删除') {
+    const id = flag('id')
+    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-gpt pool remove --id <名>' }
+    writeGptPool(home, { accounts: readGptPool(home).accounts.filter((a) => a.id !== id) })
+    return { ok: true, text: `已移除账号「${id}」（其浏览器登录态也一并删除）。` }
+  }
+  if (sub === 'ban' || sub === '封禁') {
+    const id = flag('id')
+    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-gpt pool ban --id <名>' }
+    gptTouchAccount(home, id, { status: 'banned' })
+    return { ok: true, text: `已封禁「${id}」，轮换时不再自动选它。恢复：/taptap-gpt pool unban --id ${id}` }
+  }
+  if (sub === 'unban' || sub === '恢复') {
+    const id = flag('id')
+    if (typeof id !== 'string') {
+      const all = readGptPool(home).accounts
+      for (const a of all) gptTouchAccount(home, a.id, { status: 'ok', note: '' })
+      return { ok: true, text: `已恢复全部 ${all.length} 个账号（清掉封禁与冷却标记）。` }
+    }
+    gptTouchAccount(home, id, { status: 'ok', note: '' })
+    return { ok: true, text: `已恢复「${id}」。` }
+  }
+  if (sub === 'rotate' || sub === '轮换') {
+    const on = flag('on')
+    const next = on === undefined ? !readGptPool(home).autoRotate : on !== 'false'
+    writeGptPool(home, { autoRotate: next })
+    return { ok: true, text: `账号自动轮换：${next ? '开' : '关'}。` }
+  }
+  // default: list
+  const st = gptStatus(home)
+  const p = st.pool
+  if (p.total === 0) {
+    return {
+      ok: true,
+      text: [
+        '账号池为空（当前用单账号模式）。',
+        '',
+        '加号：/taptap-gpt pool add --id <名>  →  /taptap-gpt login --account <名>',
+        '⚠️ 多账号轮换会绕过单账号配额，违反 OpenAI 服务条款且有封号风险——风险由你承担。',
+      ].join('\n'),
+    }
+  }
+  return {
+    ok: true,
+    text: [
+      `账号池：共 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
+      ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} `
+        + `${a.loggedIn ? '已登录' : '未登录'}`
+        + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
+      '',
+      '加号：pool add --id <名>  →  login --account <名>',
+      '恢复冷却/封禁账号：pool unban --id <名>（不带 id 则恢复全部）',
+    ].join('\n'),
+  }
+}
+
 /** Build the governance system-prompt text. */
 function policyText(config) {
   const tools = CREDIT_TOOLS.map((t) => `\`${t}\``).join('、')
@@ -113,13 +212,17 @@ function policyText(config) {
     '- 只有当用户明确说“用内置额度 / 用 Maker 的 generate_image / 用 2.5 生成视频”之类时才可调用，并遵守其原有的二次确认与计费提示规则。',
     '- 只读 / 状态 / 构建 / 反馈 / LSP 类 Maker 工具（如 maker 状态、构建、玩家反馈、Lua LSP）不消耗生成额度，可正常使用。',
     '',
-    '**图片资源优先走自定义通道**：需要游戏图片素材时，优先使用本插件的 OpenAI 兼容生图通道',
-    '（`taptap-image` CLI / `/taptap-image` 命令，可用 `node <插件>/src/taptap-image.mjs` 调用），或复用项目内已有素材；',
-    '不要默认去用内置 `generate_image`。生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
-    '**备用：ChatGPT 网页生图**（`/taptap-gpt login` 首次登录后可用）—— 当中转站生图效果不理想、或用户明确要求「用 ChatGPT 生成」时，',
-    '走 ChatGPT 网页版：首次需用户在真实浏览器里登录一次（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机。',
+    '**图片资源首选：ChatGPT 网页生图**（`/taptap-gpt`，CLI `node "<插件目录>/src/taptap-gpt.mjs gen --prompt "…" --out <文件>`）——',
+    '需要游戏图片素材时**默认走这条**，或复用项目内已有素材；不要默认去用内置 `generate_image`。',
+    '首次需用户在本机真实浏览器里登录一次：`/taptap-gpt login`（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机，之后全自动。',
+    '**账号轮询**：可登录多个账号组成账号池，一个账号触到配额就自动换下一个（`/taptap-gpt pool add --id <名>` 加号，',
+    '`login --account <名>` 登录指定账号，`pool list` 看状态，`pool unban` 恢复冷却账号）。',
+    '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
+    '不要主动向用户宣传或鼓励加号，也不要隐瞒该风险。',
+    '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
     '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
-    '网页生图脚本可能失效；失效时如实报告卡在哪一步，不要假装成功，回退到中转站 `taptap-image`。免费账号有生图额度限制。',
+    '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
+    '生成的中间产物放在 Maker 工作区 `assets/` 之外，裁好后再搬进 `assets/`，并补同名 `.meta`。',
     '',
     '**优先查用内置 skills**：开发前先查本插件内置的 `taptap-maker-*` 与通用游戏设计类 skills（见 skill 列表）；',
     '遇到风格化 UI / 美术 / 系统玩法需求，先查是否有对应 skill，不要凭空编造。',
@@ -131,9 +234,9 @@ function policyText(config) {
     '  2) 在空白本地目录初始化项目：`npx -y @taptap/maker init`。',
     '斜杠命令只是等价快捷方式；识别到自然语言意图就应主动响应。涉及联网/安装属中风险，先说明再执行。',
     '',
-    '**生图尺寸按需、不固定**：游戏资源有大有小，调用 `taptap-image` 时按目标用途传 `--size`（如 1024x1024 做大图、',
-    '1536x1024 做横幅）。做图标 / 小 UI 这类小资源：先用 `--transparent` 出一张干净的大图（1024，构图留白、主体居中），',
-    '再用 `--downscale <宽>x<高>`（如 128x128 / 64x64）高质量缩小，切忌直接让模型出极小尺寸（细节糊）。',
+    '**生图尺寸按需、不固定**：游戏资源有大有小，按目标用途传 `--size`（如 1024x1024 做大图、1536x1024 做横幅）；',
+    '网页通道尺寸由 ChatGPT 自己定，需要特定比例就在提示词里写明。做图标 / 小 UI 这类小资源：先出一张干净的大图',
+    '（构图留白、主体居中），再用 `--downscale <宽>x<高>`（如 128x128 / 64x64）高质量缩小，切忌直接让模型出极小尺寸（细节糊）。',
     '',
     '**Skill 管理**：用户想隐藏/删除某些用不上的 skill 时，用 `/taptap-skills disable <名字>`（可空格或逗号分隔多个），',
     '`/taptap-skills enable <名字>` 恢复，`/taptap-skills list` 查看全部及禁用状态；禁用项不会再进入 skill 候选。',
@@ -478,10 +581,16 @@ export function apply(ctx, config = {}) {
           return sendJson(res, 200, { ok: true, ...st })
         }
         if (req.method === 'POST' && sub === 'gpt-login') {
+          // Optional --account <id>: log in a NAMED pool account (multi-account
+          // rotation). Launched detached so the UI can keep polling /gpt.
+          const body = await readBody(req)
+          let account
+          try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
           const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
           try {
-            const child = spawn(process.execPath, [cli, 'login', '--waitMs', '300000'],
-              { detached: true, stdio: 'ignore' })
+            const argv = [cli, 'login', '--waitMs', '300000']
+            if (typeof account === 'string' && account.length > 0) argv.push('--account', account)
+            const child = spawn(process.execPath, argv, { detached: true, stdio: 'ignore' })
             child.unref()
             return sendJson(res, 200, { ok: true, started: true, ...gptStatus(home) })
           } catch (error) {
@@ -489,9 +598,56 @@ export function apply(ctx, config = {}) {
           }
         }
         if (req.method === 'POST' && sub === 'gpt-logout') {
+          const body = await readBody(req)
+          let account
+          try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
           try {
-            const r = gptLogout(home)
+            const r = gptLogout(home, account)
             return sendJson(res, 200, { ok: r.ok, ...r })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // Account pool management (add / remove / ban / unban / rotate).
+        if (req.method === 'POST' && sub === 'gpt-pool') {
+          const body = await readBody(req)
+          let parsed = {}
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const action = parsed.action
+          const id = typeof parsed.id === 'string' ? parsed.id : undefined
+          try {
+            if (action === 'add') {
+              if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
+              const pool = readGptPool(home)
+              if (pool.accounts.some((a) => a.id === id)) {
+                return sendJson(res, 200, { ok: true, ...gptStatus(home), warn: `账号 ${id} 已存在` })
+              }
+              writeGptPool(home, {
+                accounts: [...pool.accounts,
+                  { id, label: typeof parsed.label === 'string' && parsed.label ? parsed.label : id, status: 'unknown', lastUsedAt: null, note: '' }],
+              })
+            } else if (action === 'remove') {
+              if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
+              writeGptPool(home, { accounts: readGptPool(home).accounts.filter((a) => a.id !== id) })
+              try {
+                const prof = path.join(dataDir(home), `browser-profile-gpt-${id}`)
+                fs.rmSync(prof, { recursive: true, force: true })
+              } catch { /* best effort */ }
+            } else if (action === 'ban') {
+              if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
+              gptTouchAccount(home, id, { status: 'banned' })
+            } else if (action === 'unban') {
+              if (!id) {
+                for (const a of readGptPool(home).accounts) gptTouchAccount(home, a.id, { status: 'ok', note: '' })
+              } else {
+                gptTouchAccount(home, id, { status: 'ok', note: '' })
+              }
+            } else if (action === 'rotate') {
+              writeGptPool(home, { autoRotate: parsed.on !== false })
+            } else {
+              return sendJson(res, 400, { ok: false, error: `unknown action: ${action}` })
+            }
+            return sendJson(res, 200, { ok: true, ...gptStatus(home) })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
@@ -589,35 +745,6 @@ export function apply(ctx, config = {}) {
           '需要图片素材优先用 /taptap-image 的自定义生图通道。',
         ].join('\n'),
       }),
-    })
-
-    scoped.commands.register({
-      name: 'taptap-image',
-      description: '查看/说明自定义 OpenAI 兼容生图通道（URL/key/model 配置与调用方式）',
-      input: { hint: '可留空；或粘贴想生成的提示词以获得调用示例' },
-      handler: (invocation) => {
-        const cfg = readJson(imageFile) ?? {}
-        const configured = Boolean(cfg.baseURL && cfg.apiKey && cfg.model)
-        const prompt = (invocation?.rawInput ?? '').trim() || '一只橙色小猫，扁平矢量风格'
-        const cli = path.join(PKG_DIR, 'src', 'taptap-image.mjs')
-        return {
-          kind: 'success',
-          text: [
-            `自定义生图配置文件：${imageFile}`,
-            `状态：${configured ? '已配置' : '未配置（请填 baseURL / apiKey / model）'}`,
-            `  baseURL=${cfg.baseURL || '(未设)'}  model=${cfg.model || '(未设)'}`,
-            '',
-            '调用示例（PowerShell）：',
-            `  node "${cli}" --prompt "${prompt}" --out D:\\tmp\\out.png --size 1024x1024`,
-            `  node "${cli}" --prompt "一个蓝色盾牌图标，扁平，居中留白" --out D:\\tmp\\icon.png --transparent --downscale 128x128`,
-            `  node "${cli}" --config    # 查看生效配置（key 掩码）`,
-            '',
-            '尺寸按需传 --size（不再固定）；端点若只认 1024x1024 / 1024x1536 / 1536x1024，会自动回退到最接近的一档并重试。',
-            '小资源（图标 / 小 UI）方案：--transparent 出干净大图，再 --downscale <宽>x<高>（如 128x128、64x64）高质量缩小。',
-            '不消耗任何 Maker MCP 内置额度。',
-          ].join('\n'),
-        }
-      },
     })
 
     scoped.commands.register({
@@ -883,43 +1010,200 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-gpt',
-      description: 'ChatGPT 网页生图账号：login 登录 / logout 换号 / status 状态',
-      input: { hint: 'login | logout | status' },
+      description: 'ChatGPT 网页生图（首选通道）："<描述>" 生成图片 / login 登录 / pool 账号池 / status 状态',
+      input: { hint: '<图片描述> | login | login --account <名> | pool list | logout | status' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const low = raw.toLowerCase()
         const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
 
-        if (low === 'login' || raw === '登录') {
-          const res = await gptLogin(home, { waitMs: 300000 })
+        // login [--account <id>]
+        if (low === 'login' || low.startsWith('login ') || raw === '登录') {
+          const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
+          const res = await gptLogin(home, { waitMs: 300000, accountId: acct })
+          const poolHint = acct ? `账号「${acct}」已登录。加更多账号：/taptap-gpt pool add --id <名> 再 login --account <名>。`
+            : '登录态保存在本机，只需登录一次。加第二个账号：/taptap-gpt pool add --id <名>，然后 login --account <名>。'
           return {
             kind: res?.logged === true ? 'success' : 'error',
             text: res?.logged === true
-              ? '已登录 ChatGPT，之后网页生图都用它。\n登录态保存在本机，只需登录一次。'
+              ? `已登录 ChatGPT，之后网页生图都用它。\n${poolHint}`
               : '未完成登录（或超时）。请在打开的浏览器里完成登录（Google/Apple/手机号/邮箱均可），登录态会保存。',
           }
         }
         if (low === 'logout' || raw === '退出' || raw === '换号') {
-          const r = gptLogout(home)
+          const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
+          const r = gptLogout(home, acct)
           return {
             kind: r.ok ? 'success' : 'error',
             text: r.ok
-              ? '已退出 ChatGPT 登录态。可用另一个账号 /taptap-gpt login。'
+              ? `已退出${acct ? `账号「${acct}」` : ''}登录态。可用另一个账号 /taptap-gpt login。`
               : `退出失败：可能有浏览器正在占用，请先关闭再试。（${r.profile ?? ''}）`,
           }
         }
-        const st = gptStatus(home)
-        return {
-          kind: 'success',
-          text: [
+        // 账号池：list / add / remove / ban / unban / rotate
+        if (low === 'pool' || low.startsWith('pool ')) {
+          const r = await gptPoolCommand(home, raw)
+          return { kind: r.ok ? 'success' : 'error', text: r.text }
+        }
+        if (low === 'add' || low.startsWith('add ')) {
+          const r = await gptPoolCommand(home, `pool ${raw}`)
+          return { kind: r.ok ? 'success' : 'error', text: r.text }
+        }
+        if (low === 'status' || raw === '状态') {
+          const st = gptStatus(home)
+          const p = st.pool
+          const lines = [
             `ChatGPT 登录状态：${st.loggedIn ? '已登录' : '未登录'}`,
             `  profile: ${st.profile}`,
             `  下载目录: ${st.downloadDir}`,
             '',
-            st.loggedIn
-              ? '可直接说「用 ChatGPT 生成图片：<描述>」（生图仍优先走中转站，指定 ChatGPT 才走网页）'
+            `账号池：共 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
+            ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} ${a.loggedIn ? '已登录' : '未登录'}`
+              + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
+            '',
+            st.loggedIn || p.loggedIn > 0
+              ? '可以直接说「生成一个蓝色盾牌图标」，默认走这条网页通道。'
               : '先登录：/taptap-gpt login（只需一次）',
-          ].join('\n'),
+          ]
+          return { kind: 'success', text: lines.join('\n') }
+        }
+
+        // Anything else IS the image description — this lane is the default.
+        const desc = raw.replace(/^(图片|生图|生成图片|画一张|生成一张)\s*/i, '').trim()
+        if (desc.length === 0) {
+          const st = gptStatus(home)
+          return {
+            kind: 'success',
+            text: [
+              'ChatGPT 网页生图是首选通道。直接说：/taptap-gpt 一只橙色小猫，扁平矢量风格',
+              '',
+              `当前：${st.loggedIn || st.pool.loggedIn > 0 ? '已登录，可直接生成' : '未登录'}`,
+              st.loggedIn || st.pool.loggedIn > 0 ? '' : '先登录：/taptap-gpt login（只需一次）',
+              '',
+              '账号池：pool list 看状态 / pool add --id <名> 加号 / pool unban --id <名> 恢复冷却账号',
+            ].filter(Boolean).join('\n'),
+          }
+        }
+
+        const st = gptStatus(home)
+        if (!st.loggedIn && st.pool.loggedIn === 0) {
+          return {
+            kind: 'error',
+            text: [
+              '还没登录 ChatGPT 网页账号，生图需要用它（走你自己的账号/免费额度，不消耗 Maker 内置额度）。',
+              '',
+              '登录：/taptap-gpt login',
+              '（或先回退到中转站：/taptap-image）',
+            ].join('\n'),
+          }
+        }
+        const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
+        const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
+        const prompt = desc.replace(/(?:--downscale|-d)\s+\d+x\d+/, '').replace(/(?:--account|-a)\s+\S+/, '').trim()
+        const r = await gptGen(home, prompt, { accountId: acct, downscale })
+        if (!r.ok) {
+          const triedList = Array.isArray(r.failures) ? r.failures.map((f) => `  ${f.account ?? '(默认)'}: ${f.error}`).join('\n') : ''
+          const isQuota = String(r.error ?? '').startsWith('quota:')
+          return {
+            kind: 'error',
+            text: [
+              `网页生图失败：${r.error}`,
+              r.rotated ? `已自动轮换过账号：${(r.tried ?? []).join(' → ')}` : '',
+              triedList,
+              '',
+              isQuota
+                ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/taptap-gpt pool list、pool unban），或回退到中转站 /taptap-image。'
+                : '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。',
+            ].filter(Boolean).join('\n'),
+          }
+        }
+        return {
+          kind: 'success',
+          text: [
+            `已生成：${r.saved}`,
+            r.rotated ? `（自动轮换账号：${(r.tried ?? []).join(' → ')}）` : '',
+            ...(r.notes ?? []),
+            '',
+            '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta：',
+            `  node "${path.join(PKG_DIR, 'src', 'taptap-audio.mjs')}" --help  # 音效走这里；图片请手动落盘`,
+          ].filter(Boolean).join('\n'),
+        }
+      },
+    })
+
+    // /taptap-gpt 作为首选后，/taptap-image 变成显式回退入口。
+    scoped.commands.register({
+      name: 'taptap-image',
+      description: '中转站生图（回退通道）：生成图片 / --config 查看配置',
+      input: { hint: '<图片描述>（网页通道不可用时的回退）/ --config' },
+      handler: async (invocation) => {
+        const raw = (invocation?.rawInput ?? '').trim()
+        const cli = path.join(PKG_DIR, 'src', 'taptap-image.mjs')
+        const low = raw.toLowerCase()
+
+        if (low === '--config' || low === '-c' || raw === '配置') {
+          try {
+            const out = spawnSync(process.execPath, [cli, '--config'], { encoding: 'utf8', timeout: 30000 })
+            return { kind: 'success', text: `中转站（回退）配置：\n${(out.stdout ?? '').trim()}` }
+          } catch (error) {
+            return { kind: 'error', text: `读取配置失败：${error?.message ?? error}` }
+          }
+        }
+
+        const cfg = readJson(imageFile) ?? {}
+        const configured = Boolean(cfg.baseURL && cfg.apiKey && cfg.model)
+        if (!configured) {
+          return {
+            kind: 'error',
+            text: [
+              '中转站（回退通道）还没配置，且它已不是首选——图片默认走 ChatGPT 网页生图。',
+              '',
+              `配置文件：${imageFile}`,
+              '',
+              '网页通道：/taptap-gpt login 登录一次即可用（默认走这条）。',
+              '确实要用中转站：填好 baseURL / apiKey / model 再回来。',
+            ].join('\n'),
+          }
+        }
+
+        const desc = raw.replace(/^(图片|生图|生成图片|画一张|生成一张)\s*/i, '').trim()
+        if (desc.length === 0) {
+          return {
+            kind: 'success',
+            text: [
+              '中转站生图（回退通道，首选是 /taptap-gpt）：',
+              '',
+              `  node "${cli}" --prompt "<描述>" --out D:\\tmp\\out.png --size 1024x1024`,
+              `  node "${cli}" --prompt "蓝色盾牌图标，扁平，居中留白" --out D:\\tmp\\icon.png --transparent --downscale 128x128`,
+              '',
+              '尺寸按需传 --size；端点只认 1024x1024 / 1024x1536 / 1536x1024 时会自动回退到最接近的一档。',
+              '不消耗任何 Maker MCP 内置额度。',
+            ].join('\n'),
+          }
+        }
+
+        const outFile = path.join(tmpImageDir(home), `relay-${Date.now()}.png`)
+        const argv = [cli, '--prompt', desc, '--out', outFile]
+        const size = (/(?:--size|-s)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
+        if (size) argv.push('--size', size)
+        const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
+        if (downscale) argv.push('--downscale', downscale)
+        try {
+          const out = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 300000 })
+          const text = (out.stdout ?? '') + (out.stderr ?? '')
+          if (out.status !== 0) return { kind: 'error', text: `中转站生图失败：\n${text.trim()}` }
+          let parsed = {}
+          try { parsed = JSON.parse((out.stdout ?? '').trim()) } catch { parsed = {} }
+          return {
+            kind: 'success',
+            text: [
+              `已生成：${(parsed.outputs ?? [outFile])[0]}`,
+              ...(parsed.notes ?? []),
+              '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。',
+            ].join('\n'),
+          }
+        } catch (error) {
+          return { kind: 'error', text: `调用失败：${error?.message ?? error}` }
         }
       },
     })

@@ -333,12 +333,16 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // ChatGPT account (备用生图通道)：登录一次，之后网页生图可复用。
-    // 和中转站通道并存——中转站仍是首选，这个只在需要时用。
+    // ChatGPT 网页生图 = PRIMARY image lane (2026-10). The relay-station API
+    // below is the fallback for when this lane is unavailable.
+    // Account pool: several accounts, each with its own browser profile; when
+    // one hits its quota the next one is used automatically.
     function GptAccount() {
       const [info, setInfo] = useState(null) // null | 'error' | status
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
+      const [newId, setNewId] = useState('')
+      const [showAdd, setShowAdd] = useState(false)
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
@@ -348,69 +352,161 @@ window.__ModuleLoader__.load({
       }, [])
       useEffect(() => { load() }, [load])
 
-      const doLogin = useCallback(() => {
-        setBusy('login'); setErr('')
-        fetch(`${API_BASE}/gpt-login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      const post = useCallback((endpoint, bodyObj) => {
+        setErr('')
+        return fetch(`${API_BASE}/${endpoint}`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(bodyObj ?? {}),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok) { setErr(j.error || '操作失败'); return false }
+            if (j.pool || j.loggedIn !== undefined) setInfo(j)
+            else load()
+            return true
+          })
+          .catch(() => { setErr('请求失败：宿主服务未就绪'); return false })
+      }, [load])
+
+      // Poll until the chosen account shows as logged in (or we give up), so
+      // the card reflects reality instead of a blind "started".
+      const waitForLogin = useCallback((account) => {
+        let tries = 0
+        const timer = setInterval(() => {
+          tries += 1
+          fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
+            .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
+            .then((st) => {
+              const done = account
+                ? (st.pool?.accounts ?? []).some((a) => a.id === account && a.loggedIn)
+                : st.loggedIn === true
+              if (done || tries >= 60) {
+                clearInterval(timer)
+                setInfo(st)
+                setBusy('')
+                if (!done) setErr('未检测到登录：请在弹出的浏览器里完成登录，再点「重新登录」。')
+              }
+            })
+            .catch(() => { if (tries >= 60) { clearInterval(timer); setBusy('') } })
+        }, 3000)
+      }, [])
+
+      const doLogin = useCallback((account) => {
+        setBusy(account ? `login:${account}` : 'login'); setErr('')
+        fetch(`${API_BASE}/gpt-login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(account ? { account } : {}),
+        })
           .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
           .then(({ ok, j }) => {
             if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
-            let tries = 0
-            const timer = setInterval(() => {
-              tries += 1
-              fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
-                .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
-                .then((st) => {
-                  if (st.loggedIn === true || tries >= 60) {
-                    clearInterval(timer)
-                    setInfo(st)
-                    setBusy('')
-                    if (st.loggedIn !== true) setErr('未检测到登录：请在弹出的浏览器里完成登录，再点「重新登录」。')
-                  }
-                })
-                .catch(() => { if (tries >= 60) { clearInterval(timer); setBusy('') } })
-            }, 3000)
+            waitForLogin(account)
           })
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
-      }, [])
+      }, [waitForLogin])
 
-      const doLogout = useCallback(() => {
-        setBusy('logout'); setErr('')
-        fetch(`${API_BASE}/gpt-logout`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      const doLogout = useCallback((account) => {
+        setBusy(account ? `logout:${account}` : 'logout'); setErr('')
+        fetch(`${API_BASE}/gpt-logout`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(account ? { account } : {}),
+        })
           .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
-          .then(({ ok, j }) => { if (ok && j.ok) load(); else setErr(j.error || '退出失败') })
+          .then(({ ok, j }) => { if (ok && j.ok) { if (j.pool) setInfo(j); else load() } else setErr(j.error || '退出失败') })
           .catch(() => setErr('请求失败：宿主服务未就绪'))
           .finally(() => setBusy(''))
       }, [load])
 
+      const addAccount = useCallback(() => {
+        const id = (newId || '').trim()
+        if (!id) { setErr('请填账号短名（如 a2、小号）'); return }
+        post('gpt-pool', { action: 'add', id }).then((okFlag) => { if (okFlag) { setNewId(''); setShowAdd(false) } })
+      }, [newId, post])
+
       if (info === null) {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'ChatGPT 生图（备用）'),
+          h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图（首选）'),
           h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
       }
       if (info === 'error') {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'ChatGPT 生图（备用）'),
+          h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图（首选）'),
           h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
             '没连上宿主服务。可用命令 /taptap-gpt login。'))
       }
-      const logged = info.loggedIn === true
+      const pool = info.pool ?? { accounts: [], total: 0, loggedIn: 0, autoRotate: true }
+      const logged = info.loggedIn === true || pool.loggedIn > 0
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
-            h('h2', { style: S.cardTitle }, 'ChatGPT 生图（备用）'),
+            h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图（首选）'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
-              '用 ChatGPT 网页版生成图片。中转站生图仍是首选，这个备用。',
-              '免费账号即可生图。')),
+              '图片默认走 ChatGPT 网页版（用你自己的账号 / 免费额度）。登录一次即可，登录态存本机。',
+              '下面的中转站是网页通道不可用时的回退。')),
           h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
         ),
         h('div', { style: S.bar },
-          h('button', { style: S.btn, disabled: busy !== '', onClick: doLogin },
-            busy === 'login' ? '登录中…' : (logged ? '重新登录' : '登录')),
-          logged ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: doLogout }, busy === 'logout' ? '退出中…' : '退出 / 换号') : null,
+          h('button', { style: S.btn, disabled: busy !== '', onClick: () => doLogin(undefined) },
+            busy === 'login' ? '登录中…' : (info.loggedIn ? '重新登录' : '登录')),
+          info.loggedIn ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => doLogout(undefined) }, busy === 'logout' ? '退出中…' : '退出 / 换号') : null,
           err ? h('span', { style: S.warn }, err) : null,
         ),
         h('p', { style: { ...S.hint, marginTop: 8 } },
-          '登录后会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可，登录态存本机。'),
+          '登录后会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可。'),
+        h('p', { style: S.hint }, '图片下载目录：', h('span', { style: S.codeInline }, info.downloadDir || '')),
+
+        h('div', { style: { ...S.rowBetween, marginTop: 4 } },
+          h('div', null,
+            h('span', { style: { fontSize: 13, fontWeight: 600 } }, '账号轮询'),
+            h('p', { style: { ...S.hint, marginTop: 2 } },
+              `共 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling ?? 0}，封禁 ${pool.banned ?? 0}）。一个触配额自动换下一个。`)),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h('span', { style: pool.autoRotate ? S.pill : S.offPill }, pool.autoRotate ? '轮换开' : '轮换关'),
+            h(Toggle, {
+              on: pool.autoRotate !== false,
+              onClick: () => post('gpt-pool', { action: 'rotate', on: pool.autoRotate === false }),
+            })),
+        ),
+        pool.total > 0
+          ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            pool.accounts.map((a) => h('div', { key: a.id, style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 } },
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+                h('span', { style: { fontSize: 13, fontWeight: 600 } }, a.label !== a.id ? `${a.id}（${a.label}）` : a.id),
+                h('span', { style: S.hint },
+                  a.loggedIn ? '已登录' : '未登录',
+                  a.status === 'banned' ? ' · 已封禁' : a.status === 'cooling' ? ' · 冷却中' : '')),
+              h('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
+                h('button', {
+                  style: S.ghostBtn, disabled: busy !== '',
+                  onClick: () => doLogin(a.id),
+                }, busy === `login:${a.id}` ? '登录中…' : (a.loggedIn ? '重登' : '登录')),
+                a.status === 'banned' || a.status === 'cooling'
+                  ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('gpt-pool', { action: 'unban', id: a.id }) }, '恢复')
+                  : h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('gpt-pool', { action: 'ban', id: a.id }) }, '封禁'),
+                h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('gpt-pool', { action: 'remove', id: a.id }) }, '移除'),
+              )),
+            ))
+          : h('p', { style: S.hint }, '还没加账号，当前是单账号模式。加第二个即可开启轮询。'),
+        h('div', { style: S.bar },
+          showAdd
+            ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('input', {
+                style: { ...S.search, flex: '0 0 auto', width: 160 }, value: newId,
+                placeholder: '账号短名，如 a2', spellCheck: false, autoComplete: 'off',
+                onChange: (e) => setNewId(e.target.value),
+              }),
+              h('button', { style: S.btn, disabled: busy !== '', onClick: addAccount }, '加号'),
+              h('button', { style: S.ghostBtn, onClick: () => { setShowAdd(false); setNewId('') } }, '取消'))
+            : h('button', { style: S.ghostBtn, onClick: () => setShowAdd(true) }, '+ 加账号'),
+          (pool.banned > 0 || pool.cooling > 0)
+            ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('gpt-pool', { action: 'unban' }) }, '恢复全部')
+            : null,
+        ),
+        h('div', { style: { ...S.warnBox, marginTop: 4 } },
+          h('span', { style: S.warnTitle }, '⚠️ 轮询风险'),
+          h('p', { style: { ...S.hint, margin: 0 } },
+            '多账号轮流使用会绕过单账号配额，违反 OpenAI 服务条款，且可能导致账号被封。这是你要求的功能，风险由你承担。'),
+        ),
       )
     }
 
@@ -611,13 +707,14 @@ window.__ModuleLoader__.load({
 
       if (form === null) {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, '自定义生图通道（OpenAI 兼容 /images）'),
+          h('h2', { style: S.cardTitle }, '中转站生图（回退 · OpenAI 兼容 /images）'),
           h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
       }
 
       return h('div', { style: S.card },
-        h('h2', { style: S.cardTitle }, '自定义生图通道（OpenAI 兼容 /images）'),
-        h('p', { style: { ...S.sub, marginTop: 0 } }, '填好点「保存」即写入本机 image.json，即时生效、无需重启。Key 不进工作区、不进包。'),
+        h('h2', { style: S.cardTitle }, '中转站生图（回退 · OpenAI 兼容 /images）'),
+        h('p', { style: { ...S.sub, marginTop: 0 } },
+          '网页通道（上一张卡）不可用时的回退：未登录 / 账号都触配额 / 选择器失效。填好点「保存」即写入本机 image.json，即时生效、无需重启。Key 不进工作区、不进包。'),
         bridgeDown ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
           '宿主 web 服务未就绪，暂不能自动保存。可先填好用「复制 JSON」粘到 image.json；服务就绪后再点「保存」。') : null,
         h(LabeledInput, {
@@ -672,11 +769,12 @@ window.__ModuleLoader__.load({
 
         h(PolicyToggle),
 
+        // 网页生图是首选 → 排在前面；中转站降为回退。
+        h(GptAccount),
+
         h(ImageConfig),
 
         h(BgmAccount),
-
-        h(GptAccount),
 
         h(AudioLibrary),
 
@@ -687,9 +785,11 @@ window.__ModuleLoader__.load({
           h('p', { style: { ...S.sub, marginTop: 0 } },
             '本页只放一次性配置。日常使用直接跟模型说中文，或打斜杠命令：'),
           h('ul', { style: S.ul },
-            h('li', null, '生图：说「生成一个蓝色盾牌图标」，或 ',
-              h('span', { style: S.codeInline }, '/taptap-image 蓝色盾牌图标'), '（走中转站）'),
-            h('li', null, 'ChatGPT 网页生图：说「用 ChatGPT 生成图片：<描述>」。需先 /taptap-gpt login 登录一次。'),
+            h('li', null, '生图（首选）：说「生成一个蓝色盾牌图标」，默认走 ChatGPT 网页生图。',
+              '首次需 ', h('span', { style: S.codeInline }, '/taptap-gpt login'), ' 登录一次。'),
+            h('li', null, '生图（回退）：网页通道不可用时用 ',
+              h('span', { style: S.codeInline }, '/taptap-image <描述>'), '（中转站，需先配 baseURL/key/model）'),
+            h('li', null, '账号池：/taptap-gpt pool list 看账号，add --id <名> 加号，login --account <名> 登录，unban 恢复冷却账号'),
             h('li', null, '音效：说「加个金币音效」，或 ',
               h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
             h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),

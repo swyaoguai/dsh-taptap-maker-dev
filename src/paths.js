@@ -122,6 +122,120 @@ export function writeBgmConfig(dshHome, patch = {}) {
   return merged
 }
 
+/* ------------------------------------------------------------------------- *
+ * ChatGPT ACCOUNT POOL — multi-account rotation for the web image lane.
+ *
+ * ⚠️ TO BE CLEAR: rotating multiple accounts to bypass per-account quotas
+ * violates OpenAI's Terms of Service and carries a real ban risk (OpenAI's
+ * Cloudflare already blocks automation). This is implemented because the user
+ * explicitly asked for it; the risk is theirs, not ours. Each account gets its
+ * OWN browser profile so one banned account cannot corrupt the others.
+ * ------------------------------------------------------------------------- */
+
+/** Where the account pool list is stored. */
+export function gptPoolPath(dshHome) {
+  return path.join(dataDir(dshHome), 'gpt-pool.json')
+}
+
+/**
+ * Read the ChatGPT account pool.
+ * Shape: { accounts: [{ id, label, profile, status, lastUsedAt, note }],
+ *          autoRotate: boolean }
+ * `id` is a short slug; `profile` is the dedicated browser-profile dir.
+ */
+export function readGptPool(dshHome) {
+  const data = readJson(gptPoolPath(dshHome)) ?? {}
+  const accounts = Array.isArray(data.accounts) ? data.accounts : []
+  // Normalise so callers can trust the shape.
+  return {
+    accounts: accounts
+      .filter((a) => typeof a?.id === 'string' && a.id.length > 0)
+      .map((a) => ({
+        id: a.id,
+        label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
+        profile: typeof a.profile === 'string' && a.profile.length > 0
+          ? a.profile
+          : path.join(dataDir(dshHome), `browser-profile-gpt-${a.id}`),
+        status: typeof a.status === 'string' ? a.status : 'unknown',
+        lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
+        note: typeof a.note === 'string' ? a.note : '',
+      })),
+    autoRotate: data.autoRotate !== false, // default ON
+  }
+}
+
+/** Persist the account pool (partial patch); returns the merged record. */
+export function writeGptPool(dshHome, patch = {}) {
+  const merged = { ...readGptPool(dshHome) }
+  if (Array.isArray(patch.accounts)) {
+    merged.accounts = patch.accounts
+      .filter((a) => typeof a?.id === 'string' && a.id.length > 0)
+      .map((a) => ({
+        id: a.id,
+        label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
+        profile: typeof a.profile === 'string' && a.profile.length > 0
+          ? a.profile
+          : path.join(dataDir(dshHome), `browser-profile-gpt-${a.id}`),
+        status: typeof a.status === 'string' ? a.status : 'unknown',
+        lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
+        note: typeof a.note === 'string' ? a.note : '',
+      }))
+  }
+  if (typeof patch.autoRotate === 'boolean') merged.autoRotate = patch.autoRotate
+  writeJson(gptPoolPath(dshHome), merged)
+  return merged
+}
+
+/**
+ * Choose the next usable account: prefer `activeId` if it is still usable,
+ * otherwise pick the least-recently-used account that is not banned and not
+ * cooling. Returns the account object, or null when the pool is
+ * empty/exhausted.
+ *
+ * Statuses: 'ok' (default/unknown), 'cooling' (hit a quota this run — usable
+ * again after a cooldown), 'banned' (user marked it dead — never auto-picked).
+ */
+export function pickGptAccount(dshHome, { activeId, exclude = [], cooldownMs = 6 * 3600 * 1000 } = {}) {
+  const pool = readGptPool(dshHome)
+  if (pool.accounts.length === 0) return null
+  const skip = new Set(exclude)
+  const now = Date.now()
+  const usable = pool.accounts.filter((a) => {
+    if (skip.has(a.id)) return false
+    if (a.status === 'banned') return false
+    // A cooling account becomes usable again once the cooldown has passed.
+    if (a.status === 'cooling' && typeof a.lastUsedAt === 'number'
+      && now - a.lastUsedAt < cooldownMs) return false
+    return true
+  })
+  if (usable.length === 0) return null
+  if (activeId) {
+    const cur = usable.find((a) => a.id === activeId)
+    if (cur) return cur
+  }
+  // Least-recently-used first (accounts never used get lastUsedAt null → first).
+  usable.sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))
+  return usable[0]
+}
+
+/** Mark an account as used now (or banned). */
+export function touchGptAccount(dshHome, id, patch = {}) {
+  const pool = readGptPool(dshHome)
+  let found = false
+  pool.accounts = pool.accounts.map((a) => {
+    if (a.id !== id) return a
+    found = true
+    if (patch.status !== undefined) a.status = patch.status
+    if (patch.lastUsedAt !== undefined) a.lastUsedAt = patch.lastUsedAt
+    if (patch.note !== undefined) a.note = patch.note
+    if (patch.label !== undefined) a.label = patch.label
+    return a
+  })
+  if (!found) return readGptPool(dshHome)
+  writeGptPool(dshHome, pool)
+  return readGptPool(dshHome)
+}
+
 /** Read a JSON file, returning undefined when absent or invalid. */
 export function readJson(file) {
   try {
