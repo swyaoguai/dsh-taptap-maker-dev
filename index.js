@@ -384,7 +384,9 @@ function policyText(config, gptLaneOn = true) {
     '       并优先套用内置的中文场景模板（战斗/BOSS/胜利/失败/主菜单/探索/紧张/悲伤/商店/升级）。',
     '       也可先读项目里的文档（GAME_RULES.md 等）推断需要哪些场景 BGM，再据此生成提示词。',
     '     - **纯音乐（无歌词）默认开启**：游戏 BGM 大多不需要人声，插件会默认打开该开关。',
-    '       用户明确要带人声/歌词时才加 `--lyrics` 关掉它。开关与生成数量都可在设置页「BGM 账号」调整。',
+    '       **决定有没有人声的是站点上那个「纯音乐」开关，不是提示词** —— 靠写「纯音乐/无人声」是没用的。',
+    '       插件会在点「创作」前自动把开关设到期望状态并校验；设不上会直接中止并报 `instrumental_unset`（不花额度）。',
+    '       用户明确要带人声/歌词时才加 `--lyrics` 关掉它；开关与生成数量可在设置页「BGM 账号」调整。',
     '     - **导入项目**：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录> '
       + '--project <Maker项目目录> --kind bgm --to wav --latest`，自动转格式 + 写 `.meta`。',
     '     - 装完要**告诉用户装到了哪个文件**。' + '不要向用户长篇解释原理，只说清「需要登录账号，之后用它生成」。',
@@ -1701,7 +1703,14 @@ export function apply(ctx, config = {}) {
               '',
               isCredit
                 ? '所有可用账号额度都不足了。可以加更多账号（/taptap-bgm pool add --id <名> 再 login --account <名>），或等额度恢复（/taptap-bgm pool unban）。'
-                : '若是网页结构变化导致选择器失效，会如实报告卡在哪一步；可稍后重试。',
+                : r.error === 'instrumental_unset'
+                  // Deliberate stop: never spend credits on a vocal track that
+                  // was not asked for.
+                  ? '「纯音乐」开关没能设成期望状态，已中止（没花额度）。'
+                    + '这个开关决定有没有人声，写提示词是没用的；重试时会自动再设一次。'
+                    + '如果你确实要带人声/歌词：/taptap-bgm <描述> --lyrics；如果你要的是纯音乐却反复失败，'
+                    + '可加 --ignore-instrumental 强行按当前状态生成（会带人声）。'
+                  : '若是网页结构变化导致选择器失效，会如实报告卡在哪一步；可稍后重试。',
             ].filter(Boolean).join('\n'),
           }
         }

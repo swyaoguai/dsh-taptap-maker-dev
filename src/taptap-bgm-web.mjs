@@ -561,7 +561,7 @@ function findAuthCookie(cookieFile) {
  * `gen`: paste the prompt, generate, then download the newest audio into --out.
  * Selectors are best-effort; unmatched steps are reported honestly.
  */
-export async function generate(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId } = {}) {
+export async function generate(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId, ignoreInstrumental = false } = {}) {
   const target = site ?? (await detectSite())
   const dl = downloadDir(dshHome)
   fs.mkdirSync(dl, { recursive: true })
@@ -576,6 +576,7 @@ export async function generate(dshHome, prompt, { out, waitMs = 300000, site, in
   //                  纯音乐 toggle, 「创作」 button, then a 下载 action
   const snippet = `import time, os, base64
 steps = {}
+IGNORE_INSTRUMENTAL = ${ignoreInstrumental ? 'True' : 'False'}
 MUSIC_URL = ${pyStr(target.url)}.replace("/audio", "/audio/music")
 # Auth on this site is a token REQUEST HEADER (JWT), not a cookie — verified
 # by inspecting the real requests. So capture that header once, then we can call
@@ -664,49 +665,65 @@ try:
     pg.evaluate("() => document.querySelectorAll('.ant-modal-wrap,.ant-modal-mask').forEach(e => e.remove())")
 except Exception:
     pass
-# IMPORTANT: this site widget is a TOGGLE, not a checkbox — blindly clicking it
-# flips whatever state it is already in. So read its current state first and
-# only click when it disagrees with the desired setting.
+# The old code used the FIRST [role=switch] on the page and treated an
+# unreadable state as OFF. Both were wrong: the page has several switches, and
+# "read false → click" turned a correctly-ON 纯音乐 into OFF (user-reported
+# 2026-10-17: 「一直被我主动关掉」). Now: locate the switch by its 纯音乐 label,
+# never guess a state, and verify after clicking.
 WANT_INSTRUMENTAL = ${instrumentalWanted ? 'True' : 'False'}
 steps["want_instrumental"] = WANT_INSTRUMENTAL
-steps["instrumental_before"] = None
-steps["instrumental_after"] = None
-inst_state = pg.evaluate("""() => {
-    // The 纯音乐 control is an antd Switch: <button role="switch" class="ant-switch">
-    // with aria-checked, or class contains 'ant-switch-checked' when on.
-    const sw = document.querySelector('button.ant-switch, [role=switch]');
-    if (!sw) return null;
-    const cls = sw.className || '';
-    if (typeof sw.getAttribute === 'function') {
-        const ac = sw.getAttribute('aria-checked');
+
+PROBE = """() => {
+    const isSwitch = (el) => !!el && el.matches &&
+        (el.matches('[role=switch]') || el.matches('button.ant-switch') || el.matches('.ant-switch'));
+    const readState = (el) => {
+        if (!el) return null;
+        const ac = el.getAttribute ? el.getAttribute('aria-checked') : null;
         if (ac === 'true') return true;
         if (ac === 'false') return false;
+        const ds = el.getAttribute ? el.getAttribute('data-state') : null;
+        if (ds === 'checked' || ds === 'on') return true;
+        if (ds === 'unchecked' || ds === 'off') return false;
+        const cls = typeof el.className === 'string' ? el.className : '';
+        if (cls.indexOf('ant-switch-checked') !== -1) return true;
+        if (cls.indexOf('ant-switch') !== -1) return false;   // antd, unchecked
+        // Unknown — MUST stay null. Returning false here is what silently
+        // flipped the switch to OFF before.
+        return null;
+    };
+    // 1) find the element labelled 纯音乐, then look for a switch near it.
+    let sw = null;
+    let by = 'none';
+    const all = Array.from(document.querySelectorAll('span,div,label,p,button'));
+    const labels = all.filter(e => {
+        const t = (e.innerText || '').trim();
+        return t === '纯音乐' || (t.startsWith('纯音乐') && t.length <= 10);
+    }).sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+    if (labels.length > 0) {
+        let node = labels[0];
+        for (let i = 0; i < 6 && node && !sw; i += 1) {
+            if (isSwitch(node)) sw = node;
+            if (!sw && node.querySelector) sw = node.querySelector('[role=switch], button.ant-switch, .ant-switch');
+            node = node.parentElement;
+        }
+        if (sw) by = 'label';
     }
-    if (cls.indexOf('ant-switch-checked') !== -1) return true;
-    return false;
-}""")
-steps["instrumental_before"] = inst_state
-if inst_state is not None and inst_state != WANT_INSTRUMENTAL:
-    try:
-        t = pg.query_selector("button.ant-switch, [role=switch]")
-        if t and t.is_visible():
-            # force=True bypasses any lingering overlay that would otherwise
-            # swallow the click.
-            t.click(force=True)
-            steps["instrumental_toggled"] = True
-            pg.wait_for_timeout(1500)
-    except Exception:
-        pass
-# Re-read so we can report the truth rather than assuming.
-steps["instrumental_after"] = pg.evaluate("""() => {
-    const sw = document.querySelector('button.ant-switch, [role=switch]');
-    if (!sw) return null;
-    const cls = sw.className || '';
-    const ac = sw.getAttribute ? sw.getAttribute('aria-checked') : null;
-    if (ac === 'true') return true;
-    if (ac === 'false') return false;
-    return cls.indexOf('ant-switch-checked') !== -1;
-}""")
+    // 2) fall back ONLY when the page has exactly one switch (unambiguous).
+    if (!sw) {
+        const list = Array.from(document.querySelectorAll('[role=switch], button.ant-switch, .ant-switch'));
+        if (list.length === 1) { sw = list[0]; by = 'only'; }
+        else if (list.length > 1) return { by: 'ambiguous', count: list.length, state: null };
+    }
+    if (!sw) return { by: 'none', count: 0, state: null };
+    document.querySelectorAll('[data-dsh-inst]').forEach(e => e.removeAttribute('data-dsh-inst'));
+    sw.setAttribute('data-dsh-inst', '1');
+    return { by: by, count: 1, state: readState(sw), text: (sw.innerText || '').slice(0, 40) };
+}"""
+
+# The switch is set at the LAST moment before generating (see below) — the site
+# reloads with 纯音乐 OFF every time, so an early toggle can be lost. Keep only
+# an initial observation here for diagnostics.
+steps["instrumental_initial"] = pg.evaluate(PROBE).get("state")
 # Force 数量 to the configured value (default 1). The site defaults to 2, so
 # every generation produced two tracks and burned double the credits.
 # Verified DOM (2026-10):
@@ -755,6 +772,36 @@ try:
     steps["existing_tracks"] = len(before_ids)
 except Exception:
     pass
+# ---- LAST STEP BEFORE GENERATING: force 纯音乐 back to the wanted state ----
+# Verified on the live page (2026-10-17): the site loads with 纯音乐 **OFF** by
+# default, and the music model obeys this switch rather than the prompt text.
+# So it must be set as late as possible and re-verified right here — after the
+# prompt is filled and 数量 is adjusted — otherwise a run silently produces a
+# vocal track the user asked not to have.
+_final = {}
+for attempt in range(3):
+    _probe = pg.evaluate(PROBE)
+    steps["pre_generate_probe_%d" % attempt] = _probe
+    if _probe.get("by") in ("none", "ambiguous"):
+        break
+    if _probe.get("state") == WANT_INSTRUMENTAL:
+        _final = _probe
+        break
+    try:
+        pg.click('[data-dsh-inst="1"]', force=True, timeout=4000)
+        steps["pre_generate_clicks"] = steps.get("pre_generate_clicks", 0) + 1
+    except Exception as e:
+        steps["pre_generate_click_error"] = str(e)[:160]
+        break
+    pg.wait_for_timeout(1200)
+    _final = pg.evaluate(PROBE)
+steps["instrumental_final"] = _final.get("state")
+steps["instrumental_ok"] = (_final.get("state") == WANT_INSTRUMENTAL)
+if not steps["instrumental_ok"] and not IGNORE_INSTRUMENTAL:
+    # Do NOT spend credits producing a track with the wrong mode.
+    result["steps"] = steps
+    result["error"] = "instrumental_unset"
+    return result
 # Click 创作 / 生成 (button text can include a credit count, e.g. "600\\n创作").
 clicked = None
 for sel in ["button:has-text('创作')", "button:has-text('生成')", "button:has-text('Create')"]:
@@ -868,10 +915,10 @@ return result`
  * site's terms. The user asked for this explicitly (2026-10-17) and owns the
  * risk; we never auto-retry a banned account and never hide the trade-off.
  */
-export async function generateWithRotation(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId, maxAccounts = 4 } = {}) {
+export async function generateWithRotation(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId, maxAccounts = 4, ignoreInstrumental = false } = {}) {
   const pool = readBgmPool(dshHome)
   if (pool.accounts.length === 0) {
-    const r = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: undefined })
+    const r = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: undefined, ignoreInstrumental })
     return { ...r, rotated: false, tried: [r.account ?? null] }
   }
   const tried = []
@@ -888,7 +935,7 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
       continue
     }
     tried.push(acct.id)
-    last = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: acct.id })
+    last = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: acct.id, ignoreInstrumental })
     const isCredit = typeof last.error === 'string' && last.error.startsWith('credit_exhausted')
     if (last.ok && !isCredit) {
       touchBgmAccount(dshHome, acct.id, { status: 'ok', lastUsedAt: Date.now(), note: '' })
@@ -1040,6 +1087,7 @@ async function main() {
       waitMs: Number(args.waitMs ?? 300000),
       accountId: args.account,
       instrumental,
+      ignoreInstrumental: args['ignore-instrumental'] === true,
     })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok || r.error) process.exitCode = 1
