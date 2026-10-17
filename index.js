@@ -1414,6 +1414,7 @@ export function apply(ctx, config = {}) {
         if (!r.ok) {
           const triedList = Array.isArray(r.failures) ? r.failures.map((f) => `  ${f.account ?? '(默认)'}: ${f.error}`).join('\n') : ''
           const isQuota = String(r.error ?? '').startsWith('quota:')
+          const isChallenge = r.error === 'cloudflare_challenge'
           return {
             kind: 'error',
             text: [
@@ -1421,13 +1422,14 @@ export function apply(ctx, config = {}) {
               r.rotated ? `已自动轮换过账号：${(r.tried ?? []).join(' → ')}` : '',
               triedList,
               '',
-              isQuota
-                ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/taptap-gpt pool list、pool unban），或回退到中转站 /taptap-image。'
-                : r.pendingUrl
-                  // The image may still be rendering: grabbing it later is free,
-                  // regenerating costs one generation.
-                  ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /taptap-gpt grab 抓同一个对话即可：${r.pendingUrl}`
-                  : '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。',
+              isChallenge
+                ? '这是 **Cloudflare 人机验证**（页面显示「请验证您是真人」），不是选择器失效。'
+                  + '再跑一次时，在弹出的浏览器窗口里手动勾选那个验证框，勾完它会自动继续。'
+                : isQuota
+                  ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/taptap-gpt pool list、pool unban），或回退到中转站 /taptap-image。'
+                  : r.pendingUrl
+                    ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /taptap-gpt grab 抓同一个对话即可：${r.pendingUrl}`
+                    : (r.hint ?? '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。'),
             ].filter(Boolean).join('\n'),
           }
         }

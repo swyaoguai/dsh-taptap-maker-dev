@@ -514,16 +514,68 @@ def _find_composer():
             pass
     return None, None
 
+def _challenge():
+    # Cloudflare Turnstile ("请验证您是真人" / "Verify you are human"). When this
+    # is up the app never renders: no composer, no image. Report it instead of
+    # waiting minutes and blaming the selectors (verified 2026-10-17).
+    try:
+        for fr in pg.frames:
+            try:
+                if "challenges.cloudflare.com" in (fr.url or ""):
+                    return "turnstile-iframe"
+            except Exception:
+                pass
+        txt = pg.inner_text("body") or ""
+        for kw in ("请验证您是真人", "Verify you are human", "确认您是真人", "Just a moment", "请稍候"):
+            if kw in txt:
+                return kw
+    except Exception:
+        pass
+    return None
+
+def _try_click_challenge():
+    # Best effort: a real click inside a real headed browser sometimes clears it.
+    # If it does not, we tell the user to tick the box themselves.
+    clicked = False
+    try:
+        for fr in pg.frames:
+            try:
+                if "challenges.cloudflare.com" not in (fr.url or ""):
+                    continue
+                for sel in ["input[type='checkbox']", "#challenge-stage input", "label"]:
+                    el = fr.query_selector(sel)
+                    if el:
+                        el.click(force=True)
+                        clicked = True
+                        break
+            except Exception:
+                pass
+            if clicked:
+                break
+    except Exception:
+        pass
+    return clicked
+
 box = None
 composer_sel = None
 waited = 0
-while waited < 40:
+challenge_seen = None
+challenge_clicked = False
+# Budget is generous because a human may need to tick the box in the visible window.
+while waited < 150:
     box, composer_sel = _find_composer()
     if box is not None:
         break
+    c = _challenge()
+    if c is not None:
+        challenge_seen = c
+        if not challenge_clicked:
+            challenge_clicked = _try_click_challenge()
+            steps["challenge_click_attempted"] = challenge_clicked
     pg.wait_for_timeout(1000)
     waited += 1
 steps["composer_wait_s"] = waited
+steps["challenge"] = challenge_seen
 # If we landed on a login wall, stop immediately and say so — silently
 # generating as an anonymous visitor is not possible and must not be faked.
 if box is None:
@@ -535,8 +587,18 @@ if box is None:
         result["steps"] = {"stage": "not_logged_in"}
         result["error"] = "not_logged_in"
         return result
+    # Keep a screenshot so the failure can be diagnosed without guessing.
+    try:
+        shot = os.path.join(DL, "failed-%d.png" % int(time.time()))
+        pg.screenshot(path=shot)
+        steps["screenshot"] = shot
+    except Exception:
+        pass
     result["steps"] = steps
-    result["error"] = "no composer found after ${Math.floor(40)}s (page not usable / UI changed?)"
+    if challenge_seen is not None:
+        result["error"] = "cloudflare_challenge"
+    else:
+        result["error"] = "no composer found after ${Math.floor(150)}s (page not usable / UI changed?)"
     return result
 # CRITICAL: the persistent profile usually reopens the PREVIOUS conversation,
 # whose images were already complete. The old code accepted "any CDN <img>" as
@@ -588,6 +650,36 @@ def _busy():
 
 before = set(_img_srcs() or [])
 steps["images_before"] = len(before)
+# Guard against context leaking between runs: if the "new" chat already holds
+# messages (ChatGPT's client-side local chats can restore the previous thread),
+# the model may mix the old prompt into the render — we saw a shield+chest image
+# after asking only for a chest (2026-10-17). Record it, and try one clean
+# reload when it happens.
+def _msg_count():
+    try:
+        return pg.evaluate("() => document.querySelectorAll('[data-message-author-role]').length")
+    except Exception:
+        return 0
+
+msgs = _msg_count()
+steps["existing_messages"] = msgs
+if msgs and msgs > 0:
+    # Click the new-chat affordance again, then re-check.
+    for sel in ["a[href='/']", "button[aria-label*='新聊天']", "button[aria-label*='New chat']"]:
+        try:
+            el = pg.query_selector(sel)
+            if el and el.is_visible():
+                el.click(force=True)
+                break
+        except Exception:
+            pass
+    pg.wait_for_timeout(2500)
+    msgs = _msg_count()
+    steps["existing_messages_after_retry"] = msgs
+if len(before) > 0:
+    # A previous image is still on screen: the "new image" filter would still
+    # work, but the model is clearly reusing the thread. Do not silently pretend.
+    steps["context_leak_risk"] = True
 # Re-acquire the composer: the "new chat" click above reloads the SPA, so the
 # earlier handle is stale. Wait briefly rather than failing instantly.
 box = None
@@ -636,11 +728,15 @@ if sent is None:
 steps["sent"] = sent
 # Remember the conversation URL as soon as it appears: this is what lets a
 # later run FIND this image instead of generating a duplicate.
+def _conv():
+    u = pg.url.split("?")[0]
+    return u if "/c/" in u else None
+
 conv_url = None
 for _ in range(40):
     pg.wait_for_timeout(1000)
-    if "/c/" in pg.url:
-        conv_url = pg.url.split("?")[0]
+    conv_url = _conv()
+    if conv_url is not None:
         break
 steps["conv_url"] = conv_url
 result["conv_url"] = conv_url
@@ -648,14 +744,27 @@ result["conv_url"] = conv_url
 #  (a) a NEW <img> (not in the pre-submit snapshot) that is large enough,
 #  (b) the page is no longer "generating",
 #  (c) a quota / rate-limit banner (means: stop, this account is out).
-deadline = time.time() + ${Math.floor(waitMs / 1000)}
+#
+# Timeout policy: a soft deadline (waitMs) plus a HARD cap. Past the soft
+# deadline we only keep going while the page says it is still generating —
+# quitting mid-generation is exactly what the user complained about, and the
+# conversation may be a client-only ("local-chatgpt:") session that cannot be
+# reopened later, so waiting is the only reliable way to keep the image.
+soft_deadline = time.time() + ${Math.floor(waitMs / 1000)}
+hard_deadline = soft_deadline + ${Math.floor(300)}
 img_src = None
 quota_hit = None
 polls = 0
 stable = 0
 last_src = None
-while time.time() < deadline:
+extended = 0
+while time.time() < hard_deadline:
     polls += 1
+    # Track a real (server-side) conversation URL when ChatGPT assigns one.
+    u = _conv()
+    if u is not None and "local-chatgpt" not in u:
+        conv_url = u
+        result["conv_url"] = u
     new_img = pg.evaluate("""(before) => {
         const out = [];
         document.querySelectorAll('img').forEach(i => {
@@ -696,8 +805,14 @@ while time.time() < deadline:
                 break
         if quota_hit:
             break
+    # Past the soft deadline: only stay alive while it is still drawing.
+    if time.time() >= soft_deadline:
+        if not busy and img_src is None:
+            break
+        extended += 1
     pg.wait_for_timeout(2000)
 steps["polls"] = polls
+steps["extended_polls_past_soft_deadline"] = extended
 if quota_hit:
     steps["quota_signal"] = quota_hit
     result["steps"] = steps
@@ -886,18 +1001,34 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     last = await gen(dshHome, prompt, { accountId: acct.id, waitMs, out, downscale, size, dir, projectDir })
     if (last.ok) return { ...last, rotated: tried.length > 1, tried, failures }
     skip.add(acct.id)
-    failures.push({ account: acct.id, error: last.error })
-    // A hard UI failure (selectors) will repeat on every account — stop early
-    // instead of opening N browsers to fail the same way.
-    if (last.error === 'no_image' || last.error === 'download_failed') break
+    // Always carry a concrete reason + the step log: a bare `{account}` told us
+    // nothing when diagnosing the Cloudflare failure (2026-10-17).
+    failures.push({
+      account: acct.id,
+      error: last?.error ?? last?.steps?.stage ?? 'unknown',
+      steps: last?.steps ?? null,
+    })
+    // A hard UI failure (selectors / bot wall) will repeat on every account —
+    // stop early instead of opening N browsers to fail the same way.
+    if (last?.error === 'no_image' || last?.error === 'download_failed') break
+    if (last?.error === 'cloudflare_challenge' || last?.error === 'not_logged_in') break
+  }
+  const lastErr = last?.error ?? 'no usable account (all not logged in)'
+  // Give the caller a hint that actually matches how it failed.
+  const hints = {
+    // The browser window IS open and visible — the human can clear it.
+    cloudflare_challenge: '被 Cloudflare 人机验证拦住（页面显示「请验证您是真人」，应用没渲染）。'
+      + '重试时在弹出的浏览器窗口里手动勾选验证框即可；勾完它会自动继续。若反复出现，隔几分钟再试。',
+    not_logged_in: '账号未登录：/taptap-gpt login --account <id>（或设置页点「登录」）。',
+    no_image: '没有等到新图（可能仍在生成或该账号额度不足）。先确认 pending，再决定是否重试。',
   }
   return {
     ok: false,
-    error: last?.error ?? 'no usable account (all not logged in)',
+    error: lastErr,
     rotated: tried.length > 1,
     tried,
     failures,
-    hint: 'pool: /taptap-gpt pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
+    hint: hints[lastErr] ?? 'pool: /taptap-gpt pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
   }
 }
 
@@ -1012,7 +1143,21 @@ return result`
   if (!r.ok) return { ok: false, error: r.err, steps: null, url: target }
   const steps = r.steps ?? {}
   if (typeof r.error === 'string' && r.error.length > 0 && steps.saved === undefined) {
-    return { ok: false, error: r.error, steps, url: target, stillGenerating: steps.still_generating === true }
+    // A client-only conversation ("local-chatgpt:…") is NOT persisted by
+    // ChatGPT, so reopening it shows nothing. Say that plainly — otherwise
+    // "no_image" looks like the selectors broke (verified 2026-10-17).
+    const isLocal = /local-chatgpt/i.test(target)
+    return {
+      ok: false,
+      error: isLocal && r.error === 'no_image' ? 'local_conversation' : r.error,
+      steps,
+      url: target,
+      stillGenerating: steps.still_generating === true,
+      hint: isLocal
+        ? '这个对话是本地会话（local-chatgpt:…），ChatGPT 没有存到服务端，重新打开看不到图。'
+          + '下次生成时不要中途关窗口；若已错过，只能重新生成一次。'
+        : undefined,
+    }
   }
   if (steps.saved === undefined) return { ok: false, error: 'no file saved', steps, url: target }
   clearGptPending(dshHome)
