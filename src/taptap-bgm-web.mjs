@@ -32,7 +32,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { resolveDshHome, dataDir, readBgmConfig } from './paths.js'
+import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount } from './paths.js'
 
 /**
  * Two sites, chosen by network reachability — the international site forces
@@ -71,8 +71,12 @@ export async function detectSite({ timeoutMs = 8000 } = {}) {
   return { ...SITES[0], ok: false, errors }
 }
 
-export function profileDir(dshHome) {
-  return path.join(dataDir(dshHome), 'browser-profile')
+export function profileDir(dshHome, accountId) {
+  const id = String(accountId ?? '').replace(/[^\w.-]/g, '_')
+  if (id.length === 0) return path.join(dataDir(dshHome), 'browser-profile')
+  // Each pool account is fully isolated so one broken session can't corrupt
+  // the others (mirrors the ChatGPT lane).
+  return path.join(dataDir(dshHome), `browser-profile-bgm-${id}`)
 }
 
 export function downloadDir(dshHome) {
@@ -153,12 +157,12 @@ function releaseProfile(prof) {
  * The snippet is a callable body that receives (pg, b, result) and is written
  * to a real .py file so indentation is unambiguous.
  */
-function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000 } = {}) {
+function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000, accountId } = {}) {
   const py = findPython()
   if (py === null) {
     return { ok: false, err: 'python+playwright not found. Install: pip install playwright && playwright install chromium' }
   }
-  const prof = profileDir(dshHome)
+  const prof = profileDir(dshHome, accountId)
   fs.mkdirSync(prof, { recursive: true })
   releaseProfile(prof)
   const script = `import json
@@ -239,7 +243,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
 }
 
 /** `login`: open the page and wait until the user is actually logged in. */
-export async function login(dshHome, { waitMs = 300000, site, graceSec = 8 } = {}) {
+export async function login(dshHome, { waitMs = 300000, site, graceSec = 8, accountId } = {}) {
   const target = site ?? (await detectSite())
   const snippet = `pg.goto(${pyStr(target.url)}, timeout=60000)
 result["log"].append("opened " + pg.url)
@@ -311,9 +315,14 @@ except Exception:
 result["logged"] = logged
 result["url"] = pg.url
 return result`
-  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000 })
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000, accountId })
   if (!r.ok) return r
-  return { ok: true, logged: r.logged === true, log: r.log, profile: profileDir(dshHome) }
+  const prof = profileDir(dshHome, accountId)
+  // A fresh login clears any cooling / ban mark for that account.
+  if (r.logged === true && accountId) {
+    touchBgmAccount(dshHome, accountId, { status: 'ok', lastUsedAt: 0, note: '' })
+  }
+  return { ok: true, logged: r.logged === true, log: r.log, profile: prof, account: accountId ?? null }
 }
 
 /** Where the chosen site is remembered, so we don't re-probe every time. */
@@ -340,8 +349,8 @@ export function loadSite(dshHome) {
 }
 
 /** `status`: does a saved profile exist with cookies, and which site? */
-export function status(dshHome) {
-  const prof = profileDir(dshHome)
+export function statusFor(dshHome, accountId) {
+  const prof = profileDir(dshHome, accountId)
   const exists = fs.existsSync(prof)
   // Chromium stores cookies under Default/Network/Cookies (verified here).
   // Default/Cookies is the pre-M76 path — checking only that made status say
@@ -366,6 +375,28 @@ export function status(dshHome) {
 }
 
 /**
+ * Full status: the default single account PLUS the BGM account pool, so the
+ * settings page can render every row (mirrors the ChatGPT lane).
+ */
+export function status(dshHome) {
+  const base = statusFor(dshHome)
+  let pool = { accounts: [], autoRotate: true }
+  try { pool = readBgmPool(dshHome) } catch { /* no pool yet */ }
+  const accounts = pool.accounts.map((a) => ({ ...a, ...statusFor(dshHome, a.id) }))
+  return {
+    ...base,
+    pool: {
+      autoRotate: pool.autoRotate !== false,
+      total: accounts.length,
+      loggedIn: accounts.filter((a) => a.hasCookies).length,
+      banned: accounts.filter((a) => a.status === 'banned').length,
+      cooling: accounts.filter((a) => a.status === 'cooling').length,
+      accounts,
+    },
+  }
+}
+
+/**
  * Sign out: delete the saved browser profile so the next login can use a
  * different account.
  *
@@ -376,8 +407,8 @@ export function status(dshHome) {
  *
  * Callers must ensure no browser is currently using the profile.
  */
-export function logout(dshHome) {
-  const prof = profileDir(dshHome)
+export function logout(dshHome, accountId) {
+  const prof = profileDir(dshHome, accountId)
   let removed = false
   try {
     // Make sure nothing holds the profile before deleting it.
@@ -389,7 +420,7 @@ export function logout(dshHome) {
   }
   // Also drop the remembered site? No — the site choice is independent of the
   // account, so keep it to avoid an extra network probe on next login.
-  return { ok: removed, profile: prof }
+  return { ok: removed, profile: prof, account: accountId ?? null }
 }
 
 /**
@@ -398,8 +429,8 @@ export function logout(dshHome) {
  *   { data: { total_credit: 100, sub_credits: [...], debit_credit: 0 } }
  * Returns { ok, totalCredit, expiresAt } or { ok:false, error }.
  */
-export async function credits(dshHome, { site } = {}) {
-  const st = status(dshHome)
+export async function credits(dshHome, { site, accountId } = {}) {
+  const st = statusFor(dshHome, accountId)
   if (!st.hasCookies) return { ok: false, error: '未登录' }
   const target = site ?? st.site ?? (await detectSite())
   // Build the billing URL ourselves: the page may not request it on load (so
@@ -450,7 +481,7 @@ if got and got.get("error"):
     steps["error"] = got["error"]
 result["steps"] = steps
 return result`
-  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: 120000 })
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: 120000, accountId })
   if (!r.ok) return { ok: false, error: r.err }
   const s = r.steps ?? {}
   if (s.error) return { ok: false, error: s.error }
@@ -530,7 +561,7 @@ function findAuthCookie(cookieFile) {
  * `gen`: paste the prompt, generate, then download the newest audio into --out.
  * Selectors are best-effort; unmatched steps are reported honestly.
  */
-export async function generate(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count } = {}) {
+export async function generate(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId } = {}) {
   const target = site ?? (await detectSite())
   const dl = downloadDir(dshHome)
   fs.mkdirSync(dl, { recursive: true })
@@ -750,6 +781,29 @@ polls = 0
 api_url = captured.get("list_url") or (${pyStr(target.url)}.replace("/audio", "/v1/api/music/history_list") + "?is_favorite=false&page=1&page_size=20")
 while time.time() < deadline:
     polls += 1
+    # Credit-exhausted accounts fail SILENTLY here: no new track ever appears.
+    # So scan the site's own toast/modal text (never the whole body — the page
+    # always shows a 「充值」 button, which would false-positive every run).
+    try:
+        warn = pg.evaluate("""() => {
+            const sels = ['.ant-message', '.ant-message-notice', '.ant-notification',
+                          '.ant-modal', '[role=alert]', '[class*=toast]', '[class*=Toast]'];
+            let t = '';
+            for (const s of sels) {
+                document.querySelectorAll(s).forEach(e => { t += ' ' + (e.innerText || '') });
+            }
+            return t;
+        }""")
+    except Exception:
+        warn = ""
+    for kw in ("积分不足", "余额不足", "额度不足", "积分已用完", "额度已用完", "余额已用完",
+               "积分不够", "购买积分", "insufficient", "not enough", "no credit"):
+        if kw in (warn or ""):
+            steps["credit_signal"] = kw
+            steps["credit_text"] = (warn or "")[:200]
+            result["steps"] = steps
+            result["error"] = "credit_exhausted:" + kw
+            return result
     got = pg.evaluate("""async ([u, t]) => {
         try {
             const r = await fetch(u, { headers: { token: t } });
@@ -801,9 +855,66 @@ return result`
   // MUST run headed: verified that headless loses the login session (cookies
   // drop to the 8 analytics-only ones and _token is absent), so the works list
   // and download button never appear.
-  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 240000 })
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 240000, accountId })
   if (!r.ok) return r
-  return { ok: true, steps: r.steps, error: r.error, downloadDir: dl }
+  return { ok: true, steps: r.steps, error: r.error, downloadDir: dl, account: accountId ?? null }
+}
+
+/**
+ * Generate with ACCOUNT ROTATION: run on the current account, and when it has
+ * no credits left (or its session died) move to the next usable pool account.
+ *
+ * ⚠️ Rotating accounts to work around per-account credit limits may breach the
+ * site's terms. The user asked for this explicitly (2026-10-17) and owns the
+ * risk; we never auto-retry a banned account and never hide the trade-off.
+ */
+export async function generateWithRotation(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId, maxAccounts = 4 } = {}) {
+  const pool = readBgmPool(dshHome)
+  if (pool.accounts.length === 0) {
+    const r = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: undefined })
+    return { ...r, rotated: false, tried: [r.account ?? null] }
+  }
+  const tried = []
+  const failures = []
+  const skip = new Set()
+  let last = null
+  for (let i = 0; i < Math.min(maxAccounts, pool.accounts.length); i += 1) {
+    const acct = pickBgmAccount(dshHome, { activeId: i === 0 ? accountId : undefined, exclude: [...skip] })
+    if (acct === null) break
+    const st = statusFor(dshHome, acct.id)
+    if (!st.hasCookies) {
+      skip.add(acct.id)
+      failures.push({ account: acct.id, error: 'not_logged_in' })
+      continue
+    }
+    tried.push(acct.id)
+    last = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: acct.id })
+    const isCredit = typeof last.error === 'string' && last.error.startsWith('credit_exhausted')
+    if (last.ok && !isCredit) {
+      touchBgmAccount(dshHome, acct.id, { status: 'ok', lastUsedAt: Date.now(), note: '' })
+      return { ...last, rotated: tried.length > 1, tried, failures }
+    }
+    if (isCredit) {
+      // Out of credits: cool it down so the next picker skips it for a while.
+      touchBgmAccount(dshHome, acct.id, { status: 'cooling', lastUsedAt: Date.now(), note: last.error })
+    } else {
+      touchBgmAccount(dshHome, acct.id, { lastUsedAt: Date.now() })
+    }
+    skip.add(acct.id)
+    failures.push({ account: acct.id, error: last.error ?? 'no file' })
+    // A structural failure (selectors) would repeat on every account.
+    const structural = typeof last.error === 'string'
+      && (last.error.includes('no style input') || last.error.includes('创作') || last.error.includes('token'))
+    if (structural) break
+  }
+  return {
+    ok: false,
+    error: last?.error ?? '没有可用账号（全部未登录）',
+    rotated: tried.length > 1,
+    tried,
+    failures,
+    hint: '账号池：/taptap-bgm pool list 查看，login --account <名> 登录，pool unban 恢复冷却账号',
+  }
 }
 
 async function main() {
@@ -817,36 +928,115 @@ async function main() {
     return
   }
   if (cmd === 'login') {
-    const r = await login(home, { waitMs: Number(args.waitMs ?? 300000) })
+    const r = await login(home, { waitMs: Number(args.waitMs ?? 300000), accountId: args.account })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok || r.logged !== true) process.exitCode = 1
     return
   }
   if (cmd === 'logout' || cmd === '退出') {
-    const r = logout(home)
+    const r = logout(home, args.account)
     process.stdout.write(`${JSON.stringify({ ok: r.ok, message: r.ok ? '已退出登录，可换账号重新登录' : '退出失败（可能有浏览器正在使用）', ...r }, null, 2)}\n`)
     if (!r.ok) process.exitCode = 1
     return
   }
   if (cmd === 'credits' || cmd === '额度') {
-    const r = await credits(home)
+    const r = await credits(home, { accountId: args.account })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok) process.exitCode = 1
+    return
+  }
+  // ---- account pool (mirrors the ChatGPT lane) ----
+  if (cmd === 'pool' || cmd === '池') {
+    const sub = (argv[1] ?? 'list').toLowerCase()
+    if (sub === 'add') {
+      const id = args.id
+      if (typeof id !== 'string' || id.length === 0) {
+        process.stderr.write('usage: taptap-bgm-web pool add --id <短名> [--label 备注]\n')
+        process.exitCode = 2
+        return
+      }
+      const pool = readBgmPool(home)
+      if (pool.accounts.some((a) => a.id === id)) {
+        process.stderr.write(`account "${id}" already exists\n`)
+        process.exitCode = 1
+        return
+      }
+      const next = [...pool.accounts, {
+        id, label: typeof args.label === 'string' ? args.label : id,
+        profile: profileDir(home, id), status: 'unknown', lastUsedAt: null, note: '',
+      }]
+      writeBgmPool(home, { accounts: next })
+      process.stdout.write(`${JSON.stringify({ ok: true, added: id, total: next.length }, null, 2)}\n`)
+      return
+    }
+    if (sub === 'remove' || sub === 'rm') {
+      const id = args.id ?? args[3]
+      const next = readBgmPool(home).accounts.filter((a) => a.id !== id)
+      writeBgmPool(home, { accounts: next })
+      let removed = false
+      try {
+        const prof = profileDir(home, id)
+        releaseProfile(prof)
+        fs.rmSync(prof, { recursive: true, force: true })
+        removed = !fs.existsSync(prof)
+      } catch { /* ignore */ }
+      process.stdout.write(`${JSON.stringify({ ok: true, removed: id, profileRemoved: removed, total: next.length }, null, 2)}\n`)
+      return
+    }
+    if (sub === 'ban') {
+      touchBgmAccount(home, args.id ?? argv[2], { status: 'banned' })
+      process.stdout.write(`${JSON.stringify({ ok: true, banned: args.id ?? argv[2] }, null, 2)}\n`)
+      return
+    }
+    if (sub === 'unban' || sub === '恢复') {
+      const id = args.id ?? argv[2]
+      if (typeof id !== 'string' || id.length === 0) {
+        const all = readBgmPool(home).accounts
+        for (const a of all) touchBgmAccount(home, a.id, { status: 'ok', note: '' })
+        process.stdout.write(`${JSON.stringify({ ok: true, unbanned: 'all', total: all.length }, null, 2)}\n`)
+        return
+      }
+      touchBgmAccount(home, id, { status: 'ok', note: '' })
+      process.stdout.write(`${JSON.stringify({ ok: true, unbanned: id }, null, 2)}\n`)
+      return
+    }
+    if (sub === 'rotate' || sub === '轮换') {
+      const on = args.on
+      const next = on === undefined ? !readBgmPool(home).autoRotate : on !== 'false'
+      writeBgmPool(home, { autoRotate: next })
+      process.stdout.write(`${JSON.stringify({ ok: true, autoRotate: next }, null, 2)}\n`)
+      return
+    }
+    const st = status(home)
+    process.stdout.write(`${JSON.stringify({
+      ok: true,
+      autoRotate: st.pool.autoRotate,
+      total: st.pool.total,
+      loggedIn: st.pool.loggedIn,
+      cooling: st.pool.cooling,
+      banned: st.pool.banned,
+      accounts: st.pool.accounts.map((a) => ({
+        id: a.id, label: a.label, loggedIn: a.hasCookies, status: a.status, lastUsedAt: a.lastUsedAt,
+      })),
+    }, null, 2)}\n`)
     return
   }
   if (cmd === 'gen' || cmd === 'generate') {
     const prompt = args.prompt ?? args._?.[0]
     if (typeof prompt !== 'string' || prompt.length === 0) {
-      process.stderr.write('usage: taptap-bgm-web gen --prompt "<提示词>"\n')
+      process.stderr.write('usage: taptap-bgm-web gen --prompt "<提示词>" [--account <名>]\n')
       process.exitCode = 2
       return
     }
-    const r = await generate(home, prompt, { waitMs: Number(args.waitMs ?? 300000) })
+    const r = await generateWithRotation(home, prompt, {
+      waitMs: Number(args.waitMs ?? 300000),
+      accountId: args.account,
+    })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok || r.error) process.exitCode = 1
     return
   }
-  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | credits | gen)\n`)
+  process.stderr.write(`unknown command: ${cmd} (use status | login | logout | credits | gen | pool)\n`)
   process.exitCode = 2
 }
 

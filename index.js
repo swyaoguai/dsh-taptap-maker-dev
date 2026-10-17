@@ -34,10 +34,10 @@ import { fileURLToPath } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
-import { status as bgmStatus, generate as bgmGenerate, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
+import { status as bgmStatus, generate as bgmGenerate, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
 import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation } from './src/taptap-gpt.mjs'
-import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir } from './src/paths.js'
+import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
 
@@ -200,6 +200,89 @@ async function gptPoolCommand(home, raw) {
   }
 }
 
+/** Handle `/taptap-bgm pool …` and render it as human text. */
+async function bgmPoolCommand(home, raw) {
+  const parts = raw.split(/\s+/).filter(Boolean)
+  const sub = (parts[1] ?? 'list').toLowerCase()
+  const flag = (name) => {
+    const m = new RegExp(`(?:--${name})\\s+(\\S+)`).exec(raw)
+    return m === null ? undefined : m[1]
+  }
+  if (sub === 'add' || sub === '加号' || sub === '新增') {
+    const id = flag('id')
+    if (typeof id !== 'string' || id.length === 0) {
+      return { ok: false, text: '用法：/taptap-bgm pool add --id <短名> [--label 备注]' }
+    }
+    const pool = readBgmPool(home)
+    if (pool.accounts.some((a) => a.id === id)) {
+      return { ok: false, text: `账号「${id}」已存在。登录它：/taptap-bgm login --account ${id}` }
+    }
+    const label = flag('label') ?? id
+    writeBgmPool(home, { accounts: [...pool.accounts, { id, label, status: 'unknown', lastUsedAt: null, note: '' }] })
+    return {
+      ok: true,
+      text: [
+        `已加账号「${id}」，现在共 ${readBgmPool(home).accounts.length} 个。`,
+        '',
+        `登录它：/taptap-bgm login --account ${id}`,
+      ].join('\n'),
+    }
+  }
+  if (sub === 'remove' || sub === 'rm' || sub === '删除') {
+    const id = flag('id')
+    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-bgm pool remove --id <名>' }
+    writeBgmPool(home, { accounts: readBgmPool(home).accounts.filter((a) => a.id !== id) })
+    try { fs.rmSync(profileDir(home, id), { recursive: true, force: true }) } catch { /* best effort */ }
+    return { ok: true, text: `已移除账号「${id}」（其浏览器登录态也一并删除）。` }
+  }
+  if (sub === 'ban' || sub === '封禁') {
+    const id = flag('id')
+    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-bgm pool ban --id <名>' }
+    bgmTouchAccount(home, id, { status: 'banned' })
+    return { ok: true, text: `已封禁「${id}」，轮换时不再自动选它。恢复：/taptap-bgm pool unban --id ${id}` }
+  }
+  if (sub === 'unban' || sub === '恢复') {
+    const id = flag('id')
+    if (typeof id !== 'string') {
+      const all = readBgmPool(home).accounts
+      for (const a of all) bgmTouchAccount(home, a.id, { status: 'ok', note: '' })
+      return { ok: true, text: `已恢复全部 ${all.length} 个账号（清掉封禁与冷却标记）。` }
+    }
+    bgmTouchAccount(home, id, { status: 'ok', note: '' })
+    return { ok: true, text: `已恢复「${id}」。` }
+  }
+  if (sub === 'rotate' || sub === '轮换') {
+    const on = flag('on')
+    const next = on === undefined ? !readBgmPool(home).autoRotate : on !== 'false'
+    writeBgmPool(home, { autoRotate: next })
+    return { ok: true, text: `BGM 账号自动轮换：${next ? '开' : '关'}。` }
+  }
+  const st = bgmStatus(home)
+  const p = st.pool
+  if (p.total === 0) {
+    return {
+      ok: true,
+      text: [
+        'BGM 账号池为空（当前单账号模式）。',
+        '',
+        '加号：/taptap-bgm pool add --id <名>  →  /taptap-bgm login --account <名>',
+      ].join('\n'),
+    }
+  }
+  return {
+    ok: true,
+    text: [
+      `BGM 账号池：共 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
+      ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} `
+        + `${a.hasCookies ? '已登录' : '未登录'}`
+        + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
+      '',
+      '加号：pool add --id <名>  →  login --account <名>',
+      '恢复冷却/封禁账号：pool unban --id <名>（不带 id 则恢复全部）',
+    ].join('\n'),
+  }
+}
+
 /** Build the governance system-prompt text. */
 function policyText(config, gptLaneOn = true) {
   const tools = CREDIT_TOOLS.map((t) => `\`${t}\``).join('、')
@@ -284,8 +367,13 @@ function policyText(config, gptLaneOn = true) {
     '       或用 `/taptap-bgm login` 命令；登录态存本机，之后自动。**不要让用户自己去设置页点**。',
     '     - **换号 / 退登录**：用户说「换个号」「退出登录」「登出」时，执行 `/taptap-bgm logout`',
     '       （清掉本机登录态），然后再 login 即可用另一个账号。账号管理入口也在设置页「BGM 账号」卡。',
-    '     - **查额度**：用户问「还有多少额度」「是不是没额度了」时，执行 `/taptap-bgm credits`。',
-    '       额度为 0 或不足时如实告知，并提示可换号（logout → login），不要反复重试生成。',
+    '     - **账号池 / 自动轮换**：可登录多个 MiniMax 账号，一个额度用完自动换下一个。',
+    '       加号：`/taptap-bgm pool add --id <名>` → `login --account <名>`（设置页「+ 添加账号」会一步完成）；',
+    '       `pool list` 看状态、`pool ban/unban` 封禁/恢复、`pool rotate` 开关轮换。',
+    '       生成时不要手动挑账号，`/taptap-bgm <描述>` 会自动轮询；报告结果时说明用了哪个账号。',
+    '     - **查额度**：用户问「还有多少额度」「是不是没额度了」时，执行 `/taptap-bgm credits`',
+    '       （可加 `--account <名>` 查某个账号）。额度为 0 或不足时如实告知：可等恢复、加更多账号，',
+    '       不要反复重试生成。',
     '     - **站点自动判断**：按当前网络可达性自动选国内版（minimax.cn）或国际版（minimax.io），',
     '       国际版多为 Google 登录，国内网络下选国内版。选好的站点会记住。',
     '     - **生成**：`/taptap-bgm <风格情绪描述>` —— 自动出提示词并用已登录浏览器完成生成与下载。',
@@ -593,14 +681,62 @@ export function apply(ctx, config = {}) {
         }
         if (req.method === 'POST' && sub === 'bgm-login') {
           // Launch detached and return immediately; the UI polls /bgm.
+          // Optional { account } logs in a NAMED pool account (rotation).
+          const body = await readBody(req)
+          let account
+          try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
           const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
           try {
             const site = (bgmStatus(home).site) ?? (await bgmDetectSite())
             bgmSaveSite(home, site)
-            const child = spawn(process.execPath, [cli, 'login', '--waitMs', '300000'],
-              { detached: true, stdio: 'ignore' })
+            const argv = [cli, 'login', '--waitMs', '300000']
+            if (typeof account === 'string' && account.length > 0) argv.push('--account', account)
+            const child = spawn(process.execPath, argv, { detached: true, stdio: 'ignore' })
             child.unref()
             return sendJson(res, 200, { ok: true, started: true, site, ...bgmStatus(home) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // BGM account pool: add / remove / ban / unban / rotate.
+        if (req.method === 'POST' && sub === 'bgm-pool') {
+          const body = await readBody(req)
+          let parsed = {}
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const action = parsed.action
+          const id = typeof parsed.id === 'string' ? parsed.id : undefined
+          try {
+            if (action === 'add') {
+              if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
+              const pool = readBgmPool(home)
+              if (pool.accounts.some((a) => a.id === id)) {
+                return sendJson(res, 200, { ok: true, ...bgmStatus(home), warn: `账号 ${id} 已存在` })
+              }
+              writeBgmPool(home, {
+                accounts: [...pool.accounts,
+                  { id, label: typeof parsed.label === 'string' && parsed.label ? parsed.label : id, status: 'unknown', lastUsedAt: null, note: '' }],
+              })
+            } else if (action === 'remove') {
+              if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
+              writeBgmPool(home, { accounts: readBgmPool(home).accounts.filter((a) => a.id !== id) })
+              try {
+                fs.rmSync(profileDir(home, id), { recursive: true, force: true })
+              } catch { /* best effort */ }
+            } else if (action === 'ban') {
+              if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
+              bgmTouchAccount(home, id, { status: 'banned' })
+            } else if (action === 'unban') {
+              if (!id) {
+                for (const a of readBgmPool(home).accounts) bgmTouchAccount(home, a.id, { status: 'ok', note: '' })
+              } else {
+                bgmTouchAccount(home, id, { status: 'ok', note: '' })
+              }
+            } else if (action === 'rotate') {
+              writeBgmPool(home, { autoRotate: parsed.on !== false })
+            } else {
+              return sendJson(res, 400, { ok: false, error: `unknown action: ${action}` })
+            }
+            return sendJson(res, 200, { ok: true, ...bgmStatus(home) })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
@@ -724,16 +860,23 @@ export function apply(ctx, config = {}) {
           return sendJson(res, 200, { ok: true, ...merged })
         }
         if (req.method === 'POST' && sub === 'bgm-logout') {
+          const body = await readBody(req)
+          let account
+          try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
           try {
-            const r = bgmLogout(home)
+            const r = bgmLogout(home, account)
             return sendJson(res, 200, { ok: r.ok, ...r })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
         }
         if (req.method === 'POST' && sub === 'bgm-credits') {
+          // Optional { account } checks a specific pool account's credits.
+          const body = await readBody(req)
+          let account
+          try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
           try {
-            const r = await bgmCredits(home)
+            const r = await bgmCredits(home, { accountId: account })
             return sendJson(res, 200, { ok: r.ok, credits: r, error: r.error ?? null })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
@@ -1346,24 +1489,26 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-bgm',
-      description: 'BGM 账号：login 登录 / logout 换号 / credits 查额度 / "<描述>" 生成',
-      input: { hint: 'login | logout | credits | status | <风格描述>' },
+      description: 'BGM 账号池：login 登录 / pool 账号池 / logout 换号 / credits 查额度 / "<描述>" 生成（自动轮询）',
+      input: { hint: 'login [--account <名>] | pool list|add|remove|ban|unban|rotate | logout | credits | status | <风格描述>' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
         const low = raw.toLowerCase()
+        const accountArg = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
 
-        if (low === 'login' || raw === '登录') {
+        if (low === 'login' || low.startsWith('login ') || raw === '登录') {
           const site = await bgmDetectSite()
           bgmSaveSite(home, site)
-          const res = await bgmLogin(home, { waitMs: 300000, site })
+          const res = await bgmLogin(home, { waitMs: 300000, site, accountId: accountArg })
           return {
             kind: res?.logged === true ? 'success' : 'error',
             text: res?.logged === true
               ? [
-                '已登录，之后生成 BGM 都用它。',
+                `已登录${accountArg ? `账号「${accountArg}」` : ''}，之后生成 BGM 都用它。`,
                 `使用：${site.label}`,
-              ].join('\n')
+                accountArg ? '' : '加更多账号：设置页「BGM 账号」点「+ 添加账号」，或 /taptap-bgm pool add --id <名>',
+              ].filter(Boolean).join('\n')
               : [
                 '未完成登录（或登录超时）。',
                 `使用：${site.label}`,
@@ -1372,32 +1517,51 @@ export function apply(ctx, config = {}) {
               ].join('\n'),
           }
         }
+        // 账号池：list / add / remove / ban / unban / rotate
+        if (low === 'pool' || low.startsWith('pool ')) {
+          const r = await bgmPoolCommand(home, raw)
+          return { kind: r.ok ? 'success' : 'error', text: r.text }
+        }
+        if (low === 'add' || low.startsWith('add ')) {
+          const r = await bgmPoolCommand(home, `pool ${raw}`)
+          return { kind: r.ok ? 'success' : 'error', text: r.text }
+        }
         if (low === 'logout' || raw === '退出' || raw === '换号') {
-          const r = bgmLogout(home)
+          const r = bgmLogout(home, accountArg)
           return {
             kind: r.ok ? 'success' : 'error',
             text: r.ok
-              ? '已退出登录。下次可换一个账号登录（/taptap-bgm login）。'
+              ? `已退出${accountArg ? `账号「${accountArg}」` : ''}登录。下次可换一个账号登录（/taptap-bgm login）。`
               : `退出失败：可能有浏览器正在使用登录态，请先关闭再试。（${r.profile ?? ''}）`,
           }
         }
         if (low === 'credits' || raw === '额度') {
-          const r = await bgmCredits(home)
+          const r = await bgmCredits(home, { accountId: accountArg })
           if (!r.ok) return { kind: 'error', text: `查额度失败：${r.error ?? '未知'}` }
           const exp = r.expiresAt ? `，到期 ${new Date(r.expiresAt).toLocaleDateString('zh-CN')}` : ''
-          return { kind: 'success', text: `剩余额度：${r.totalCredit}${exp}。额度用完可换号：/taptap-bgm logout 再 login。` }
+          return { kind: 'success', text: `剩余额度：${r.totalCredit}${exp}。额度用完可换号：/taptap-bgm logout 再 login，或多加几个账号自动轮询。` }
         }
         if (low === 'status' || raw === '状态') {
           const st = bgmStatus(home)
           const site = st.site ?? (await bgmDetectSite())
           if (!st.site) bgmSaveSite(home, site)
+          const p = st.pool
+          const poolLines = p.total === 0
+            ? ['账号池：未启用（单账号模式）。加账号：/taptap-bgm pool add --id <名>']
+            : [
+              `账号池：附加账号 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
+              ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} ${a.hasCookies ? '已登录' : '未登录'}`
+                + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
+            ]
           return {
             kind: 'success',
             text: [
               `登录状态：${st.hasCookies ? '已登录' : '未登录'}`,
               `将使用：${site.label}`,
               '',
-              st.hasCookies ? '可以直接生成 BGM。' : '请先登录（/taptap-bgm login）。',
+              ...poolLines,
+              '',
+              st.hasCookies || p.loggedIn > 0 ? '可以直接生成 BGM（会自动选可用账号）。' : '请先登录（/taptap-bgm login）。',
             ].join('\n'),
           }
         }
@@ -1466,7 +1630,13 @@ export function apply(ctx, config = {}) {
         // default is ON because game BGM normally has no vocals).
         const wantInstrumental = !/--lyrics/.test(raw)
         const r = await Promise.race([
-          bgmGenerate(home, prompt, { site: st.site ?? undefined, waitMs: 8 * 60 * 1000, instrumental: wantInstrumental }),
+          // Rotation: if one account has no credits left, try the next one.
+          bgmGenerateWithRotation(home, prompt, {
+            site: st.site ?? undefined,
+            waitMs: 8 * 60 * 1000,
+            instrumental: wantInstrumental,
+            accountId: accountArg,
+          }),
           new Promise((resolve) => setTimeout(() => {
             try {
               const prof = profileDir(home)
@@ -1482,7 +1652,22 @@ export function apply(ctx, config = {}) {
           }, BGM_TIMEOUT_MS)),
         ])
         if (!r.ok || r.error) {
-          return { kind: 'error', text: `生成失败：${r.error ?? JSON.stringify(r.steps ?? {})}` }
+          const isCredit = String(r.error ?? '').startsWith('credit_exhausted')
+          const triedList = Array.isArray(r.failures) && r.failures.length > 0
+            ? r.failures.map((f) => `  ${f.account ?? '(默认)'}: ${f.error}`).join('\n')
+            : ''
+          return {
+            kind: 'error',
+            text: [
+              `生成失败：${r.error ?? JSON.stringify(r.steps ?? {})}`,
+              r.rotated ? `已自动轮换过账号：${(r.tried ?? []).join(' → ')}` : '',
+              triedList,
+              '',
+              isCredit
+                ? '所有可用账号额度都不足了。可以加更多账号（/taptap-bgm pool add --id <名> 再 login --account <名>），或等额度恢复（/taptap-bgm pool unban）。'
+                : '若是网页结构变化导致选择器失效，会如实报告卡在哪一步；可稍后重试。',
+            ].filter(Boolean).join('\n'),
+          }
         }
         const saved = r.steps?.saved
         if (!saved) {

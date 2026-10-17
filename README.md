@@ -40,6 +40,8 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
   + **图片下载目录**（默认跟随项目 `<项目>/.taptap-images`，可自定义，支持 `{project}` / `{home}`）
 - **中转站（回退）** — Base URL / Key / Model（「获取模型」按钮自动拉取）/ 缺省尺寸
 - **完整 BGM** — 填风格描述 → 生成提示词 → 一键打开网页 → 下载后自动导入
+- **BGM 账号** — 账号列表（主账号常驻，退出后可再登）+ 「+ 添加账号」一步添加并登录
+  + 查额度 / 换号 + **额度用完自动轮换**（每个账号独立浏览器 profile）
 - **CC0 音效库** — 状态、搜索、「更新库」
 - **小资源图标** — 出图 + 缩小的最佳实践
 - **Skill 管理** — 勾选禁用不需要的 skill，即时生效
@@ -69,6 +71,13 @@ node <plugin-dir>/src/taptap-gpt.mjs pool unban --id a2 # 恢复冷却账号
 
 # 生图回退：中转站（尺寸按需，支持透明底 + 缩小）
 node <plugin-dir>/src/taptap-image.mjs --prompt "蓝色盾牌图标" --out icon.png --transparent --downscale 128x128
+
+# BGM 账号池：添加账号 → 各登录一次 → 额度用完自动轮换
+node <plugin-dir>/src/taptap-bgm-web.mjs login                      # 主账号
+node <plugin-dir>/src/taptap-bgm-web.mjs pool add --id b2 --label "小号"
+node <plugin-dir>/src/taptap-bgm-web.mjs login --account b2
+node <plugin-dir>/src/taptap-bgm-web.mjs pool list                  # 看状态
+node <plugin-dir>/src/taptap-bgm-web.mjs gen --prompt "史诗管弦战斗音乐"  # 自动选可用账号
 
 # 音效：搜索 / 安装 / 查看来源
 node <plugin-dir>/src/taptap-audio.mjs search "金币音效"

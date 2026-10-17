@@ -212,6 +212,8 @@ window.__ModuleLoader__.load({
       const [err, setErr] = useState('')
       const [credits, setCredits] = useState(null)
       const [cfg, setCfg] = useState(null) // { instrumental, count }
+      const [newId, setNewId] = useState('')
+      const [showAdd, setShowAdd] = useState(false)
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
@@ -257,9 +259,13 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(''))
       }, [load])
 
-      const doLogin = useCallback(() => {
-        setBusy('login'); setErr(''); setCredits(null)
-        fetch(`${API_BASE}/bgm-login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+      const doLogin = useCallback((account) => {
+        const tag = account ? `login:${account}` : 'login'
+        setBusy(tag); setErr(''); setCredits(null)
+        fetch(`${API_BASE}/bgm-login`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(account ? { account } : {}),
+        })
           .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
           .then(({ ok, j }) => {
             if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
@@ -269,17 +275,52 @@ window.__ModuleLoader__.load({
               fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
                 .then((r) => (r.ok ? r.json() : Promise.reject(new Error('bad'))))
                 .then((st) => {
-                  if (st.hasCookies === true || tries >= 60) {
+                  // Wait for the SPECIFIC account when one was named.
+                  const done = account
+                    ? (st.pool?.accounts ?? []).some((a) => a.id === account && a.hasCookies)
+                    : st.hasCookies === true
+                  if (done || tries >= 60) {
                     clearInterval(timer)
                     setInfo(st)
                     setBusy('')
-                    if (st.hasCookies !== true) setErr('未检测到登录：请在弹出的浏览器里完成登录，再点「刷新」。')
+                    if (!done) setErr('未检测到登录：请在弹出的浏览器里完成登录，再点「刷新」。')
                   }
                 })
                 .catch(() => { if (tries >= 60) { clearInterval(timer); setBusy('') } })
             }, 3000)
           })
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
+      }, [])
+
+      // 添加账号 = 建条目 + 立刻打开登录（同 ChatGPT 通道）。
+      const addAndLogin = useCallback(() => {
+        const id = (newId || '').trim()
+        if (!id) { setErr('请填账号短名（如 b2、小号）'); return }
+        setBusy('add'); setErr('')
+        fetch(`${API_BASE}/bgm-pool`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'add', id }),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok) { setErr(j.error || '添加失败'); setBusy(''); return }
+            setInfo(j)
+            setNewId(''); setShowAdd(false)
+            doLogin(id)
+          })
+          .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
+      }, [newId, doLogin])
+
+      const poolAction = useCallback((action, id) => {
+        setBusy(action); setErr('')
+        fetch(`${API_BASE}/bgm-pool`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(id ? { action, id } : { action }),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => { if (ok && j.ok) setInfo(j); else setErr(j.error || '操作失败') })
+          .catch(() => setErr('请求失败：宿主服务未就绪'))
+          .finally(() => setBusy(''))
       }, [])
 
       if (info === null) {
@@ -294,29 +335,106 @@ window.__ModuleLoader__.load({
             '没连上宿主服务。可用命令 /taptap-bgm login。'))
       }
       const logged = info.hasCookies === true
+      const pool = info.pool ?? { accounts: [], total: 0, loggedIn: 0, autoRotate: true, cooling: 0, banned: 0 }
+      const anyLogged = logged || pool.loggedIn > 0
+      // 账号列表：主账号常驻（退出后可再登）+ 附加账号（轮询）
+      const rows = [
+        { id: null, key: '__main__', name: '主账号', isMain: true, loggedIn: logged, status: 'ok' },
+        ...pool.accounts.map((a) => ({
+          id: a.id, key: a.id, isMain: false, status: a.status,
+          name: a.label !== a.id ? `${a.id}（${a.label}）` : a.id,
+          loggedIn: a.hasCookies === true,
+        })),
+      ]
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
             h('h2', { style: S.cardTitle }, 'BGM 账号'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
-              '生成完整 BGM 用的 MiniMax 账号。可登录、查额度、换号。')),
-          h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
+              '生成完整 BGM 用的 MiniMax 账号。可登录、查额度、换号；多个账号可在额度用完时自动轮换。')),
+          h('span', { style: anyLogged ? S.pill : S.offPill }, anyLogged ? '已登录' : '未登录'),
         ),
         info.site
           ? h('p', { style: S.hint }, '站点：', h('span', { style: S.codeInline }, info.site.label))
           : null,
+
+        h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+          rows.map((r) => h('div', {
+            key: r.key,
+            style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 },
+          },
+            h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+              h('span', { style: { fontSize: 13, fontWeight: 600 } }, r.name),
+              h('span', { style: S.hint },
+                r.loggedIn ? '已登录' : '未登录',
+                r.status === 'banned' ? ' · 已封禁' : r.status === 'cooling' ? ' · 额度冷却' : '')),
+            h('div', { style: { display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' } },
+              h('button', {
+                style: S.ghostBtn, disabled: busy !== '',
+                onClick: () => doLogin(r.isMain ? undefined : r.id),
+              }, busy === (r.isMain ? 'login' : `login:${r.id}`) ? '登录中…' : (r.loggedIn ? '重登' : '登录')),
+              r.loggedIn
+                ? h('button', {
+                  style: S.ghostBtn, disabled: busy !== '',
+                  onClick: () => post('bgm-logout', r.isMain ? {} : { account: r.id }, r.isMain ? 'logout' : `logout:${r.id}`),
+                }, '退出')
+                : null,
+              r.loggedIn
+                ? h('button', {
+                  style: S.ghostBtn, disabled: busy !== '',
+                  onClick: () => post('bgm-credits', r.isMain ? {} : { account: r.id }, r.isMain ? 'credits' : `credits:${r.id}`),
+                }, busy === (r.isMain ? 'credits' : `credits:${r.id}`) ? '查询中…' : '查额度')
+                : null,
+              r.isMain
+                ? null
+                : h('button', {
+                  style: S.ghostBtn, disabled: busy !== '',
+                  onClick: () => poolAction(r.status === 'banned' || r.status === 'cooling' ? 'unban' : 'ban', r.id),
+                }, r.status === 'banned' || r.status === 'cooling' ? '恢复' : '封禁'),
+              r.isMain
+                ? null
+                : h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => poolAction('remove', r.id) }, '移除'),
+            )),
+          )),
+
         h('div', { style: S.bar },
-          h('button', { style: S.btn, disabled: busy !== '', onClick: doLogin },
-            busy === 'login' ? '登录中…' : (logged ? '重新登录' : '登录')),
-          logged ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('bgm-credits', {}, 'credits') }, busy === 'credits' ? '查询中…' : '查额度') : null,
-          logged ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => post('bgm-logout', {}, 'logout') }, busy === 'logout' ? '退出中…' : '退出 / 换号') : null,
+          showAdd
+            ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
+              h('input', {
+                style: { ...S.search, flex: '0 0 auto', width: 170 }, value: newId,
+                placeholder: '账号短名，如 b2', spellCheck: false, autoComplete: 'off',
+                onChange: (e) => setNewId(e.target.value),
+                onKeyDown: (e) => { if (e.key === 'Enter') addAndLogin() },
+              }),
+              h('button', { style: S.btn, disabled: busy !== '' || !(newId || '').trim(), onClick: addAndLogin }, '添加并登录'),
+              h('button', { style: S.ghostBtn, onClick: () => { setShowAdd(false); setNewId('') } }, '取消'))
+            : h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => setShowAdd(true) }, '+ 添加账号'),
           err ? h('span', { style: S.warn }, err) : null,
         ),
+
         credits !== null
           ? h('p', { style: S.hint },
             '剩余额度：', h('span', { style: S.codeInline }, `${credits.totalCredit ?? '?'}`),
             credits.expiresAt ? h('span', { style: S.hint }, `（到期 ${new Date(credits.expiresAt).toLocaleDateString('zh-CN')}）`) : null)
           : null,
+
+        // 轮询：只在有附加账号时可调
+        pool.total > 0
+          ? h('div', { style: { ...S.rowBetween, marginTop: 6 } },
+            h('div', null,
+              h('span', { style: { fontSize: 13, fontWeight: 600 } }, '额度用完自动轮换'),
+              h('p', { style: { ...S.hint, marginTop: 2 } },
+                `附加账号 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling}，封禁 ${pool.banned}）。`)),
+            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+              h('span', { style: pool.autoRotate ? S.pill : S.offPill }, pool.autoRotate ? '轮换开' : '轮换关'),
+              h(Toggle, {
+                on: pool.autoRotate !== false,
+                disabled: busy !== '',
+                onClick: () => poolAction('rotate', undefined),
+              })),
+          )
+          : null,
+
         // 纯音乐开关（默认开）：游戏 BGM 大多不要歌词
         h('div', { style: { ...S.rowBetween, marginTop: 10 } },
           h('div', null,
@@ -329,7 +447,7 @@ window.__ModuleLoader__.load({
           }),
         ),
         h('p', { style: { ...S.hint, marginTop: 6 } },
-          '「退出 / 换号」会清除本机登录态，之后可用另一个账号登录。'),
+          '「退出」会清除该账号的本机登录态；主账号那一行常驻，退出后可随时再登回来。'),
       )
     }
 

@@ -168,6 +168,107 @@ export function writeBgmConfig(dshHome, patch = {}) {
 }
 
 /* ------------------------------------------------------------------------- *
+ * MINIMAX (BGM) ACCOUNT POOL — multi-account rotation for the BGM web lane.
+ *
+ * Same shape and semantics as the ChatGPT pool: each account gets its OWN
+ * browser profile (so one broken/banned session cannot corrupt the others),
+ * a `status` of ok | cooling | banned, and least-recently-used picking.
+ *
+ * ⚠️ Rotating accounts to get around per-account credit limits may breach the
+ * site's terms. The user asked for it explicitly (2026-10-17) and owns the risk.
+ * ------------------------------------------------------------------------- */
+
+export function bgmPoolPath(dshHome) {
+  return path.join(dataDir(dshHome), 'bgm-pool.json')
+}
+
+/** Read the BGM account pool (normalised shape). */
+export function readBgmPool(dshHome) {
+  const data = readJson(bgmPoolPath(dshHome)) ?? {}
+  const accounts = Array.isArray(data.accounts) ? data.accounts : []
+  return {
+    accounts: accounts
+      .filter((a) => typeof a?.id === 'string' && a.id.length > 0)
+      .map((a) => ({
+        id: a.id,
+        label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
+        profile: typeof a.profile === 'string' && a.profile.length > 0
+          ? a.profile
+          : path.join(dataDir(dshHome), `browser-profile-bgm-${a.id}`),
+        status: typeof a.status === 'string' ? a.status : 'unknown',
+        lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
+        note: typeof a.note === 'string' ? a.note : '',
+      })),
+    autoRotate: data.autoRotate !== false, // default ON
+  }
+}
+
+/** Persist the BGM pool (partial patch); returns the merged record. */
+export function writeBgmPool(dshHome, patch = {}) {
+  const merged = { ...readBgmPool(dshHome) }
+  if (Array.isArray(patch.accounts)) {
+    merged.accounts = patch.accounts
+      .filter((a) => typeof a?.id === 'string' && a.id.length > 0)
+      .map((a) => ({
+        id: a.id,
+        label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
+        profile: typeof a.profile === 'string' && a.profile.length > 0
+          ? a.profile
+          : path.join(dataDir(dshHome), `browser-profile-bgm-${a.id}`),
+        status: typeof a.status === 'string' ? a.status : 'unknown',
+        lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
+        note: typeof a.note === 'string' ? a.note : '',
+      }))
+  }
+  if (typeof patch.autoRotate === 'boolean') merged.autoRotate = patch.autoRotate
+  writeJson(bgmPoolPath(dshHome), merged)
+  return merged
+}
+
+/**
+ * Pick the next usable BGM account: prefer `activeId`, else least-recently-used
+ * that is neither banned nor still cooling down.
+ */
+export function pickBgmAccount(dshHome, { activeId, exclude = [], cooldownMs = 6 * 3600 * 1000 } = {}) {
+  const pool = readBgmPool(dshHome)
+  if (pool.accounts.length === 0) return null
+  const skip = new Set(exclude)
+  const now = Date.now()
+  const usable = pool.accounts.filter((a) => {
+    if (skip.has(a.id)) return false
+    if (a.status === 'banned') return false
+    if (a.status === 'cooling' && typeof a.lastUsedAt === 'number'
+      && now - a.lastUsedAt < cooldownMs) return false
+    return true
+  })
+  if (usable.length === 0) return null
+  if (activeId) {
+    const cur = usable.find((a) => a.id === activeId)
+    if (cur) return cur
+  }
+  usable.sort((a, b) => (a.lastUsedAt ?? 0) - (b.lastUsedAt ?? 0))
+  return usable[0]
+}
+
+/** Mark a BGM account used / cooling / banned / restored. */
+export function touchBgmAccount(dshHome, id, patch = {}) {
+  const pool = readBgmPool(dshHome)
+  let found = false
+  pool.accounts = pool.accounts.map((a) => {
+    if (a.id !== id) return a
+    found = true
+    if (patch.status !== undefined) a.status = patch.status
+    if (patch.lastUsedAt !== undefined) a.lastUsedAt = patch.lastUsedAt
+    if (patch.note !== undefined) a.note = patch.note
+    if (patch.label !== undefined) a.label = patch.label
+    return a
+  })
+  if (!found) return readBgmPool(dshHome)
+  writeBgmPool(dshHome, pool)
+  return readBgmPool(dshHome)
+}
+
+/* ------------------------------------------------------------------------- *
  * ChatGPT ACCOUNT POOL — multi-account rotation for the web image lane.
  *
  * ⚠️ TO BE CLEAR: rotating multiple accounts to bypass per-account quotas
