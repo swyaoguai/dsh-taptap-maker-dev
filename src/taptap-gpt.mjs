@@ -534,24 +534,25 @@ def _challenge():
     return None
 
 def _try_click_challenge():
-    # Best effort: a real click inside a real headed browser sometimes clears it.
-    # If it does not, we tell the user to tick the box themselves.
+    # Best effort ONLY. Measured 2026-10-17:
+    #  - selector-based clicks inside the Turnstile frame find nothing (the
+    #    checkbox sits in a nested frame/shadow root Playwright cannot query),
+    #  - so we click BY COORDINATES where the checkbox is drawn (what a human
+    #    does). That may or may not satisfy Cloudflare's behaviour check.
+    # We never spoof fingerprints to defeat the challenge: that is an arms race
+    # and circumvents the site's bot protection. One attempt, then ask the user.
     clicked = False
     try:
-        for fr in pg.frames:
-            try:
-                if "challenges.cloudflare.com" not in (fr.url or ""):
-                    continue
-                for sel in ["input[type='checkbox']", "#challenge-stage input", "label"]:
-                    el = fr.query_selector(sel)
-                    if el:
-                        el.click(force=True)
-                        clicked = True
-                        break
-            except Exception:
-                pass
-            if clicked:
-                break
+        box = pg.evaluate("""() => {
+            const fr = Array.from(document.querySelectorAll('iframe')).find(f =>
+                (f.src || '').indexOf('challenges.cloudflare.com') !== -1);
+            if (!fr) return null;
+            const r = fr.getBoundingClientRect();
+            return { x: r.x, y: r.y, h: r.height };
+        }""")
+        if box:
+            pg.mouse.click(box["x"] + 28, box["y"] + box["h"] / 2)
+            clicked = True
     except Exception:
         pass
     return clicked
