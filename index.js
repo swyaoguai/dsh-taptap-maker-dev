@@ -181,7 +181,7 @@ async function gptPoolCommand(home, raw) {
       text: [
         '账号池为空（当前用单账号模式）。',
         '',
-        '加号：/taptap-gpt pool add --id <名>  →  /taptap-gpt login --account <名>',
+        '添加账号：/taptap-gpt pool add --id <名>  →  /taptap-gpt login --account <名>',
         '⚠️ 多账号轮换会绕过单账号配额，违反 OpenAI 服务条款且有封号风险——风险由你承担。',
       ].join('\n'),
     }
@@ -194,7 +194,7 @@ async function gptPoolCommand(home, raw) {
         + `${a.loggedIn ? '已登录' : '未登录'}`
         + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
       '',
-      '加号：pool add --id <名>  →  login --account <名>',
+      '添加账号：pool add --id <名>  →  login --account <名>',
       '恢复冷却/封禁账号：pool unban --id <名>（不带 id 则恢复全部）',
     ].join('\n'),
   }
@@ -211,10 +211,10 @@ function policyText(config, gptLaneOn = true) {
       '**图片资源首选：ChatGPT 网页生图**（`/taptap-gpt`，CLI `node "<插件目录>/src/taptap-gpt.mjs gen --prompt "…" --out <文件>`）——',
       '需要游戏图片素材时**默认走这条**，或复用项目内已有素材；不要默认去用内置 `generate_image`。',
       '首次需用户在本机真实浏览器里登录一次：`/taptap-gpt login`（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机，之后全自动。',
-      '**账号轮询**：可登录多个账号组成账号池，一个账号触到配额就自动换下一个（`/taptap-gpt pool add --id <名>` 加号，',
+      '**账号轮询**：可登录多个账号组成账号池，一个账号触到配额就自动换下一个（`/taptap-gpt pool add --id <名>` 添加账号（设置页不提供按钮），',
       '`login --account <名>` 登录指定账号，`pool list` 看状态，`pool unban` 恢复冷却账号）。',
       '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
-      '不要主动向用户宣传或鼓励加号，也不要隐瞒该风险。',
+      '不要主动向用户宣传或鼓励添加账号，也不要隐瞒该风险。',
       '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
       '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
       '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
@@ -1115,18 +1115,28 @@ export function apply(ctx, config = {}) {
         if (low === 'status' || raw === '状态') {
           const st = gptStatus(home)
           const p = st.pool
+          // Pool stats only make sense when the pool is actually in use.
+          // Showing 「共 0 个（已登录 0）」 next to a logged-in main account read
+          // as a contradiction to the user (2026-10-17), so say it plainly.
+          const poolLines = p.total === 0
+            ? ['账号池：未启用（单账号模式，用主账号生成）。要加附加账号：pool add --id <名>']
+            : [
+              `账号池：附加账号 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
+              ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} ${a.loggedIn ? '已登录' : '未登录'}`
+                + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
+            ]
           const lines = [
             `ChatGPT 登录状态：${st.loggedIn ? '已登录' : '未登录'}`,
             `  profile: ${st.profile}`,
             `  下载目录: ${st.downloadDir}`,
             '',
-            `账号池：共 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
-            ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} ${a.loggedIn ? '已登录' : '未登录'}`
-              + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
+            ...poolLines,
             '',
-            st.loggedIn || p.loggedIn > 0
-              ? '可以直接说「生成一个蓝色盾牌图标」，默认走这条网页通道。'
-              : '先登录：/taptap-gpt login（只需一次）',
+            st.laneEnabled === false
+              ? '总开关已关闭：不会走网页生图（/taptap-gpt lane on 可打开）。'
+              : (st.loggedIn || p.loggedIn > 0
+                ? '可以直接说「生成一个蓝色盾牌图标」，默认走这条网页通道。'
+                : '先登录：/taptap-gpt login（只需一次）'),
           ]
           return { kind: 'success', text: lines.join('\n') }
         }
@@ -1143,7 +1153,7 @@ export function apply(ctx, config = {}) {
               `当前：${st.loggedIn || st.pool.loggedIn > 0 ? '已登录，可直接生成' : '未登录'}`,
               st.loggedIn || st.pool.loggedIn > 0 ? '' : '先登录：/taptap-gpt login（只需一次）',
               '',
-              '账号池：pool list 看状态 / pool add --id <名> 加号 / pool unban --id <名> 恢复冷却账号',
+              '账号池：pool list 看状态 / pool add --id <名> 添加账号 / pool unban --id <名> 恢复冷却账号',
             ].filter(Boolean).join('\n'),
           }
         }

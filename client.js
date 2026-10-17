@@ -341,8 +341,6 @@ window.__ModuleLoader__.load({
       const [info, setInfo] = useState(null) // null | 'error' | status
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
-      const [newId, setNewId] = useState('')
-      const [showAdd, setShowAdd] = useState(false)
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
@@ -417,20 +415,14 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(''))
       }, [load])
 
-      const addAccount = useCallback(() => {
-        const id = (newId || '').trim()
-        if (!id) { setErr('请填账号短名（如 a2、小号）'); return }
-        post('gpt-pool', { action: 'add', id }).then((okFlag) => { if (okFlag) { setNewId(''); setShowAdd(false) } })
-      }, [newId, post])
-
       if (info === null) {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图（首选）'),
+          h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图'),
           h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
       }
       if (info === 'error') {
         return h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图（首选）'),
+          h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图'),
           h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
             '没连上宿主服务。可用命令 /taptap-gpt login。'))
       }
@@ -439,9 +431,6 @@ window.__ModuleLoader__.load({
       // the injected agent policy switches to the relay lane).
       const laneOn = info.laneEnabled !== false
       const logged = info.loggedIn === true || pool.loggedIn > 0
-      // Gate "add account" on a successful login: adding a second account while
-      // nothing is logged in is meaningless and confused the user (2026-10-17).
-      const canAdd = laneOn && logged
       const dim = { display: 'flex', flexDirection: 'column', gap: 10, opacity: laneOn ? 1 : 0.45 }
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
@@ -468,7 +457,7 @@ window.__ModuleLoader__.load({
         h('div', { style: dim },
           h('div', { style: S.rowBetween },
             h('div', null,
-              h('span', { style: { fontSize: 13, fontWeight: 600 } }, '主账号'),
+              h('span', { style: { fontSize: 13, fontWeight: 600 } }, '账号'),
               h('p', { style: { ...S.hint, marginTop: 2 } },
                 logged ? '已登录，可生成图片。' : '未登录：先登录一次（Google / Apple / 手机号 / 邮箱均可）。')),
             h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
@@ -485,64 +474,57 @@ window.__ModuleLoader__.load({
           h('p', { style: S.hint }, '登录后会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可。'),
           h('p', { style: S.hint }, '图片下载目录：', h('span', { style: S.codeInline }, info.downloadDir || '')),
 
-          h('div', { style: { ...S.rowBetween, marginTop: 4 } },
-            h('div', null,
-              h('span', { style: { fontSize: 13, fontWeight: 600 } }, '账号轮询'),
-              h('p', { style: { ...S.hint, marginTop: 2 } },
-                `共 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling ?? 0}，封禁 ${pool.banned ?? 0}）。一个触配额自动换下一个。`)),
-            h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-              h('span', { style: pool.autoRotate ? S.pill : S.offPill }, pool.autoRotate ? '轮换开' : '轮换关'),
-              h(Toggle, {
-                on: pool.autoRotate !== false,
-                disabled: !laneOn || busy !== '',
-                onClick: () => post('gpt-pool', { action: 'rotate', on: pool.autoRotate === false }),
-              })),
-          ),
+          // 账号池区块只在真的加了附加账号时才出现。单账号模式下显示
+          // 「共 0 个（已登录 0）」会和上面的「已登录」打架——用户实测
+          // 反馈过这个误导（2026-10-17），所以池为空时完全不渲染它。
           pool.total > 0
-            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
-              pool.accounts.map((a) => h('div', { key: a.id, style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 } },
-                h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
-                  h('span', { style: { fontSize: 13, fontWeight: 600 } }, a.label !== a.id ? `${a.id}（${a.label}）` : a.id),
-                  h('span', { style: S.hint },
-                    a.loggedIn ? '已登录' : '未登录',
-                    a.status === 'banned' ? ' · 已封禁' : a.status === 'cooling' ? ' · 冷却中' : '')),
-                h('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
-                  h('button', {
-                    style: S.ghostBtn, disabled: busy !== '' || !laneOn,
-                    onClick: () => doLogin(a.id),
-                  }, busy === `login:${a.id}` ? '登录中…' : (a.loggedIn ? '重登' : '登录')),
-                  a.status === 'banned' || a.status === 'cooling'
-                    ? h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban', id: a.id }) }, '恢复')
-                    : h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'ban', id: a.id }) }, '封禁'),
-                  h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'remove', id: a.id }) }, '移除'),
+            ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10, marginTop: 4 } },
+              h('div', { style: S.rowBetween },
+                h('div', null,
+                  h('span', { style: { fontSize: 13, fontWeight: 600 } }, '附加账号（轮询）'),
+                  h('p', { style: { ...S.hint, marginTop: 2 } },
+                    `附加账号 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling ?? 0}，封禁 ${pool.banned ?? 0}）。`
+                    + '一个触配额自动换下一个。')),
+                h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+                  h('span', { style: pool.autoRotate ? S.pill : S.offPill }, pool.autoRotate ? '轮换开' : '轮换关'),
+                  h(Toggle, {
+                    on: pool.autoRotate !== false,
+                    disabled: !laneOn || busy !== '',
+                    onClick: () => post('gpt-pool', { action: 'rotate', on: pool.autoRotate === false }),
+                  })),
+              ),
+              h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+                pool.accounts.map((a) => h('div', { key: a.id, style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 } },
+                  h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 } },
+                    h('span', { style: { fontSize: 13, fontWeight: 600 } }, a.label !== a.id ? `${a.id}（${a.label}）` : a.id),
+                    h('span', { style: S.hint },
+                      a.loggedIn ? '已登录' : '未登录',
+                      a.status === 'banned' ? ' · 已封禁' : a.status === 'cooling' ? ' · 冷却中' : '')),
+                  h('div', { style: { display: 'flex', gap: 6, flexShrink: 0 } },
+                    h('button', {
+                      style: S.ghostBtn, disabled: busy !== '' || !laneOn,
+                      onClick: () => doLogin(a.id),
+                    }, busy === `login:${a.id}` ? '登录中…' : (a.loggedIn ? '重登' : '登录')),
+                    a.status === 'banned' || a.status === 'cooling'
+                      ? h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban', id: a.id }) }, '恢复')
+                      : h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'ban', id: a.id }) }, '封禁'),
+                    h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'remove', id: a.id }) }, '移除'),
+                  )),
                 )),
-              ))
-            : h('p', { style: S.hint }, '还没加账号，当前是单账号模式。登录主账号后可以再加第二个开启轮询。'),
-          h('div', { style: S.bar },
-            showAdd
-              ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-                h('input', {
-                  style: { ...S.search, flex: '0 0 auto', width: 160 }, value: newId,
-                  placeholder: '账号短名，如 a2', spellCheck: false, autoComplete: 'off',
-                  onChange: (e) => setNewId(e.target.value),
-                }),
-                h('button', { style: S.btn, disabled: busy !== '' || !canAdd, onClick: addAccount }, '加号'),
-                h('button', { style: S.ghostBtn, onClick: () => { setShowAdd(false); setNewId('') } }, '取消'))
-              : h('button', { style: S.ghostBtn, disabled: !canAdd, onClick: () => setShowAdd(true) }, '+ 加账号'),
-            (pool.banned > 0 || pool.cooling > 0)
-              ? h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban' }) }, '恢复全部')
-              : null,
-          ),
-          // Why the add button is greyed out — say it instead of leaving it dead.
-          !canAdd
-            ? h('p', { style: S.hint },
-              !laneOn ? '通道已关闭，先打开上面的开关。' : '先登录主账号，才能再添加其他账号。')
+              (pool.banned > 0 || pool.cooling > 0)
+                ? h('div', { style: S.bar },
+                  h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'unban' }) }, '恢复全部'))
+                : null,
+            )
             : null,
-          h('div', { style: { ...S.warnBox, marginTop: 4 } },
-            h('span', { style: S.warnTitle }, '⚠️ 轮询风险'),
-            h('p', { style: { ...S.hint, margin: 0 } },
-              '多账号轮流使用会绕过单账号配额，违反 OpenAI 服务条款，且可能导致账号被封。这是你要求的功能，风险由你承担。'),
-          ),
+          // 轮询风险只在真的用了附加账号时才需要提醒；单账号模式不吓人。
+          pool.total > 0
+            ? h('div', { style: { ...S.warnBox, marginTop: 4 } },
+              h('span', { style: S.warnTitle }, '⚠️ 轮询风险'),
+              h('p', { style: { ...S.hint, margin: 0 } },
+                '多账号轮流使用会绕过单账号配额，违反 OpenAI 服务条款，且可能导致账号被封。这是你要求的功能，风险由你承担。'),
+            )
+            : null,
         ),
       )
     }
@@ -828,7 +810,7 @@ window.__ModuleLoader__.load({
               h('span', { style: S.codeInline }, '/taptap-gpt lane off'), '（关掉后自动改走中转站）'),
             h('li', null, '生图（回退）：网页通道不可用时用 ',
               h('span', { style: S.codeInline }, '/taptap-image <描述>'), '（中转站，需先配 baseURL/key/model）'),
-            h('li', null, '账号池：/taptap-gpt pool list 看账号，add --id <名> 加号，login --account <名> 登录，unban 恢复冷却账号'),
+            h('li', null, '账号池：/taptap-gpt pool list 看账号，add --id <名> 添加账号，login --account <名> 登录，unban 恢复冷却账号'),
             h('li', null, '音效：说「加个金币音效」，或 ',
               h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
             h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
