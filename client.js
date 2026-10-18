@@ -347,6 +347,12 @@ window.__ModuleLoader__.load({
       const [panelBg, setPanelBg] = useState('rgba(28,30,36,0.98)')
       const audioRef = useRef(null)
       const srcRef = useRef('')
+      // Loop-preview range for the shared <audio>. MISSING before 2026-10-18:
+      // playFile/stop wrote `rangeRef.current` without this ref ever being
+      // declared, so EVERY play/close/back/stop click threw a synchronous
+      // ReferenceError — the play button never played and the ✕ never closed
+      // (event-handler errors bypass the render boundary, hence zero feedback).
+      const rangeRef = useRef({ active: false, start: 0, end: 0 })
 
       // Panel background measured from the live page so it fits light/dark.
       useEffect(() => {
