@@ -150,7 +150,7 @@ function findPython() {
 }
 
 /** Kill leftover Chromium holding our GPT profile and clear stale locks. */
-function releaseProfile(prof) {
+export function releaseProfile(prof) {
   for (let pass = 0; pass < 3; pass += 1) {
     try {
       spawnSync('powershell', ['-NoProfile', '-Command',
@@ -481,7 +481,19 @@ except Exception:
     pass
 return result`
   const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000, accountId })
-  if (!r.ok) return r
+  if (!r.ok) {
+    // Same err/error mismatch the BGM lane had: the UI reads `error`, so a
+    // browser-level failure (no python, profile locked) showed an empty reason.
+    return {
+      ok: false,
+      error: r.err,
+      logged: false,
+      closedEarly: false,
+      log: r.log ?? [],
+      profile: accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome),
+      account: accountId ?? null,
+    }
+  }
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
   // A freshly logged-in account is usable again: clear any cooling/ban mark.
   if (r.logged === true && accountId) {

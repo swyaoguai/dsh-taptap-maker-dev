@@ -22,7 +22,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { spawnSync, execFile } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.opus', '.webm'])
@@ -50,10 +50,17 @@ function parseArgs(argv) {
   return args
 }
 
+const binCache = new Map() // `${name}:${envValue}` -> resolved bin | null
 function resolveBin(name, envVar) {
-  if (process.env[envVar]) return process.env[envVar]
-  const probe = spawnSync(name, ['-version'], { stdio: 'ignore' })
-  return probe.status === 0 ? name : null
+  const key = `${name}:${process.env[envVar] ?? ''}`
+  if (binCache.has(key)) return binCache.get(key)
+  let result = process.env[envVar] || null
+  if (result === null) {
+    const probe = spawnSync(name, ['-version'], { stdio: 'ignore' })
+    result = probe.status === 0 ? name : null
+  }
+  binCache.set(key, result)
+  return result
 }
 
 const ffmpegBin = () => resolveBin('ffmpeg', 'FFMPEG')
@@ -70,6 +77,26 @@ export function probeDuration(file) {
   if (r.status !== 0) return null
   const v = Number.parseFloat((r.stdout || '').trim())
   return Number.isFinite(v) ? v : null
+}
+
+/**
+ * Async variant so callers can probe MANY files concurrently (the BGM
+ * workbench library view probes every download; serial spawnSync made the
+ * first load take ~150ms × file count).
+ */
+export function probeDurationAsync(file) {
+  return new Promise((resolve) => {
+    const bin = ffprobeBin()
+    if (bin === null) return resolve(null)
+    execFile(bin, [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1', file,
+    ], { timeout: 15000, maxBuffer: 64 * 1024 }, (err, stdout) => {
+      if (err) return resolve(null)
+      const v = Number.parseFloat(String(stdout ?? '').trim())
+      resolve(Number.isFinite(v) ? v : null)
+    })
+  })
 }
 
 /** Build the -af filter chain from options. */

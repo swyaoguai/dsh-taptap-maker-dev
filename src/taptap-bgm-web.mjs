@@ -123,7 +123,7 @@ const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").r
  * the next launch dies with exitCode=21. We only touch processes whose command
  * line references OUR profile dir, so the user's own Chrome is never harmed.
  */
-function releaseProfile(prof) {
+export function releaseProfile(prof) {
   // Retry a few times: Chromium spawns helper processes that outlive the
   // parent, and a still-exiting tree makes the next launch fail with
   // exitCode=21. Two passes with a pause is enough in practice.

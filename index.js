@@ -34,12 +34,12 @@ import { fileURLToPath } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
-import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
+import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
-import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration } from './src/taptap-audio-convert.mjs'
+import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
 import os from 'node:os'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab, resolveDownloadDir } from './src/taptap-gpt.mjs'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile } from './src/taptap-gpt.mjs'
 import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
@@ -609,10 +609,20 @@ export function apply(ctx, config = {}) {
       res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
       res.end(payload)
     }
+    const MAX_BODY_BYTES = 1_000_000
     const readBody = (req) => new Promise((resolve) => {
       const chunks = []
       let size = 0
-      req.on('data', (c) => { size += c.length; if (size <= 1_000_000) chunks.push(c) })
+      req.on('data', (c) => {
+        size += c.length
+        if (size <= MAX_BODY_BYTES) { chunks.push(c); return }
+        // Backstop for chunked bodies (no/lying Content-Length): destroying the
+        // socket is honest — the old behaviour silently TRUNCATED and every
+        // route then failed JSON.parse with a misleading "invalid JSON body".
+        try { req.destroy() } catch { /* ignore */ }
+        chunks.length = 0
+        resolve('')
+      })
       req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
       req.on('error', () => resolve(''))
     })
@@ -667,6 +677,16 @@ export function apply(ctx, config = {}) {
     }
     const handler = async (req, res) => {
       try {
+        // Uniform 413 for oversized uploads (every route posts a tiny JSON
+        // config — a big body is never legitimate). Without this a large body
+        // used to be silently truncated and die as "invalid JSON body".
+        const contentLength = Number(req.headers['content-length'] ?? 0)
+        if (Number.isFinite(contentLength) && contentLength > MAX_BODY_BYTES) {
+          res.writeHead(413, { 'Content-Type': 'application/json; charset=utf-8', 'Connection': 'close' })
+          res.end(JSON.stringify({ ok: false, error: `请求体 ${Math.round(contentLength / 1024)}KB 超过上限 ${Math.round(MAX_BODY_BYTES / 1024)}KB` }))
+          try { req.destroy() } catch { /* ignore */ }
+          return
+        }
         const url = new URL(req.url, 'http://localhost')
         const sub = url.pathname.replace(/^\/api\/taptap-maker-dev\/?/, '').replace(/\/+$/, '')
         if (req.method === 'GET' && (sub === 'skills' || sub === '')) {
@@ -773,6 +793,7 @@ export function apply(ctx, config = {}) {
               if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
               writeBgmPool(home, { accounts: readBgmPool(home).accounts.filter((a) => a.id !== id) })
               try {
+                bgmReleaseProfile(profileDir(home, id))
                 fs.rmSync(profileDir(home, id), { recursive: true, force: true })
               } catch { /* best effort */ }
             } else if (action === 'ban') {
@@ -877,7 +898,12 @@ export function apply(ctx, config = {}) {
               if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
               writeGptPool(home, { accounts: readGptPool(home).accounts.filter((a) => a.id !== id) })
               try {
-                const prof = path.join(dataDir(home), `browser-profile-gpt-${id}`)
+                // Use the SAME sanitized path builder as the runtime: an inline
+                // `browser-profile-gpt-${id}` missed ids containing spaces/
+                // Chinese, so "remove account" silently left the stale session
+                // dir behind. Release the lock first or rmSync no-ops on Windows.
+                const prof = gptAccountProfileDir(home, id)
+                gptReleaseProfile(prof)
                 fs.rmSync(prof, { recursive: true, force: true })
               } catch { /* best effort */ }
             } else if (action === 'ban') {
@@ -941,15 +967,26 @@ export function apply(ctx, config = {}) {
         if (req.method === 'GET' && sub === 'bgm-library') {
           const dir = downloadDir(home)
           fs.mkdirSync(dir, { recursive: true })
-          const files = []
+          const entries = []
           for (const f of fs.readdirSync(dir)) {
             if (!BGM_AUDIO_EXTS.has(path.extname(f).toLowerCase())) continue
             const abs = path.join(dir, f)
             let st
             try { st = fs.statSync(abs) } catch { continue }
             if (!st.isFile()) continue
-            files.push({ name: f, bytes: st.size, mtimeMs: st.mtimeMs, duration: probeBgmDuration(abs) })
+            entries.push({ name: f, abs, bytes: st.size, mtimeMs: st.mtimeMs })
           }
+          // Probe durations CONCURRENTLY: serial spawnSync made the first
+          // library load take ~150ms × file count (13 files ≈ 2s of ffprobe).
+          const durations = await Promise.all(entries.map((e) => {
+            const hit = bgmDurationCache.get(e.abs)
+            if (hit && hit.mtimeMs === e.mtimeMs) return hit.duration
+            return ffprobeDurationAsync(e.abs).then((duration) => {
+              if (duration !== null) bgmDurationCache.set(e.abs, { mtimeMs: e.mtimeMs, duration })
+              return duration
+            })
+          }))
+          const files = entries.map((e, i) => ({ name: e.name, bytes: e.bytes, mtimeMs: e.mtimeMs, duration: durations[i] }))
           files.sort((a, b) => b.mtimeMs - a.mtimeMs)
           const project = detectMakerProject()
           let importedNames = []
@@ -1231,7 +1268,12 @@ export function apply(ctx, config = {}) {
           if (!fs.existsSync(path.join(project, 'assets'))) {
             return { kind: 'error', text: `${project} 看起来不是 Maker 项目（没有 assets/ 目录）` }
           }
-          await ensureAudio()
+          // ensureLibrary's manifest/index writes can throw (locked or
+          // read-only cache dir); without this the whole command dies as an
+          // unhandled rejection instead of a readable message.
+          try { await ensureAudio() } catch (error) {
+            return { kind: 'error', text: `音频库初始化失败：${error?.message ?? error}（可重试；持续失败请检查磁盘权限）` }
+          }
           const result = await searchAudio(audioCacheDir, desc, { limit: 5 })
           if (result.matches.length === 0) {
             return { kind: 'error', text: `CC0 库里没找到匹配「${desc}」的音效。可用 /taptap-audio search "<描述>" 换关键词试试。` }
@@ -1285,7 +1327,9 @@ export function apply(ctx, config = {}) {
         }
         // default: search
         const desc = raw.replace(/^(search|find|搜索)\s*/, '').trim()
-        await ensureAudio()
+        try { await ensureAudio() } catch (error) {
+          return { kind: 'error', text: `音频库初始化失败：${error?.message ?? error}（可重试；持续失败请检查磁盘权限）` }
+        }
         const result = await searchAudio(audioCacheDir, desc, { limit: 8 })
         if (result.matches.length === 0) {
           return { kind: 'error', text: `没找到匹配「${desc}」的 CC0 音效。试试更通用的词（点击 / 金币 / 胜利 / 打击 / 门 / 脚步 / 激光…）。` }

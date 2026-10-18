@@ -390,15 +390,17 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      // Poll: on mount, every 10s while visible, and when the window regains
-      // focus — a freshly generated BGM lights the widget up within seconds.
+      // Poll: on mount, while visible, and on window focus. Frequency follows
+      // the panel: 5s while it's open (fresh list while listening/trimming),
+      // 30s while closed (still lights the red-dot within half a minute of a
+      // fresh BGM landing, at a third of the old background cost).
       useEffect(() => {
         loadLib()
-        const t = setInterval(() => { if (document.visibilityState === 'visible') loadLib() }, 10000)
+        const t = setInterval(() => { if (document.visibilityState === 'visible') loadLib() }, open ? 5000 : 30000)
         const onFocus = () => loadLib()
         window.addEventListener('focus', onFocus)
         return () => { clearInterval(t); window.removeEventListener('focus', onFocus) }
-      }, [loadLib])
+      }, [loadLib, open])
 
       // One shared <audio>; a timeupdate hook loops the selected range.
       useEffect(() => {
