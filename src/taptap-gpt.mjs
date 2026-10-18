@@ -136,11 +136,16 @@ export function resolveDownloadDir(dshHome, { explicit, projectDir } = {}) {
 /** Escape a string into a python single-quoted literal. */
 const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n')}'`
 
+/** Find a python with playwright importable. Cached: probing spawns up to 3
+ * subprocesses (~1-2s) and the answer never changes within one process. */
+let pyCache
 function findPython() {
+  if (pyCache !== undefined) return pyCache
   for (const bin of ['python', 'python3', 'py']) {
     const r = spawnSync(bin, ['-c', 'import playwright; print(1)'], { encoding: 'utf8' })
-    if (r.status === 0) return bin
+    if (r.status === 0) { pyCache = bin; return bin }
   }
+  pyCache = null
   return null
 }
 

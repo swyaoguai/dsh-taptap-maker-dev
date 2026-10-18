@@ -208,6 +208,15 @@ export function writeBgmConfig(dshHome, patch = {}) {
   return merged
 }
 
+/**
+ * Slug an account id EXACTLY like the runtime profile-dir builders do
+ * (taptap-gpt.mjs gptAccountProfileDir / taptap-bgm-web.mjs profileDir).
+ * Without this, a pool record for an id containing spaces/Chinese stored a
+ * `profile` path the runtime would never touch — a landmine for any code that
+ * trusts the stored field.
+ */
+const slugId = (id) => String(id ?? '').replace(/[^\w.-]/g, '_')
+
 /* ------------------------------------------------------------------------- *
  * MINIMAX (BGM) ACCOUNT POOL — multi-account rotation for the BGM web lane.
  *
@@ -235,7 +244,7 @@ export function readBgmPool(dshHome) {
         label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
         profile: typeof a.profile === 'string' && a.profile.length > 0
           ? a.profile
-          : path.join(dataDir(dshHome), `browser-profile-bgm-${a.id}`),
+          : path.join(dataDir(dshHome), `browser-profile-bgm-${slugId(a.id)}`),
         status: typeof a.status === 'string' ? a.status : 'unknown',
         lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
         note: typeof a.note === 'string' ? a.note : '',
@@ -255,7 +264,7 @@ export function writeBgmPool(dshHome, patch = {}) {
         label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
         profile: typeof a.profile === 'string' && a.profile.length > 0
           ? a.profile
-          : path.join(dataDir(dshHome), `browser-profile-bgm-${a.id}`),
+          : path.join(dataDir(dshHome), `browser-profile-bgm-${slugId(a.id)}`),
         status: typeof a.status === 'string' ? a.status : 'unknown',
         lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
         note: typeof a.note === 'string' ? a.note : '',
@@ -342,7 +351,7 @@ export function readGptPool(dshHome) {
         label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
         profile: typeof a.profile === 'string' && a.profile.length > 0
           ? a.profile
-          : path.join(dataDir(dshHome), `browser-profile-gpt-${a.id}`),
+          : path.join(dataDir(dshHome), `browser-profile-gpt-${slugId(a.id)}`),
         status: typeof a.status === 'string' ? a.status : 'unknown',
         lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
         note: typeof a.note === 'string' ? a.note : '',
@@ -362,7 +371,7 @@ export function writeGptPool(dshHome, patch = {}) {
         label: typeof a.label === 'string' && a.label.length > 0 ? a.label : a.id,
         profile: typeof a.profile === 'string' && a.profile.length > 0
           ? a.profile
-          : path.join(dataDir(dshHome), `browser-profile-gpt-${a.id}`),
+          : path.join(dataDir(dshHome), `browser-profile-gpt-${slugId(a.id)}`),
         status: typeof a.status === 'string' ? a.status : 'unknown',
         lastUsedAt: typeof a.lastUsedAt === 'number' ? a.lastUsedAt : null,
         note: typeof a.note === 'string' ? a.note : '',

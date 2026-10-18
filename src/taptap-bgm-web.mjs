@@ -96,12 +96,16 @@ function parseArgs(argv) {
   return args
 }
 
-/** Find a python with playwright importable. */
+/** Find a python with playwright importable. Cached: probing spawns up to 3
+ * subprocesses (~1-2s) and the answer never changes within one process. */
+let pyCache
 function findPython() {
+  if (pyCache !== undefined) return pyCache
   for (const bin of ['python', 'python3', 'py']) {
     const r = spawnSync(bin, ['-c', 'import playwright; print(1)'], { encoding: 'utf8' })
-    if (r.status === 0) return bin
+    if (r.status === 0) { pyCache = bin; return bin }
   }
+  pyCache = null
   return null
 }
 
@@ -316,7 +320,11 @@ result["logged"] = logged
 result["url"] = pg.url
 return result`
   const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000, accountId })
-  if (!r.ok) return r
+  if (!r.ok) {
+    // Same err/error mismatch generate() had: without this the UI read
+    // `r.error` and showed an empty reason when the browser itself failed.
+    return { ok: false, error: r.err, logged: false, log: r.log ?? [], profile: profileDir(dshHome, accountId), account: accountId ?? null }
+  }
   const prof = profileDir(dshHome, accountId)
   // A fresh login clears any cooling / ban mark for that account.
   if (r.logged === true && accountId) {
@@ -752,24 +760,28 @@ QTY_READ = """() => {
 try:
     cur0 = pg.evaluate(QTY_READ)
     steps["qty_initial"] = cur0
-    for _ in range(5):
+    # Drive the value to WANT_QTY in BOTH directions: the old loop only ever
+    # clicked MINUS, so a configured count of 3-4 silently stayed at the site's
+    # default 2 (no error, just fewer tracks than asked). DOM: first button is
+    # minus, second is plus.
+    for _ in range(8):
         cur = pg.evaluate(QTY_READ)
-        if cur is None or cur <= WANT_QTY:
-            steps["qty_final"] = cur
+        if cur is None or cur == WANT_QTY:
             break
-        clicked = pg.evaluate("""() => {
+        clicked = pg.evaluate("""(idx) => {
             const all = Array.from(document.querySelectorAll('span,div,label'));
             const lab = all.filter(e => (e.innerText || '').trim().startsWith('数量') && (e.innerText || '').trim().length < 12)
                            .sort((a, b) => (a.innerText || '').length - (b.innerText || '').length)[0];
             if (!lab || !lab.parentElement) return false;
-            const btn = lab.parentElement.querySelector('button');  // first button = minus
-            if (!btn) return false;
-            btn.click();
+            const btns = lab.parentElement.querySelectorAll('button');
+            if (!btns || btns.length < 2) return false;
+            btns[idx].click();
             return true;
-        }""")
+        }""", 0 if cur > WANT_QTY else 1)
         if not clicked:
             break
         pg.wait_for_timeout(600)
+    steps["qty_final"] = pg.evaluate(QTY_READ)
 except Exception as e:
     steps["qty_error"] = str(e)
 # Snapshot existing track ids so we can identify the NEW one after generating.
