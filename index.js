@@ -34,9 +34,9 @@ import { fileURLToPath } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
-import { status as bgmStatus, generate as bgmGenerate, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
+import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab } from './src/taptap-gpt.mjs'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab, resolveDownloadDir } from './src/taptap-gpt.mjs'
 import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
@@ -101,13 +101,6 @@ const CREDIT_TOOLS = [
   'audition_voices_for_character', 'confirm_character_voice', 'text_to_dialogue',
   'create_3d_asset',
 ]
-
-/** Where relay-lane (fallback) images land before being moved into a project. */
-function tmpImageDir(home) {
-  const dir = path.join(dataDir(home), 'relay-images')
-  fs.mkdirSync(dir, { recursive: true })
-  return dir
-}
 
 /** Wrap a gpt gen call and report honestly; never fabricate a file path. */
 async function gptGen(home, prompt, { accountId, downscale } = {}) {
@@ -1499,7 +1492,12 @@ export function apply(ctx, config = {}) {
           }
         }
 
-        const outFile = path.join(tmpImageDir(home), `relay-${Date.now()}.png`)
+        // Follow the same rule as the web lane: default to <project>/.taptap-images
+        // when the host is running inside a Maker project, else $DSH_HOME/.../gpt-images.
+        // (Was previously hardcoded to tmpImageDir, which made the two lanes
+        // inconsistent — fixed 2026-10-18.)
+        const fallback = resolveDownloadDir(home, {}).dir
+        const outFile = path.join(fallback, `relay-${Date.now()}.png`)
         const argv = [cli, '--prompt', desc, '--out', outFile]
         const size = (/(?:--size|-s)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
         if (size) argv.push('--size', size)

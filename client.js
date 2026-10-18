@@ -311,11 +311,17 @@ window.__ModuleLoader__.load({
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
       }, [newId, doLogin])
 
-      const poolAction = useCallback((action, id) => {
+      // `on` (optional boolean) is for the rotate toggle: without it the server
+      // always writes autoRotate=true, which made the switch one-way (you could
+      // turn rotation on but never off again). Verified 2026-10-18.
+      const poolAction = useCallback((action, id, on) => {
         setBusy(action); setErr('')
+        const payload = { action }
+        if (id) payload.id = id
+        if (typeof on === 'boolean') payload.on = on
         fetch(`${API_BASE}/bgm-pool`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(id ? { action, id } : { action }),
+          body: JSON.stringify(payload),
         })
           .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
           .then(({ ok, j }) => { if (ok && j.ok) setInfo(j); else setErr(j.error || '操作失败') })
@@ -430,7 +436,7 @@ window.__ModuleLoader__.load({
               h(Toggle, {
                 on: pool.autoRotate !== false,
                 disabled: busy !== '',
-                onClick: () => poolAction('rotate', undefined),
+                onClick: () => poolAction('rotate', undefined, pool.autoRotate === false),
               })),
           )
           : null,
