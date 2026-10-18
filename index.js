@@ -959,8 +959,16 @@ export function apply(ctx, config = {}) {
                 .filter((f) => BGM_AUDIO_EXTS.has(path.extname(f).toLowerCase()))
             } catch { importedNames = [] }
           }
-          const importedSet = new Set(importedNames.map((f) => f.toLowerCase()))
-          for (const f of files) f.imported = importedSet.has(f.name.toLowerCase())
+          // 「已导入」matching: installs are always .wav (often with a
+          // 「 裁剪」/「 裁剪 N」 suffix from the workbench) while downloads are
+          // usually .mp3, so exact-name matching NEVER marked anything imported
+          // — the pill stayed off forever after a successful import. Compare
+          // stems instead, stripping the trim marker the workbench appends.
+          const importedStem = (name) => path.basename(name, path.extname(name))
+            .replace(/ 裁剪(?: \d+)?$/, '')
+            .toLowerCase()
+          const importedSet = new Set(importedNames.map(importedStem))
+          for (const f of files) f.imported = importedSet.has(importedStem(f.name))
           return sendJson(res, 200, { ok: true, dir, project, files })
         }
         // GET bgm-file?name=… — stream one file (Range-aware so <audio> can seek).
