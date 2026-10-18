@@ -344,7 +344,14 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('') // '' | 'trim' | 'import'
       const [notice, setNotice] = useState(null) // { ok, text }
       const [err, setErr] = useState('')
-      const [panelBg, setPanelBg] = useState('rgba(28,30,36,0.98)')
+      // Overlay colors measured from the live page as a CONTRASTING PAIR.
+      // The old code measured only the background and left text as `inherit`
+      // from the mount point — whenever the host page paints its background on
+      // a child container (body itself transparent), that kept the dark
+      // fallback panel while inheriting dark text: dark-on-dark, unreadable.
+      // Now bg and fg are measured together and fg is FORCED to contrast bg,
+      // so the panel is readable on both light and dark hosts.
+      const [theme, setTheme] = useState({ bg: 'rgba(28,30,36,0.98)', fg: '#e8eaed' })
       const audioRef = useRef(null)
       const srcRef = useRef('')
       // Loop-preview range for the shared <audio>. MISSING before 2026-10-18:
@@ -356,14 +363,27 @@ window.__ModuleLoader__.load({
 
       // Panel background measured from the live page so it fits light/dark.
       useEffect(() => {
-        if (!open) return
         try {
-          for (const el of [document.body, document.documentElement]) {
-            const bg = getComputedStyle(el).backgroundColor
-            if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') { setPanelBg(bg); break }
+          const lum = (c) => {
+            const m = /rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/.exec(c || '')
+            return m === null ? null : (0.2126 * Number(m[1]) + 0.7152 * Number(m[2]) + 0.0722 * Number(m[3])) / 255
           }
-        } catch { /* keep fallback */ }
-      }, [open])
+          let bg = ''
+          let textColor = ''
+          for (const el of [document.body, document.documentElement]) {
+            const cs = getComputedStyle(el)
+            const b = cs.backgroundColor
+            if (!bg && b && b !== 'rgba(0, 0, 0, 0)' && b !== 'transparent') bg = b
+            if (!textColor && cs.color) textColor = cs.color
+          }
+          const bgLum = lum(bg) ?? 0.12 // nothing measurable → assume a dark UI
+          const fgLum = lum(textColor)
+          const fg = fgLum !== null && Math.abs(fgLum - bgLum) > 0.35
+            ? textColor // the host's own text already contrasts: stay theme-faithful
+            : (bgLum < 0.55 ? '#e8eaed' : '#1f2328') // otherwise force contrast
+          setTheme({ bg: bg || (bgLum < 0.55 ? 'rgba(28,30,36,0.98)' : 'rgba(250,250,251,0.98)'), fg })
+        } catch { /* keep the dark fallback pair */ }
+      }, [])
 
       const loadLib = useCallback(async () => {
         try {
@@ -530,8 +550,9 @@ window.__ModuleLoader__.load({
       const toastViews = open ? [] : toasts.map((t) => h('div', {
         key: t.name,
         style: {
-          position: 'fixed', right: 16, bottom: 64, zIndex: 10001, width: 300,
-          background: panelBg, border: '1px solid var(--dsh-border, rgba(128,128,128,0.35))',
+          position: 'fixed', right: 16, bottom: 68, zIndex: 10001, width: 300,
+          background: theme.bg, color: theme.fg,
+          border: '1px solid var(--dsh-border, rgba(128,128,128,0.35))',
           borderRadius: 10, padding: '10px 12px', boxShadow: '0 8px 28px rgba(0,0,0,0.35)',
           display: 'flex', flexDirection: 'column', gap: 8,
         },
@@ -589,9 +610,9 @@ window.__ModuleLoader__.load({
 
       const panel = open ? h('div', {
         style: {
-          position: 'fixed', right: 16, bottom: 64, zIndex: 10000, width: 340,
+          position: 'fixed', right: 16, bottom: 68, zIndex: 10000, width: 340,
           maxHeight: 'min(560px, 76vh)', overflowY: 'auto',
-          background: panelBg, color: 'inherit',
+          background: theme.bg, color: theme.fg,
           border: '1px solid var(--dsh-border, rgba(128,128,128,0.35))', borderRadius: 12,
           boxShadow: '0 8px 32px rgba(0,0,0,0.35)', padding: 14,
           display: 'flex', flexDirection: 'column', gap: 10,
@@ -616,21 +637,29 @@ window.__ModuleLoader__.load({
         lib && lib.ok && !sel ? h('p', { style: { ...S.hint, margin: 0 } }, `来自 ${lib.dir}；导入到项目 assets/audio/bgm/ 并自动生成 .meta。`) : null,
       ) : null
 
-      return h('span', { style: { display: 'inline-flex', position: 'relative' } },
+      // Fixed floating ball at the bottom-right corner: the old entry was a
+      // small pill INLINE in the composer dock — users closed the panel and
+      // could not find it again among the dock controls. A fixed ball is
+      // always in the same place, directly under the panel/toast it opens.
+      return h('span', { style: { position: 'fixed', right: 16, bottom: 16, zIndex: 9998, display: 'inline-flex' } },
         toastViews,
         panel,
         h('button', {
           onClick: open ? () => { stop(); setOpen(false) } : openPanel,
-          title: 'BGM 工作台：试听 / 裁剪 / 导入',
+          title: 'BGM 工作台：试听 / 裁剪 / 导入（关闭后仍在这个角落）',
+          'aria-label': 'BGM 工作台',
           style: {
-            display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 10px',
-            borderRadius: 999, border: '1px solid var(--dsh-border, rgba(128,128,128,0.4))',
-            background: 'var(--dsh-input-bg, rgba(128,128,128,0.08))', color: 'inherit',
-            font: 'inherit', fontSize: 12, cursor: 'pointer', position: 'relative',
+            width: 42, height: 42, borderRadius: '50%',
+            border: '1px solid var(--dsh-border, rgba(128,128,128,0.4))',
+            background: 'var(--dsh-input-bg, rgba(128,128,128,0.12))', color: 'inherit',
+            font: 'inherit', fontSize: 18, lineHeight: 1, cursor: 'pointer',
+            boxShadow: '0 4px 14px rgba(0,0,0,0.22)',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            position: 'relative',
           },
         },
-          '🎵 BGM',
-          hasNew ? h('span', { style: { position: 'absolute', top: -3, right: -3, width: 9, height: 9, borderRadius: '50%', background: 'var(--dsh-danger, #e03131)', border: '1.5px solid rgba(255,255,255,0.6)' } }) : null),
+          open ? '✕' : '🎵',
+          !open && hasNew ? h('span', { style: { position: 'absolute', top: -1, right: -1, width: 11, height: 11, borderRadius: '50%', background: 'var(--dsh-danger, #e03131)', border: '1.5px solid rgba(255,255,255,0.7)' } }) : null),
       )
     }
 
