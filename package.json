@@ -1,6 +1,6 @@
 {
   "name": "dsh-taptap-maker-dev",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "description": "TapTap Maker 本地开发插件 (DSH bundle)：强制「非用户主动不消耗 Maker MCP 额度」、内置可周期更新的游戏开发 skills、提供 OpenAI 兼容 /images 的自定义生图接口与 CC0 音效/BGM 库用于生成游戏资源，并附带 Maker MCP 安装/初始化引导命令。",

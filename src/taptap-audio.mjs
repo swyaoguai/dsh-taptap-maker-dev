@@ -49,8 +49,9 @@ function audioDir(project, kind) {
   return path.join(project, 'assets', 'audio', kind === 'bgm' ? 'bgm' : 'sfx')
 }
 
-/** Write the asset plus its Maker .meta file. */
-function installFile(srcAbs, project, kind, outName) {
+/** Write the asset plus its Maker .meta file. (Also used by the BGM widget's
+ * trim/import web routes in index.js.) */
+export function installFile(srcAbs, project, kind, outName) {
   const dir = audioDir(project, kind)
   fs.mkdirSync(dir, { recursive: true })
   const name = outName && outName.length > 0 ? outName : `${path.basename(srcAbs, path.extname(srcAbs))}${path.extname(srcAbs)}`
@@ -84,10 +85,12 @@ function importLocalFiles(sources, project, kind, opts = {}) {
       results.push({ src, error: `unsupported extension ${path.extname(src)}` }); continue
     }
     let toInstall = src
+    let tmpDir = null
     // Optional conversion step (e.g. mp3 → wav for Maker conventions).
     if (opts.convertTo) {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'imp-'))
       const tmpOut = path.join(
-        fs.mkdtempSync(path.join(os.tmpdir(), 'imp-')),
+        tmpDir,
         `${path.basename(src, path.extname(src))}.${opts.convertTo}`,
       )
       const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', src,
@@ -98,6 +101,9 @@ function importLocalFiles(sources, project, kind, opts = {}) {
         ...(opts.rate ? ['-ar', String(opts.rate)] : []),
         tmpOut], { encoding: 'utf8' })
       if (r.status !== 0 || !fs.existsSync(tmpOut)) {
+        // Clean up our own temp dir on this path too (a leaked imp-* dir keeps
+        // the whole converted file alive in %TEMP% forever).
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* ignore */ }
         results.push({ src, error: `ffmpeg convert failed: ${(r.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}` })
         continue
       }
@@ -118,6 +124,11 @@ function importLocalFiles(sources, project, kind, opts = {}) {
       })
     } catch (e) {
       results.push({ src, error: e.message })
+    } finally {
+      // installFile copies the bytes, so the temp dir is dead weight now.
+      if (tmpDir !== null) {
+        try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* ignore */ }
+      }
     }
   }
   return results

@@ -23,7 +23,7 @@ window.__ModuleLoader__.load({
     const exports = module.exports
     const React = require('react')
     const h = React.createElement
-    const { useState, useMemo, useCallback, useEffect } = React
+    const { useState, useMemo, useCallback, useEffect, useRef } = React
 
     const inject = ['slots']
     const SIZES = ['1024x1024', '1024x1536', '1536x1024', '512x512', '768x768']
@@ -184,6 +184,461 @@ window.__ModuleLoader__.load({
         return true
       } catch (_e) {
         return false
+      }
+    }
+
+    // ---------------------------------------------------------------------
+    // BGM workbench widget — lives on the MAIN interface (composer dock),
+    // because preview/trim/import is usage, not configuration. Everything is
+    // local + free: <audio> streams from bgm-downloads, the waveform is drawn
+    // from decoded samples, and trimming runs ffmpeg through the plugin API.
+    // ---------------------------------------------------------------------
+    function bgmFmtTime(sec) {
+      if (!Number.isFinite(sec) || sec < 0) return '?:??'
+      const s = Math.floor(sec % 60)
+      const m = Math.floor(sec / 60)
+      return `${m}:${String(s).padStart(2, '0')}`
+    }
+
+    const bgmPeaksCache = new Map() // name -> Float32Array peaks (visual only)
+
+    async function bgmLoadPeaks(name) {
+      const cached = bgmPeaksCache.get(name)
+      if (cached) return cached
+      const r = await fetch(`${API_BASE}/bgm-file?name=${encodeURIComponent(name)}`)
+      if (!r.ok) throw new Error(`HTTP ${r.status}`)
+      const buf = await r.arrayBuffer()
+      const AC = window.AudioContext || window.webkitAudioContext
+      if (!AC) throw new Error('此浏览器不支持 WebAudio')
+      const ac = new AC()
+      let audio
+      try {
+        audio = await ac.decodeAudioData(buf)
+      } finally {
+        try { ac.close() } catch { /* ignore */ }
+      }
+      const ch = audio.getChannelData(0)
+      const N = 240
+      const peaks = new Float32Array(N)
+      const block = Math.max(1, Math.floor(ch.length / N))
+      for (let i = 0; i < N; i += 1) {
+        let max = 0
+        const from = i * block
+        const to = Math.min(from + block, ch.length)
+        for (let j = from; j < to; j += 16) { // stride-sample: plenty for a thumbnail
+          const v = Math.abs(ch[j])
+          if (v > max) max = v
+        }
+        peaks[i] = max
+      }
+      bgmPeaksCache.set(name, peaks)
+      return peaks
+    }
+
+    function BgmWave(props) {
+      // props: name, duration, trim {start,end}, onTrim(next|null), height
+      const canvasRef = useRef(null)
+      const [peaks, setPeaks] = useState(null)
+      const [err, setErr] = useState('')
+      const dragRef = useRef(null)
+
+      useEffect(() => {
+        let alive = true
+        setPeaks(null)
+        setErr('')
+        bgmLoadPeaks(props.name)
+          .then((p) => { if (alive) setPeaks(p) })
+          .catch((e) => { if (alive) setErr(e?.message ?? String(e)) })
+        return () => { alive = false }
+      }, [props.name])
+
+      const draw = useCallback(() => {
+        const cv = canvasRef.current
+        if (!cv || peaks === null || !props.duration) return
+        const dpr = window.devicePixelRatio || 1
+        const w = cv.clientWidth
+        const hgt = cv.clientHeight
+        if (w === 0 || hgt === 0) return
+        if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(hgt * dpr)) {
+          cv.width = Math.round(w * dpr)
+          cv.height = Math.round(hgt * dpr)
+        }
+        const g = cv.getContext('2d')
+        g.setTransform(dpr, 0, 0, dpr, 0, 0)
+        g.clearRect(0, 0, w, hgt)
+        const n = peaks.length
+        const barW = w / n
+        const trim = props.trim
+        for (let i = 0; i < n; i += 1) {
+          const mid = (i + 0.5) / n
+          const inSel = !trim || (mid * props.duration >= trim.start && mid * props.duration <= trim.end)
+          const bh = Math.max(2, peaks[i] * (hgt - 6))
+          g.fillStyle = inSel ? 'rgba(79,124,255,0.85)' : 'rgba(128,128,128,0.38)'
+          g.fillRect(i * barW, (hgt - bh) / 2, Math.max(1, barW - 1), bh)
+        }
+      }, [peaks, props.duration, props.trim])
+
+      useEffect(() => { draw() }, [draw])
+
+      const onPointerDown = (which) => (e) => {
+        if (!props.onTrim || !props.duration) return
+        e.preventDefault()
+        e.stopPropagation()
+        const cv = canvasRef.current
+        if (!cv) return
+        dragRef.current = { which, rect: cv.getBoundingClientRect(), startVal: props.trim.start, endVal: props.trim.end }
+        try { e.currentTarget.setPointerCapture(e.pointerId) } catch { /* older engines */ }
+      }
+      const onPointerMove = (e) => {
+        const d = dragRef.current
+        if (!d || !props.duration) return
+        const x = Math.min(Math.max(e.clientX - d.rect.left, 0), d.rect.width)
+        const t = (x / d.rect.width) * props.duration
+        if (d.which === 'start') props.onTrim({ start: Math.min(t, d.endVal - 1), end: d.endVal })
+        else props.onTrim({ start: d.startVal, end: Math.max(t, d.startVal + 1) })
+      }
+      const onPointerUp = () => { dragRef.current = null }
+
+      const hasTrim = peaks !== null && props.duration > 0 && props.trim
+      const handle = (which) => h('div', {
+        onPointerDown: onPointerDown(which),
+        onPointerMove,
+        onPointerUp,
+        style: {
+          position: 'absolute', top: -4, bottom: -4, width: 14,
+          left: `calc(${(props.trim[which] / props.duration) * 100}% - 7px)`,
+          cursor: 'ew-resize', touchAction: 'none',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2,
+        },
+      }, h('div', { style: { width: 4, height: '100%', borderRadius: 2, background: '#4f7cff', boxShadow: '0 0 4px rgba(79,124,255,0.7)' } }))
+
+      return h('div', { style: { position: 'relative', width: '100%', height: props.height, userSelect: 'none' } },
+        h('canvas', { ref: canvasRef, style: { width: '100%', height: '100%', display: 'block', borderRadius: 6, background: 'rgba(128,128,128,0.10)' } }),
+        peaks === null && !err
+          ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, opacity: 0.6 } }, '波形生成中…')
+          : null,
+        err
+          ? h('div', { style: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, color: 'var(--dsh-warn, #f08c00)', padding: '0 12px', textAlign: 'center' } }, `波形加载失败：${err}`)
+          : null,
+        hasTrim
+          ? h('div', { style: { position: 'absolute', top: 0, bottom: 0, left: 0, width: `${(props.trim.start / props.duration) * 100}%`, background: 'rgba(0,0,0,0.38)', borderRadius: '6px 0 0 6px', pointerEvents: 'none' } })
+          : null,
+        hasTrim
+          ? h('div', { style: { position: 'absolute', top: 0, bottom: 0, right: 0, width: `${((props.duration - props.trim.end) / props.duration) * 100}%`, background: 'rgba(0,0,0,0.38)', borderRadius: '0 6px 6px 0', pointerEvents: 'none' } })
+          : null,
+        hasTrim ? handle('start') : null,
+        hasTrim ? handle('end') : null,
+      )
+    }
+
+    function BgmWidget() {
+      const [open, setOpen] = useState(false)
+      const [lib, setLib] = useState(null) // null=loading | {ok, dir, project, files} | {ok:false}
+      const seenRef = useRef(null) // Set of names known at first successful load
+      const [toasts, setToasts] = useState([]) // newly generated, not yet seen
+      const [sel, setSel] = useState(null) // file opened in the detail/trim view
+      const [trim, setTrim] = useState({ start: 0, end: 0 })
+      const [fade, setFade] = useState(true)
+      const [loopSel, setLoopSel] = useState(false)
+      const [playing, setPlaying] = useState(null) // file name currently playing
+      const [busy, setBusy] = useState('') // '' | 'trim' | 'import'
+      const [notice, setNotice] = useState(null) // { ok, text }
+      const [err, setErr] = useState('')
+      const [panelBg, setPanelBg] = useState('rgba(28,30,36,0.98)')
+      const audioRef = useRef(null)
+      const srcRef = useRef('')
+
+      // Panel background measured from the live page so it fits light/dark.
+      useEffect(() => {
+        if (!open) return
+        try {
+          for (const el of [document.body, document.documentElement]) {
+            const bg = getComputedStyle(el).backgroundColor
+            if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') { setPanelBg(bg); break }
+          }
+        } catch { /* keep fallback */ }
+      }, [open])
+
+      const loadLib = useCallback(async () => {
+        try {
+          const r = await fetch(`${API_BASE}/bgm-library`, { headers: { accept: 'application/json' } })
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          const j = await r.json()
+          const files = Array.isArray(j.files) ? j.files : []
+          setLib({ ok: true, dir: j.dir, project: j.project ?? null, files })
+          const names = new Set(files.map((f) => f.name))
+          if (seenRef.current === null) {
+            seenRef.current = names // first load: everything is "old"
+          } else {
+            const fresh = files.filter((f) => !seenRef.current.has(f.name))
+            if (fresh.length > 0) {
+              for (const f of fresh) seenRef.current.add(f.name)
+              setToasts((prev) => [
+                ...fresh.map((f) => ({ name: f.name, duration: f.duration })).filter((t) => !prev.some((p) => p.name === t.name)),
+                ...prev,
+              ].slice(0, 3))
+            }
+          }
+        } catch (e) {
+          setLib((prev) => (prev && prev.ok ? prev : { ok: false, error: e?.message ?? String(e) }))
+        }
+      }, [])
+
+      // Poll: on mount, every 10s while visible, and when the window regains
+      // focus — a freshly generated BGM lights the widget up within seconds.
+      useEffect(() => {
+        loadLib()
+        const t = setInterval(() => { if (document.visibilityState === 'visible') loadLib() }, 10000)
+        const onFocus = () => loadLib()
+        window.addEventListener('focus', onFocus)
+        return () => { clearInterval(t); window.removeEventListener('focus', onFocus) }
+      }, [loadLib])
+
+      // One shared <audio>; a timeupdate hook loops the selected range.
+      useEffect(() => {
+        const a = new Audio()
+        a.preload = 'metadata'
+        audioRef.current = a
+        const onTime = () => {
+          const r = rangeRef.current
+          if (r.active && a.currentTime >= r.end - 0.03) {
+            try { a.currentTime = r.start } catch { /* ignore */ }
+          }
+        }
+        const onEnded = () => {
+          const r = rangeRef.current
+          if (r.active) {
+            try { a.currentTime = r.start; a.play().catch(() => {}) } catch { /* ignore */ }
+            return
+          }
+          setPlaying(null)
+        }
+        a.addEventListener('timeupdate', onTime)
+        a.addEventListener('ended', onEnded)
+        return () => {
+          a.pause()
+          a.removeEventListener('timeupdate', onTime)
+          a.removeEventListener('ended', onEnded)
+          audioRef.current = null
+          srcRef.current = ''
+        }
+      }, [])
+
+      const playFile = useCallback((file, { from = 0, selRange = null } = {}) => {
+        const a = audioRef.current
+        if (!a) return
+        const url = `${API_BASE}/bgm-file?name=${encodeURIComponent(file.name)}`
+        rangeRef.current = selRange
+          ? { active: true, start: selRange.start, end: selRange.end }
+          : { active: false, start: 0, end: 0 }
+        const isNew = srcRef.current !== url
+        if (isNew) {
+          a.src = url
+          srcRef.current = url
+        }
+        const startPlayback = () => {
+          try { if (from > 0) a.currentTime = Math.min(from, a.duration || from) } catch { /* ignore */ }
+          setPlaying(file.name)
+        }
+        if (isNew || a.paused) {
+          a.play().then(startPlayback).catch(() => setPlaying(null))
+        } else {
+          startPlayback()
+        }
+      }, [])
+
+      const stop = useCallback(() => {
+        const a = audioRef.current
+        if (a) a.pause()
+        rangeRef.current = { active: false, start: 0, end: 0 }
+        setPlaying(null)
+      }, [])
+
+      // While loop-previewing, dragging a handle retargets the loop live.
+      useEffect(() => {
+        if (loopSel && sel && playing === sel.name) {
+          rangeRef.current = { active: true, start: trim.start, end: trim.end }
+        }
+      }, [loopSel, sel, playing, trim])
+
+      const openDetail = useCallback((file) => {
+        setSel(file)
+        setTrim({ start: 0, end: file.duration || 0 })
+        setLoopSel(false)
+        setNotice(null)
+        setErr('')
+      }, [])
+
+      const togglePlayFull = useCallback((file) => {
+        if (playing === file.name) { stop(); return }
+        setLoopSel(false)
+        playFile(file)
+      }, [playing, playFile, stop])
+
+      const toggleSelPreview = useCallback(() => {
+        if (!sel) return
+        if (loopSel && playing === sel.name) { stop(); setLoopSel(false); return }
+        setLoopSel(true)
+        playFile(sel, { from: trim.start, selRange: { active: true, start: trim.start, end: trim.end } })
+      }, [sel, loopSel, playing, trim, playFile, stop])
+
+      const doAction = useCallback(async (mode) => { // 'trim' | 'import'
+        if (!sel) return
+        setBusy(mode)
+        setErr('')
+        setNotice(null)
+        try {
+          const r = await fetch(`${API_BASE}/bgm-${mode}`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ name: sel.name, start: trim.start, end: trim.end, fade }),
+          })
+          const j = await r.json().catch(() => ({}))
+          if (!r.ok || !j.ok) throw new Error(j.error || `HTTP ${r.status}`)
+          stop()
+          setLoopSel(false)
+          setSel(null)
+          setNotice({ ok: true, text: `已导入项目：${j.file}${j.duration ? `（${bgmFmtTime(j.duration)}）` : ''}` })
+          loadLib()
+        } catch (e) {
+          setErr(e?.message ?? String(e))
+        } finally {
+          setBusy('')
+        }
+      }, [sel, trim, fade, loadLib, stop])
+
+      const openPanel = useCallback(() => {
+        setToasts([])
+        setOpen(true)
+        loadLib()
+      }, [loadLib])
+
+      const hasNew = toasts.length > 0
+      const files = lib && lib.ok ? lib.files : []
+      const noProject = Boolean(lib && lib.ok && !lib.project)
+
+      // ---- toast: freshly generated BGM, floating above the widget ----
+      // (suppressed while the panel is already open — the new row is visible there)
+      const toastViews = open ? [] : toasts.map((t) => h('div', {
+        key: t.name,
+        style: {
+          position: 'fixed', right: 16, bottom: 64, zIndex: 10001, width: 300,
+          background: panelBg, border: '1px solid var(--dsh-border, rgba(128,128,128,0.35))',
+          borderRadius: 10, padding: '10px 12px', boxShadow: '0 8px 28px rgba(0,0,0,0.35)',
+          display: 'flex', flexDirection: 'column', gap: 8,
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } },
+            `🎵 新 BGM：${t.name.replace(/\.[^.]+$/, '')}`),
+          h('button', {
+            onClick: () => setToasts((prev) => prev.filter((p) => p.name !== t.name)),
+            style: { border: 'none', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 13, opacity: 0.6, padding: 2 },
+          }, '✕')),
+        h('div', { style: { fontSize: 11, opacity: 0.6 } }, `时长 ${bgmFmtTime(t.duration)}，太长或不需要开头结尾？可裁剪后导入。`),
+        h('div', { style: { display: 'flex', gap: 8 } },
+          h('button', { style: S.btn, onClick: openPanel }, '试听 / 裁剪'),
+          h('button', { style: S.ghostBtn, onClick: () => setToasts((prev) => prev.filter((p) => p.name !== t.name)) }, '稍后再说')),
+      ))
+
+      // ---- rows ----
+      const rowStyle = { display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px', borderRadius: 8, cursor: 'pointer' }
+      const rows = files.map((f) => h('div', {
+        key: f.name, style: { ...rowStyle, background: sel && sel.name === f.name ? 'rgba(128,128,128,0.12)' : 'transparent' },
+        onClick: () => openDetail(f),
+        title: f.name,
+      },
+        h('button', {
+          onClick: (e) => { e.stopPropagation(); togglePlayFull(f) },
+          style: { width: 26, height: 26, borderRadius: '50%', border: '1px solid var(--dsh-border, rgba(128,128,128,0.4))', background: 'transparent', color: 'inherit', cursor: 'pointer', fontSize: 11, flex: '0 0 auto' },
+        }, playing === f.name ? '⏸' : '▶'),
+        h('div', { style: { flex: 1, minWidth: 0 } },
+          h('div', { style: { fontSize: 13, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, f.name.replace(/\.[^.]+$/, '')),
+          h('div', { style: { fontSize: 11, opacity: 0.55 } }, `${bgmFmtTime(f.duration)} · ${Math.round(f.bytes / 1024)} KB`)),
+        f.imported ? h('span', { style: S.pill }, '已导入') : null,
+      ))
+
+      const detail = sel ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('button', { style: { ...S.ghostBtn, padding: '4px 8px' }, onClick: () => { stop(); setLoopSel(false); setSel(null) } }, '← 返回'),
+          h('span', { style: { fontSize: 13, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, sel.name.replace(/\.[^.]+$/, '')),
+          h('span', { style: { fontSize: 11, opacity: 0.55 } }, bgmFmtTime(sel.duration))),
+        h(BgmWave, {
+          name: sel.name, duration: sel.duration, trim, onTrim: setTrim, height: 88,
+        }),
+        h('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 12, opacity: 0.75 } },
+          h('span', null, `选中 ${bgmFmtTime(trim.end - trim.start)} / 全长 ${bgmFmtTime(sel.duration)}`),
+          h('span', null, `${bgmFmtTime(trim.start)} – ${bgmFmtTime(trim.end)}`)),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' } },
+          h('button', { style: { ...S.ghostBtn, ...(loopSel ? { borderColor: '#4f7cff', color: '#4f7cff' } : null) }, onClick: toggleSelPreview }, loopSel && playing === sel.name ? '⏹ 停止' : '🔁 只听选中段'),
+          h('button', { style: { ...S.ghostBtn, ...(fade ? { borderColor: '#4f7cff', color: '#4f7cff' } : null) }, onClick: () => setFade((v) => !v), title: '裁剪点加淡入淡出，避免爆音' }, fade ? '☑' : '☐', ' 淡入淡出'),
+          h('button', { style: S.ghostBtn, onClick: () => setTrim({ start: 0, end: sel.duration || 0 }) }, '重置')),
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
+          h('button', { style: S.btn, disabled: busy !== '' || noProject || trim.end - trim.start < 1, onClick: () => doAction('trim') }, busy === 'trim' ? '裁剪中…' : '✂ 裁剪并导入项目'),
+          h('button', { style: S.ghostBtn, disabled: busy !== '' || noProject, onClick: () => doAction('import') }, busy === 'import' ? '导入中…' : '原样导入')),
+        noProject ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)', margin: 0 } }, '当前没打开 Maker 项目工作区（含 assets/ 的目录），导入前请先打开项目。') : null,
+      ) : null
+
+      const panel = open ? h('div', {
+        style: {
+          position: 'fixed', right: 16, bottom: 64, zIndex: 10000, width: 340,
+          maxHeight: 'min(560px, 76vh)', overflowY: 'auto',
+          background: panelBg, color: 'inherit',
+          border: '1px solid var(--dsh-border, rgba(128,128,128,0.35))', borderRadius: 12,
+          boxShadow: '0 8px 32px rgba(0,0,0,0.35)', padding: 14,
+          display: 'flex', flexDirection: 'column', gap: 10,
+        },
+      },
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+          h('span', { style: { fontSize: 14, fontWeight: 600, flex: 1 } }, '🎵 BGM 工作台'),
+          h('button', { style: { ...S.ghostBtn, padding: '4px 8px' }, onClick: () => { stop(); setOpen(false) } }, '✕')),
+        lib === null ? h('p', { style: S.hint }, '加载中…') : null,
+        lib && !lib.ok
+          ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+            `没连上宿主服务（${lib.error}）。BGM 仍可在对话里生成；导入可用 /taptap-audio import。`)
+          : null,
+        lib && lib.ok && files.length === 0 && !sel
+          ? h('p', { style: { ...S.hint, lineHeight: 1.7 } },
+            '还没有 BGM。在对话里说「来个战斗 BGM」即可生成；生成完成后这里会亮起红点，点开就能试听或裁剪。')
+          : null,
+        !sel && files.length > 0 ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } }, rows) : null,
+        detail,
+        notice ? h('p', { style: { ...S.ok, margin: 0, wordBreak: 'break-all' } }, notice.text) : null,
+        err ? h('p', { style: { ...S.hint, color: 'var(--dsh-danger, #e03131)', margin: 0 } }, `失败：${err}`) : null,
+        lib && lib.ok && !sel ? h('p', { style: { ...S.hint, margin: 0 } }, `来自 ${lib.dir}；导入到项目 assets/audio/bgm/ 并自动生成 .meta。`) : null,
+      ) : null
+
+      return h('span', { style: { display: 'inline-flex', position: 'relative' } },
+        toastViews,
+        panel,
+        h('button', {
+          onClick: open ? () => { stop(); setOpen(false) } : openPanel,
+          title: 'BGM 工作台：试听 / 裁剪 / 导入',
+          style: {
+            display: 'inline-flex', alignItems: 'center', gap: 6, height: 28, padding: '0 10px',
+            borderRadius: 999, border: '1px solid var(--dsh-border, rgba(128,128,128,0.4))',
+            background: 'var(--dsh-input-bg, rgba(128,128,128,0.08))', color: 'inherit',
+            font: 'inherit', fontSize: 12, cursor: 'pointer', position: 'relative',
+          },
+        },
+          '🎵 BGM',
+          hasNew ? h('span', { style: { position: 'absolute', top: -3, right: -3, width: 9, height: 9, borderRadius: '50%', background: 'var(--dsh-danger, #e03131)', border: '1.5px solid rgba(255,255,255,0.6)' } }) : null),
+      )
+    }
+
+    // Error boundary: a broken widget must never take the chat UI down.
+    class BgmBoundary extends React.Component {
+      constructor(props) {
+        super(props)
+        this.state = { err: false }
+      }
+      static getDerivedStateFromError() { return { err: true } }
+      componentDidCatch(error) {
+        try { console.error('[taptap-maker-dev] BGM widget error:', error) } catch { /* ignore */ }
+      }
+      render() {
+        if (this.state.err) return null
+        return h(BgmWidget)
       }
     }
 
@@ -1021,6 +1476,8 @@ window.__ModuleLoader__.load({
             h('li', null, '音效：说「加个金币音效」，或 ',
               h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
             h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
+            h('li', null, 'BGM 试听 / 裁剪：生成后点', h('span', { style: S.codeInline }, '输入框旁的 🎵 BGM 挂件'),
+              '，可试听、拖波形裁剪、一键导入项目（生成完会亮红点提醒）。'),
             h('li', null, '换 BGM 账号 / 查额度：说「退出登录」或「查额度」，也在本页「BGM 账号」卡。'),
             h('li', null, '音频转格式：说「把这些音效转成 wav」，或 ',
               h('span', { style: S.codeInline }, '/taptap-audio-convert')),
@@ -1044,6 +1501,19 @@ window.__ModuleLoader__.load({
           label: () => 'TapTap Maker',
         },
         TaptapMakerSettings,
+      ))
+
+      // BGM workbench on the MAIN interface (next to the composer): preview /
+      // trim / import freshly generated BGM. Usage belongs to the conversation
+      // surface, not settings; the boundary keeps the chat UI safe if it breaks.
+      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
+        {
+          name: 'conversation.composer.dock',
+          id: 'taptap-maker-dev-bgm',
+          order: 90,
+          label: () => 'BGM 工作台',
+        },
+        BgmBoundary,
       ))
     }
 

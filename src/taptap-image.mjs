@@ -147,7 +147,14 @@ export async function generateImage(options) {
     const text = await response.text()
 
     if (response.ok) {
-      const json = JSON.parse(text)
+      // A 200 with an HTML page (wrong baseURL, proxy error page, gateway) used
+      // to surface as "Unexpected token '<' in JSON" — useless for diagnosing.
+      let json
+      try {
+        json = JSON.parse(text)
+      } catch {
+        throw new Error(`endpoint returned non-JSON 200 (check baseURL "${cfg.baseURL}"): ${text.slice(0, 200)}`)
+      }
       const items = Array.isArray(json.data) ? json.data : []
       if (items.length === 0) throw new Error('endpoint returned no image data')
       const outputs = []

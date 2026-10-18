@@ -12,6 +12,7 @@
  *   node taptap-audio-convert.mjs --in <maker-project>\assets\audio\sfx --out D:\tmp\wav --to wav
  *   node taptap-audio-convert.mjs --in sfx --out out --to wav --mono --rate 44100 --normalize --trim --fade-out 0.05
  *   node taptap-audio-convert.mjs --in bgm.ogg --out bgm_loop.ogg --loop 8
+ *   node taptap-audio-convert.mjs --in bgm.mp3 --out cut.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5
  *   node taptap-audio-convert.mjs --probe D:\tmp\coin.ogg
  *
  * Requires ffmpeg + ffprobe on PATH (or set FFMPEG / FFPROBE). If missing, the
@@ -59,7 +60,7 @@ const ffmpegBin = () => resolveBin('ffmpeg', 'FFMPEG')
 const ffprobeBin = () => resolveBin('ffprobe', 'FFPROBE')
 
 /** Probe duration in seconds (needed for fade-out). */
-function probeDuration(file) {
+export function probeDuration(file) {
   const bin = ffprobeBin()
   if (bin === null) return null
   const r = spawnSync(bin, [
@@ -92,7 +93,7 @@ function buildFilter(opts, duration) {
 }
 
 /** Convert one file. Returns a result object. */
-function convertFile(src, dst, opts) {
+export function convertFile(src, dst, opts) {
   const to = (typeof opts.to === 'string' && opts.to) || 'wav'
   const target = TARGETS[to] ?? TARGETS.wav
   const bin = ffmpegBin()
@@ -103,13 +104,40 @@ function convertFile(src, dst, opts) {
   }
   fs.mkdirSync(path.dirname(dst), { recursive: true })
 
+  // Precise time-range cut (--start/--end, seconds). `-ss` before `-i` seeks
+  // (fast, frame-accurate enough for music), `-t` caps the output duration so
+  // the cut length is exactly end-start regardless of source oddities.
+  //
+  // A malformed range must NOT fall through to "convert the whole file": that
+  // looks like success and ships the wrong audio. Same for a range that starts
+  // past the end of the source (ffmpeg happily writes an empty file).
+  const hasStart = opts.start !== undefined && opts.start !== null && opts.start !== ''
+  const hasEnd = opts.end !== undefined && opts.end !== null && opts.end !== ''
+  const start = hasStart ? Number(opts.start) : 0
+  if (!Number.isFinite(start) || start < 0) {
+    throw new Error(`invalid --start "${opts.start}": expected seconds, e.g. --start 12.5`)
+  }
+  let end = hasEnd ? Number(opts.end) : null
+  if (hasEnd && (!Number.isFinite(end) || end <= start)) {
+    throw new Error(`invalid --end "${opts.end}": must be a number of seconds greater than --start (${start})`)
+  }
+
+  const fullDuration = probeDuration(src)
+  if (end !== null && fullDuration !== null && end > fullDuration) end = fullDuration
+  if (fullDuration !== null && start >= fullDuration) {
+    throw new Error(`--start ${start}s is past the end of ${path.basename(src)} (${fullDuration.toFixed(2)}s)`)
+  }
+
   const before = fs.statSync(src).size
-  const args = ['-y', '-hide_banner', '-loglevel', 'error', '-i', src]
+  const args = ['-y', '-hide_banner', '-loglevel', 'error']
+  if (start > 0) args.push('-ss', String(start))
+  args.push('-i', src)
   const mono = opts.mono === true || opts.mono === 'true'
   const rate = Number(opts.rate ?? 0)
   const bitrate = typeof opts.bitrate === 'string' ? opts.bitrate : null
 
   const aArgs = [...target.args]
+  if (end !== null) aArgs.push('-t', String(Number((end - start).toFixed(3))))
   if (bitrate !== null) {
     // Replace the encoder's default bitrate/quality slot.
     const bi = aArgs.findIndex((a) => a === '-b:a' || a === '-q:a')
@@ -118,8 +146,13 @@ function convertFile(src, dst, opts) {
   if (mono) aArgs.push('-ac', '1')
   if (rate > 0) aArgs.push('-ar', String(rate))
 
-  const duration = probeDuration(src)
-  const filter = buildFilter(opts, duration)
+  // Fade-out must sit at the END OF THE CUT, not of the source file.
+  const cutDuration = start > 0 || end !== null
+    ? (end !== null
+        ? end - start
+        : (fullDuration !== null ? Math.max(fullDuration - start, 0) : null))
+    : fullDuration
+  const filter = buildFilter(opts, cutDuration)
   if (filter !== null) args.push('-af', filter)
   args.push(...aArgs, dst)
 
@@ -133,7 +166,8 @@ function convertFile(src, dst, opts) {
   return {
     src, dst, from: path.extname(src).slice(1), to: target.ext.slice(1),
     bytesBefore: before, bytesAfter: fs.statSync(dst).size,
-    duration: duration === null ? null : Number(duration.toFixed(2)),
+    duration: cutDuration === null ? null : Number(cutDuration.toFixed(2)),
+    start: start > 0 ? start : null, end,
     mono, rate: rate > 0 ? rate : null, filter,
   }
 }
@@ -142,7 +176,7 @@ function convertFile(src, dst, opts) {
  * Make a seamless-ish loop by concatenating `times` copies with a short
  * crossfade. Useful for BGM made from a short one-shot.
  */
-function makeLoop(src, dst, times, opts) {
+export function makeLoop(src, dst, times, opts) {
   const bin = ffmpegBin()
   if (bin === null) throw new Error('ffmpeg not found; install it or set FFMPEG=<path>')
   const count = Math.max(2, Math.min(Number(times ?? 2), 20))
@@ -171,7 +205,7 @@ function main() {
 
   const input = typeof args.in === 'string' ? path.resolve(args.in) : null
   if (input === null) {
-    process.stderr.write('usage: taptap-audio-convert --in <file|dir> --out <file|dir> [--to wav] [--mono] [--rate 44100] [--normalize] [--trim] [--fade-out 0.05] [--loop N]\n')
+    process.stderr.write('usage: taptap-audio-convert --in <file|dir> --out <file|dir> [--to wav] [--start <sec>] [--end <sec>] [--mono] [--rate 44100] [--normalize] [--trim] [--fade-in 0.3] [--fade-out 0.5] [--loop N]\n')
     process.exitCode = 2
     return
   }
@@ -233,6 +267,8 @@ function main() {
         kbBefore: Math.round(r.bytesBefore / 1024),
         kbAfter: Math.round(r.bytesAfter / 1024),
         duration: r.duration,
+        start: r.start,
+        end: r.end,
       })),
   }, null, 2)}\n`)
   if (failed > 0) process.exitCode = 1

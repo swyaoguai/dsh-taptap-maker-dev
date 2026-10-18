@@ -613,6 +613,14 @@ steps["got_token"] = captured["token"] is not None
 steps["got_list_url"] = captured["list_url"] is not None
 steps["url"] = pg.url
 TOKEN = captured["token"]
+# Without the JWT the history_list API 401s, so we could NEVER detect (let
+# alone download) the finished track — the run would just burn waitMs polling
+# nothing. Abort early with a clear reason instead (verified: auth on this
+# site is the token request header, not a cookie).
+if TOKEN is None:
+    result["steps"] = steps
+    result["error"] = "no auth token captured (login expired? re-login)"
+    return result
 # Dismiss a first-run consent dialog if it is covering the form.
 for sel in ["button:has-text('同意')", "button:has-text('我知道了')", "button:has-text('确定')",
             ".ant-modal button:has-text('同意')", ".ant-modal-close"]:
@@ -876,7 +884,18 @@ if new_track:
     steps["audio_url"] = audio
     os.makedirs(${pyStr(dl)}, exist_ok=True)
     safe = "".join(c for c in (new_track.get("title") or "bgm") if c.isalnum() or c in " -_()")
-    saved = os.path.join(${pyStr(dl)}, (safe.strip() or "bgm") + ".mp3")
+    base_name = safe.strip() or "bgm"
+    saved = os.path.join(${pyStr(dl)}, base_name + ".mp3")
+    # MiniMax titles repeat (same prompt → same title), and a bare open(...,"wb")
+    # SILENTLY OVERWROTE the previous download. Never overwrite: append (2), (3)…
+    if os.path.exists(saved):
+        n = 2
+        while True:
+            cand = os.path.join(${pyStr(dl)}, base_name + " (" + str(n) + ").mp3")
+            if not os.path.exists(cand):
+                saved = cand
+                break
+            n += 1
     # Fetch through the page so the CDN sees the same origin/headers.
     got = pg.evaluate("""async (u) => {
         try {
@@ -885,7 +904,10 @@ if new_track:
             const buf = await r.arrayBuffer();
             const by = new Uint8Array(buf);
             let s = '';
-            for (let i = 0; i < by.length; i++) s += String.fromCharCode(by[i]);
+            const CH = 8192;
+            for (let i = 0; i < by.length; i += CH) {
+                s += String.fromCharCode.apply(null, by.subarray(i, i + CH));
+            }
             return { b64: btoa(s), len: by.length };
         } catch (e) { return { error: String(e) }; }
     }""", audio)
@@ -903,7 +925,13 @@ return result`
   // drop to the 8 analytics-only ones and _token is absent), so the works list
   // and download button never appear.
   const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 240000, accountId })
-  if (!r.ok) return r
+  if (!r.ok) {
+    // runBrowser failures carry `err`, not `error`: without this mapping the
+    // rotation loop read `last.error === undefined`, called it "no file", and
+    // kept walking accounts for an environment problem (e.g. no python) that
+    // would fail identically on every one of them.
+    return { ok: false, error: r.err, steps: null, downloadDir: dl, account: accountId ?? null }
+  }
   return { ok: true, steps: r.steps, error: r.error, downloadDir: dl, account: accountId ?? null }
 }
 
@@ -925,6 +953,13 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
   const failures = []
   const skip = new Set()
   let last = null
+  // Rotation OFF: generate with the chosen account only. (The switch used to be
+  // stored but never read here, so "轮换关" still walked the whole pool.)
+  if (pool.autoRotate === false) {
+    const only = typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
+    const r = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: only, ignoreInstrumental })
+    return { ...r, rotated: false, tried: [r.account ?? only ?? null], failures }
+  }
   for (let i = 0; i < Math.min(maxAccounts, pool.accounts.length); i += 1) {
     const acct = pickBgmAccount(dshHome, { activeId: i === 0 ? accountId : undefined, exclude: [...skip] })
     if (acct === null) break
@@ -949,9 +984,11 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
     }
     skip.add(acct.id)
     failures.push({ account: acct.id, error: last.error ?? 'no file' })
-    // A structural failure (selectors) would repeat on every account.
+    // A structural failure (selectors, env, auth) would repeat on every account.
     const structural = typeof last.error === 'string'
-      && (last.error.includes('no style input') || last.error.includes('创作') || last.error.includes('token'))
+      && (last.error.includes('no style input') || last.error.includes('创作')
+        || last.error.includes('token') || last.error.includes('playwright')
+        || last.error.includes('could not fill prompt'))
     if (structural) break
   }
   return {
@@ -1017,7 +1054,15 @@ async function main() {
       return
     }
     if (sub === 'remove' || sub === 'rm') {
-      const id = args.id ?? args[3]
+      // args[3] was always undefined (args is keyed by flag name), so a bare
+      // `pool remove` fell through to profileDir('') = the DEFAULT profile and
+      // deleted the main MiniMax login. Require the id.
+      const id = args.id
+      if (typeof id !== 'string' || id.length === 0) {
+        process.stderr.write('usage: taptap-bgm pool remove --id <短名>（不能省略，否则会误删主账号登录态）\n')
+        process.exitCode = 2
+        return
+      }
       const next = readBgmPool(home).accounts.filter((a) => a.id !== id)
       writeBgmPool(home, { accounts: next })
       let removed = false
@@ -1031,8 +1076,14 @@ async function main() {
       return
     }
     if (sub === 'ban') {
-      touchBgmAccount(home, args.id ?? argv[2], { status: 'banned' })
-      process.stdout.write(`${JSON.stringify({ ok: true, banned: args.id ?? argv[2] }, null, 2)}\n`)
+      const id = args.id ?? (typeof argv[2] === 'string' && !argv[2].startsWith('--') ? argv[2] : undefined)
+      if (typeof id !== 'string' || id.length === 0) {
+        process.stderr.write('usage: taptap-bgm pool ban --id <短名>\n')
+        process.exitCode = 2
+        return
+      }
+      touchBgmAccount(home, id, { status: 'banned' })
+      process.stdout.write(`${JSON.stringify({ ok: true, banned: id }, null, 2)}\n`)
       return
     }
     if (sub === 'unban' || sub === '恢复') {

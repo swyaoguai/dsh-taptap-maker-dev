@@ -36,6 +36,9 @@ import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir } from './src/taptap-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
+import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration } from './src/taptap-audio-convert.mjs'
+import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
+import os from 'node:os'
 import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab, resolveDownloadDir } from './src/taptap-gpt.mjs'
 import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
@@ -383,6 +386,9 @@ function policyText(config, gptLaneOn = true) {
     '     - **导入项目**：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录> '
       + '--project <Maker项目目录> --kind bgm --to wav --latest`，自动转格式 + 写 `.meta`。',
     '     - 装完要**告诉用户装到了哪个文件**。' + '不要向用户长篇解释原理，只说清「需要登录账号，之后用它生成」。',
+    '     - **生成成功后**：告诉用户可点「输入框旁的 🎵 BGM 挂件」试听、拖波形裁剪、一键导入项目',
+    '       （新生成的 BGM 会让挂件亮红点）。用户说「听听 / 裁一下 BGM」时，引导其点挂件操作，',
+    '       挂件是纯本地零额度的；不要替用户假设他们已导入。',
     '     - 若网页结构变了拿不到文件，如实报告，提示手动下载后 import。',
     '  ③ 音频转格式 / 压缩（本地 ffmpeg，零成本、不联网）：',
     '     用户说「转成 wav / 压缩一下 / 统一音量 / 去掉静音 / 拼成循环 / 看看时长」时用：',
@@ -610,6 +616,55 @@ export function apply(ctx, config = {}) {
       req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')))
       req.on('error', () => resolve(''))
     })
+
+    // --- BGM workbench helpers (preview / trim / import widget) -----------
+    // All local + free: static file streaming and ffmpeg. The widget lives on
+    // the MAIN interface (usage), while account config stays on settings.
+    const BGM_AUDIO_EXTS = new Set(['.mp3', '.wav', '.ogg', '.oga', '.m4a', '.aac', '.flac', '.opus', '.webm'])
+    const BGM_MIME = {
+      '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg', '.oga': 'audio/ogg',
+      '.m4a': 'audio/mp4', '.aac': 'audio/aac', '.flac': 'audio/flac', '.opus': 'audio/ogg', '.webm': 'audio/webm',
+    }
+    const bgmDurationCache = new Map() // abs path -> { mtimeMs, duration }
+    const probeBgmDuration = (abs) => {
+      try {
+        const st = fs.statSync(abs)
+        const hit = bgmDurationCache.get(abs)
+        if (hit && hit.mtimeMs === st.mtimeMs) return hit.duration
+        const duration = ffprobeDuration(abs)
+        bgmDurationCache.set(abs, { mtimeMs: st.mtimeMs, duration })
+        return duration
+      } catch { return null }
+    }
+    /** Resolve a request-supplied file name to a file inside bgm-downloads. */
+    const safeBgmFile = (name) => {
+      if (typeof name !== 'string' || name.length === 0 || name.length > 200) return null
+      const base = path.basename(name) // kills ../ traversal
+      if (!BGM_AUDIO_EXTS.has(path.extname(base).toLowerCase())) return null
+      const abs = path.join(downloadDir(home), base)
+      try { if (!fs.statSync(abs).isFile()) return null } catch { return null }
+      return abs
+    }
+    /** The Maker project the host is currently sitting in (has assets/). */
+    const detectMakerProject = (explicit) => {
+      if (typeof explicit === 'string' && explicit.length > 0) {
+        const p = path.resolve(explicit)
+        if (fs.existsSync(path.join(p, 'assets'))) return p
+      }
+      const cwd = path.resolve(process.cwd())
+      return fs.existsSync(path.join(cwd, 'assets')) ? cwd : null
+    }
+    /** Never overwrite an existing asset: append (裁剪 2), (裁剪 3)… */
+    const dedupeAssetName = (dir, name) => {
+      if (!fs.existsSync(path.join(dir, name))) return name
+      const ext = path.extname(name)
+      const base = path.basename(name, ext)
+      for (let i = 2; i < 100; i += 1) {
+        const candidate = `${base} ${i}${ext}`
+        if (!fs.existsSync(path.join(dir, candidate))) return candidate
+      }
+      return `${base} ${Date.now()}${ext}`
+    }
     const handler = async (req, res) => {
       try {
         const url = new URL(req.url, 'http://localhost')
@@ -880,6 +935,128 @@ export function apply(ctx, config = {}) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
         }
+        // --- BGM workbench: preview / trim / import (main-interface widget) --
+        // GET bgm-library — everything in bgm-downloads + which names are
+        // already imported into the current project's assets/audio/bgm.
+        if (req.method === 'GET' && sub === 'bgm-library') {
+          const dir = downloadDir(home)
+          fs.mkdirSync(dir, { recursive: true })
+          const files = []
+          for (const f of fs.readdirSync(dir)) {
+            if (!BGM_AUDIO_EXTS.has(path.extname(f).toLowerCase())) continue
+            const abs = path.join(dir, f)
+            let st
+            try { st = fs.statSync(abs) } catch { continue }
+            if (!st.isFile()) continue
+            files.push({ name: f, bytes: st.size, mtimeMs: st.mtimeMs, duration: probeBgmDuration(abs) })
+          }
+          files.sort((a, b) => b.mtimeMs - a.mtimeMs)
+          const project = detectMakerProject()
+          let importedNames = []
+          if (project !== null) {
+            try {
+              importedNames = fs.readdirSync(path.join(project, 'assets', 'audio', 'bgm'))
+                .filter((f) => BGM_AUDIO_EXTS.has(path.extname(f).toLowerCase()))
+            } catch { importedNames = [] }
+          }
+          const importedSet = new Set(importedNames.map((f) => f.toLowerCase()))
+          for (const f of files) f.imported = importedSet.has(f.name.toLowerCase())
+          return sendJson(res, 200, { ok: true, dir, project, files })
+        }
+        // GET bgm-file?name=… — stream one file (Range-aware so <audio> can seek).
+        if (req.method === 'GET' && sub === 'bgm-file') {
+          const abs = safeBgmFile(url.searchParams.get('name') ?? '')
+          if (abs === null) return sendJson(res, 404, { ok: false, error: '文件不存在' })
+          const stat = fs.statSync(abs)
+          const type = BGM_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream'
+          const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''))
+          if (range !== null && (range[1] !== '' || range[2] !== '')) {
+            const from = range[1] === '' ? 0 : Number(range[1])
+            const to = range[2] === '' ? stat.size - 1 : Math.min(Number(range[2]), stat.size - 1)
+            if (!Number.isFinite(from) || !Number.isFinite(to) || from > to || from >= stat.size) {
+              res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` })
+              return res.end()
+            }
+            res.writeHead(206, {
+              'Content-Type': type,
+              'Content-Length': to - from + 1,
+              'Content-Range': `bytes ${from}-${to}/${stat.size}`,
+              'Accept-Ranges': 'bytes',
+              'Cache-Control': 'no-store',
+            })
+            return fs.createReadStream(abs, { start: from, end: to }).pipe(res)
+          }
+          res.writeHead(200, {
+            'Content-Type': type,
+            'Content-Length': stat.size,
+            'Accept-Ranges': 'bytes',
+            'Cache-Control': 'no-store',
+          })
+          return fs.createReadStream(abs).pipe(res)
+        }
+        // POST bgm-trim { name, start, end, fade } — cut [start,end) seconds,
+        // convert to wav, install into the project with a .meta. fade (default
+        // on) adds a 0.3s fade-in + 0.5s fade-out so the cut points don't click.
+        // POST bgm-import { name } — same pipeline without cutting (原样导入).
+        if (req.method === 'POST' && (sub === 'bgm-trim' || sub === 'bgm-import')) {
+          const body = await readBody(req)
+          let p = {}
+          try { p = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const abs = safeBgmFile(p.name ?? '')
+          if (abs === null) return sendJson(res, 404, { ok: false, error: '文件不存在或不是音频' })
+          const project = detectMakerProject(p.project)
+          if (project === null) {
+            return sendJson(res, 400, {
+              ok: false,
+              error: '没找到 Maker 项目：请先在 DSH 里打开含 assets/ 的项目工作区再导入',
+            })
+          }
+          const isTrim = sub === 'bgm-trim'
+          let start = 0
+          let end = null
+          if (isTrim) {
+            start = Number(p.start ?? 0)
+            end = Number(p.end ?? 0)
+            if (!Number.isFinite(start) || start < 0) start = 0
+            if (!Number.isFinite(end) || end <= start) {
+              return sendJson(res, 400, { ok: false, error: '裁剪区间无效（终点必须大于起点）' })
+            }
+            const full = probeBgmDuration(abs)
+            if (full !== null && end > full) end = full
+            if (end - start < 1) return sendJson(res, 400, { ok: false, error: '裁剪区间太短（至少 1 秒）' })
+          }
+          const wantFade = p.fade !== false
+          const base = path.basename(abs, path.extname(abs))
+          try {
+            // 1) cut + convert into a temp wav (no Maker credits; pure ffmpeg)
+            const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taptap-bgm-'))
+            const tmpOut = path.join(tmpDir, 'out.wav')
+            const conv = ffmpegConvert(abs, tmpOut, {
+              to: 'wav',
+              ...(isTrim && start > 0 ? { start } : {}),
+              ...(isTrim ? { end } : {}),
+              ...(wantFade ? { 'fade-in': 0.3, 'fade-out': 0.5 } : {}),
+            })
+            // 2) install into assets/audio/bgm/ with a unique name + .meta
+            const outName = dedupeAssetName(
+              path.join(project, 'assets', 'audio', 'bgm'),
+              `${base}${isTrim ? ' 裁剪' : ''}.wav`,
+            )
+            const inst = installAudioAsset(tmpOut, project, 'bgm', outName)
+            try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ }
+            return sendJson(res, 200, {
+              ok: true,
+              file: inst.target,
+              meta: inst.meta,
+              uuid: inst.uuid,
+              kb: Math.round(inst.bytes / 1024),
+              duration: conv.duration,
+              project,
+            })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
         // NOTE: audio-search / audio-sources were removed — the settings page no
         // longer offers audio search (that is usage, and lives in the chat).
         if (req.method === 'GET' && sub === 'audio') {
@@ -1122,7 +1299,7 @@ export function apply(ctx, config = {}) {
     scoped.commands.register({
       name: 'taptap-audio-convert',
       description: '用 ffmpeg 批量转换/压缩/响度归一游戏音频（本地离线，不耗额度）',
-      input: { hint: '--in <文件或目录> --out <目标> [--to wav|mp3|ogg] [--mono] [--rate 44100] [--normalize] [--trim] [--loop N]' },
+      input: { hint: '--in <文件或目录> --out <目标> [--to wav|mp3|ogg] [--start 12.5 --end 48] [--mono] [--rate 44100] [--normalize] [--trim] [--fade-in 0.3] [--fade-out 0.5] [--loop N] | --probe <文件>' },
       handler: async (invocation) => {
         const cli = path.join(PKG_DIR, 'src', 'taptap-audio-convert.mjs')
         const raw = (invocation?.rawInput ?? '').trim()
@@ -1137,6 +1314,8 @@ export function apply(ctx, config = {}) {
           `    /taptap-audio-convert --in big.wav --out small.mp3 --to mp3 --bitrate 64k --mono`,
           '  · 统一响度 + 去首尾静音 + 淡出：',
           `    /taptap-audio-convert --in sfx --out out --to wav --normalize --trim --fade-out 0.05`,
+          '  · 精确截一段（秒；裁完自动带淡入淡出，不会在切点爆音）：',
+          `    /taptap-audio-convert --in bgm.mp3 --out bgm_16s.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5`,
           '  · 短音拼成一段可循环 BGM：',
           `    /taptap-audio-convert --in one_shot.ogg --out bgm_loop.mp3 --loop 8`,
           '  · 查看时长：',
@@ -1144,6 +1323,37 @@ export function apply(ctx, config = {}) {
           '',
           '支持格式：wav / mp3 / ogg / opus / m4a / flac。需要 ffmpeg（winget install Gyan.FFmpeg）。',
         ].join('\n')
+
+        // --probe <file> → report duration + size. (The usage text has always
+        // advertised this, but the handler only ever looked for --in, so the
+        // documented example silently printed the usage block instead of
+        // probing. Fixed 2026-10-18.)
+        const probeM = /--probe\s+("[^"]+"|\S+)/.exec(raw)
+        if (probeM !== null) {
+          const target = path.resolve(probeM[1].replace(/^["']|["']$/g, ''))
+          if (!fs.existsSync(target)) {
+            return { kind: 'error', text: `找不到：${target}` }
+          }
+          const out = spawnSync(process.execPath, [cli, '--probe', target], { encoding: 'utf8', maxBuffer: 4 * 1024 * 1024 })
+          if (out.status !== 0 && !out.stdout) {
+            return { kind: 'error', text: `探测失败：${(out.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}` }
+          }
+          let info
+          try { info = JSON.parse(out.stdout) } catch {
+            return { kind: 'error', text: `探测失败（输出无法解析）：${(out.stdout || '').slice(0, 300)}` }
+          }
+          const secs = typeof info.durationSec === 'number' ? info.durationSec : null
+          return {
+            kind: 'success',
+            text: [
+              `${path.basename(target)}`,
+              `  时长：${secs === null ? '读不到（ffprobe 缺失或文件损坏）' : `${secs.toFixed(2)}s`}`,
+              `  体积：${Math.round((info.bytes ?? 0) / 1024)}KB`,
+              '',
+              '要截取片段：/taptap-audio-convert --in <文件> --out <输出> --start <秒> --end <秒>',
+            ].join('\n'),
+          }
+        }
 
         // --in given → actually run it, not just echo the command back.
         if (fm !== null) {
@@ -1180,6 +1390,13 @@ export function apply(ctx, config = {}) {
             if (fadeOut !== null) spawnArgs.push('--fade-out', fadeOut)
             const fadeIn = flagVal('fade-in')
             if (fadeIn !== null) spawnArgs.push('--fade-in', fadeIn)
+            // Precise cut (seconds). These were added to the CLI but never
+            // forwarded here, so a cut request silently produced the WHOLE file
+            // — the worst kind of bug (looks like success, wrong audio).
+            const startSec = flagVal('start')
+            if (startSec !== null) spawnArgs.push('--start', startSec)
+            const endSec = flagVal('end')
+            if (endSec !== null) spawnArgs.push('--end', endSec)
             const out = spawnSync(process.execPath, spawnArgs, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 })
             if (out.status !== 0 && !out.stdout) {
               return { kind: 'error', text: `转换失败：${(out.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}\n\n${usage}` }
@@ -1188,15 +1405,21 @@ export function apply(ctx, config = {}) {
             if (parsed.ok === false) {
               return { kind: 'error', text: `转换有失败项：\n${(parsed.files ?? []).filter((f) => f.error).map((f) => `  ${f.file}: ${f.error}`).join('\n')}` }
             }
+            // Say what was actually cut: without this the user cannot tell a
+            // real cut from a silently full-length copy.
+            const first = (parsed.files ?? [])[0] ?? {}
+            const cutLine = first.start != null || first.end != null
+              ? `裁剪：${first.start ?? 0}s → ${first.end ?? '结尾'}s（实际 ${first.duration ?? '?'}s）`
+              : ''
             return {
               kind: 'success',
               text: [
                 `已转换 ${parsed.converted} 个文件 → ${parsed.to}`,
+                cutLine,
                 `体积：${Math.round(parsed.bytesBefore / 1024)}KB → ${Math.round(parsed.bytesAfter / 1024)}KB`,
                 '',
-                ...(parsed.files ?? []).slice(0, 10).map((f) => `  ${f.file}  (${f.from}→${f.to}, ${f.kbBefore}KB→${f.kbAfter}KB)`),
+                ...(parsed.files ?? []).slice(0, 10).map((f) => `  ${f.file}  (${f.from}→${f.to}, ${f.kbBefore}KB→${f.kbAfter}KB${f.duration != null ? `, ${f.duration}s` : ''})`),
                 (parsed.files ?? []).length > 10 ? `  …还有 ${(parsed.files ?? []).length - 10} 个` : '',
-                to !== null ? '' : '',
               ].filter(Boolean).join('\n'),
             }
           } catch (error) {
@@ -1729,7 +1952,9 @@ export function apply(ctx, config = {}) {
             `已生成 BGM：${saved}`,
             `提示词：${prompt}`,
             '',
-            '装进项目：',
+            '试听 / 裁剪：点输入框旁的 🎵 BGM 挂件（会亮红点），可试听、拖波形选区间、裁剪后一键导入项目。',
+            '',
+            '或直接命令行导入：',
             `  /taptap-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
           ].join('\n'),
         }

@@ -200,12 +200,17 @@ export function searchSourceIndex(sourceId, cacheDir, tokens, limit = 6) {
  * Single-file, sequential use only.
  */
 export async function downloadSourceFile(item, destFile) {
+  let lastStatus = null
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const headers = { 'User-Agent': UA }
       if (item.referer) headers.Referer = item.referer
       const response = await fetch(item.url, { headers, signal: AbortSignal.timeout(60000) })
       if (response.status === 403 || response.status === 429) {
+        // Remember WHY we gave up — reporting a bare "unreachable" here hid a
+        // hard 403 (robots/bot wall) behind a message that looked like a
+        // network outage.
+        lastStatus = response.status
         await sleep(3000 * (attempt + 1))
         continue
       }
@@ -220,7 +225,7 @@ export async function downloadSourceFile(item, destFile) {
       await sleep(2000 * (attempt + 1))
     }
   }
-  return { ok: false, error: 'unreachable' }
+  return { ok: false, error: lastStatus !== null ? `HTTP ${lastStatus}` : 'unreachable' }
 }
 
 export { CATEGORY_PAGES }

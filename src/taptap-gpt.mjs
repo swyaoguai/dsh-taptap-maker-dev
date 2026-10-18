@@ -178,10 +178,24 @@ function releaseProfile(prof) {
  * Run a python playwright snippet with the GPT persistent profile.
  * The snippet is a callable body receiving (pg, b, result).
  */
-function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000, accountId } = {}) {
+function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000, accountId, sidecar } = {}) {
   const py = findPython()
   if (py === null) {
     return { ok: false, err: 'python+playwright not found. Install: pip install playwright && playwright install chromium' }
+  }
+  // Whatever the snippet managed to write before dying (e.g. the conversation
+  // URL) survives here — that is the whole point of the sidecar.
+  const readSidecar = () => {
+    if (typeof sidecar !== 'string' || sidecar.length === 0) return null
+    try {
+      const v = fs.readFileSync(sidecar, 'utf8').trim()
+      return v.length > 0 ? v : null
+    } catch { return null }
+  }
+  const dropSidecar = () => {
+    if (typeof sidecar === 'string' && sidecar.length > 0) {
+      try { fs.rmSync(sidecar, { force: true }) } catch { /* ignore */ }
+    }
   }
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
   fs.mkdirSync(prof, { recursive: true })
@@ -230,7 +244,9 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       } catch { /* best effort */ }
       releaseProfile(prof)
       fs.rmSync(tmp, { force: true })
-      resolve({ ok: false, err: `timed out after ${Math.round(timeoutMs / 1000)}s` })
+      const convUrl = readSidecar()
+      dropSidecar()
+      resolve({ ok: false, err: `timed out after ${Math.round(timeoutMs / 1000)}s`, convUrl })
     }, timeoutMs)
     ch.stdout.on('data', (d) => { out += d.toString() })
     ch.stderr.on('data', (d) => { out += d.toString() })
@@ -248,13 +264,19 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       fs.rmSync(tmp, { force: true })
       const marker = out.indexOf('__RESULT__')
       if (marker < 0) {
-        resolve({ ok: false, err: out.trim().split('\n').slice(-3).join(' | ') || 'no result' })
+        const convUrl = readSidecar()
+        dropSidecar()
+        resolve({ ok: false, err: out.trim().split('\n').slice(-3).join(' | ') || 'no result', convUrl })
         return
       }
       try {
-        resolve({ ok: true, ...JSON.parse(out.slice(marker + '__RESULT__'.length).split('\n')[0]) })
+        const parsed = JSON.parse(out.slice(marker + '__RESULT__'.length).split('\n')[0])
+        dropSidecar()
+        resolve({ ok: true, ...parsed })
       } catch {
-        resolve({ ok: false, err: 'unparseable result: ' + out.slice(marker, marker + 300) })
+        const convUrl = readSidecar()
+        dropSidecar()
+        resolve({ ok: false, err: 'unparseable result: ' + out.slice(marker, marker + 300), convUrl })
       }
     })
   })
@@ -495,11 +517,22 @@ export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, do
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const dest = out || path.join(dl, `gpt-${stamp}.png`)
   fs.mkdirSync(path.dirname(dest), { recursive: true })
+  // Sidecar: the snippet drops the conversation URL here the moment it exists.
+  // A timeout kills python (SIGKILL) before it can print its result, so without
+  // this the most common failure — "still generating when we gave up" — lost the
+  // URL and the only recovery left was regenerating (burning a generation).
+  const sidecar = path.join(os.tmpdir(), `gptconv-${process.pid}-${Date.now()}.txt`)
 
   const snippet = `import time, os
 steps = {}
 DL = ${pyStr(dl)}
 DEST = ${pyStr(dest)}
+SIDECAR = ${pyStr(sidecar)}
+def _remember_conv(u):
+    try:
+        open(SIDECAR, "w", encoding="utf-8").write(u or "")
+    except Exception:
+        pass
 pg.goto(${pyStr(GPT_URL)}, timeout=60000)
 # Wait for the composer instead of sleeping a fixed 3.5s: on a cold profile the
 # page can take 10-20s (Cloudflare + app boot), and a fixed sleep made us report
@@ -741,6 +774,7 @@ for _ in range(40):
         break
 steps["conv_url"] = conv_url
 result["conv_url"] = conv_url
+_remember_conv(conv_url)
 # Wait for generation. Signals:
 #  (a) a NEW <img> (not in the pre-submit snapshot) that is large enough,
 #  (b) the page is no longer "generating",
@@ -766,6 +800,7 @@ while time.time() < hard_deadline:
     if u is not None and "local-chatgpt" not in u:
         conv_url = u
         result["conv_url"] = u
+        _remember_conv(u)
     new_img = pg.evaluate("""(before) => {
         const out = [];
         document.querySelectorAll('img').forEach(i => {
@@ -863,8 +898,33 @@ result["steps"] = steps
 result["saved"] = DEST
 return result`
 
-  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000, accountId })
-  if (!r.ok) return { ok: false, error: r.err, account: accountId ?? null }
+  // The python side keeps waiting past the soft deadline while the page still
+  // says "generating" (hard cap = soft + 300s). The node watchdog must therefore
+  // sit ABOVE that cap — at waitMs+120s it always killed a run that python was
+  // still productively working on, throwing away a nearly-finished image.
+  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 360000, accountId, sidecar })
+  if (!r.ok) {
+    const lostUrl = typeof r.convUrl === 'string' && r.convUrl.length > 0 ? r.convUrl : null
+    if (lostUrl !== null) {
+      // Keep the conversation so the next call can grab the finished image
+      // instead of generating a second one.
+      writeGptPending(dshHome, {
+        url: lostUrl,
+        prompt,
+        accountId: accountId ?? '',
+        at: Date.now(),
+        state: 'generating',
+      })
+      return {
+        ok: false,
+        error: r.err,
+        account: accountId ?? null,
+        pendingUrl: lostUrl,
+        hint: `这次没等到图（${r.err}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：taptap-gpt grab --url "${lostUrl}"`,
+      }
+    }
+    return { ok: false, error: r.err, account: accountId ?? null }
+  }
   const steps = r.steps ?? {}
   touchGptAccount(dshHome, accountId ?? '', { lastUsedAt: Date.now() })
   // Record the conversation as soon as we know it: if this run ends up timing
@@ -980,9 +1040,13 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size, dir, projectDir })
     return { ...r, rotated: false, tried: [r.account] }
   }
-  if (pool.autoRotate === false && accountId) {
-    const r = await gen(dshHome, prompt, { accountId, waitMs, out, downscale, size, dir, projectDir })
-    return { ...r, rotated: false, tried: [accountId] }
+  // Rotation OFF means "use this account and stop" — the settings switch has to
+  // actually change behaviour, otherwise a user who turned it off (e.g. to keep
+  // one account's quota intact) still silently gets walked through the pool.
+  if (pool.autoRotate === false) {
+    const only = typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
+    const r = await gen(dshHome, prompt, { accountId: only, waitMs, out, downscale, size, dir, projectDir })
+    return { ...r, rotated: false, tried: [only ?? null] }
   }
   const tried = []
   const failures = []
@@ -1325,6 +1389,14 @@ async function main() {
     }
     if (sub === 'remove' || sub === 'rm') {
       const id = args.id ?? args._?.[1]
+      // NEVER run this without an id: gptAccountProfileDir('') resolves to the
+      // DEFAULT profile, so `pool remove` with no id used to delete the user's
+      // main ChatGPT login (and report ok:true).
+      if (typeof id !== 'string' || id.length === 0) {
+        process.stderr.write('usage: taptap-gpt pool remove --id <短名>（不能省略，否则会误删主账号登录态）\n')
+        process.exitCode = 2
+        return
+      }
       const pool = readGptPool(home)
       const next = pool.accounts.filter((a) => a.id !== id)
       writeGptPool(home, { accounts: next })
@@ -1337,6 +1409,11 @@ async function main() {
     }
     if (sub === 'ban') {
       const id = args.id ?? args._?.[1]
+      if (typeof id !== 'string' || id.length === 0) {
+        process.stderr.write('usage: taptap-gpt pool ban --id <短名>\n')
+        process.exitCode = 2
+        return
+      }
       touchGptAccount(home, id, { status: 'banned' })
       process.stdout.write(`${JSON.stringify({ ok: true, banned: id }, null, 2)}\n`)
       return

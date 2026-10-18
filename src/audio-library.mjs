@@ -128,9 +128,17 @@ export async function ensureLibrary(cacheDir, { force = false, packs = PACKS, on
   fs.mkdirSync(cacheDir, { recursive: true })
   const indexFile = path.join(cacheDir, 'index.json')
   const manifestFile = path.join(cacheDir, '.download-manifest.json')
-  const manifest = fs.existsSync(manifestFile) && !force
-    ? JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
-    : { packs: {} }
+  // A half-written / hand-edited manifest must not brick the whole library:
+  // fall back to "nothing downloaded yet" and rebuild it.
+  let manifest = { packs: {} }
+  if (fs.existsSync(manifestFile) && !force) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(manifestFile, 'utf8'))
+      if (parsed && typeof parsed === 'object' && parsed.packs && typeof parsed.packs === 'object') {
+        manifest = parsed
+      }
+    } catch { /* rebuild below */ }
+  }
   const errors = []
   const index = []
 
