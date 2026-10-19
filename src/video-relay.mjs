@@ -49,18 +49,20 @@ export class RelayError extends Error {
 export const RELAY_PROTOCOLS = ['openai', 'minimax', 'generic']
 
 /**
- * `openai` 协议 = **星盘AI 式 /videos 协议**（也是目前最通用的一种）。
+ * `openai` 协议 = **通用的「OpenAI 兼容 /videos」协议**（最常见的一种中转站形式）。
  *
- * 与 OpenAI 官方视频接口的差别（以星盘接入指南为准）：
- *   - 型号自带清晰度档位，**不能**再用 `resolution` / `size` 升降档；
- *     所以默认不再发送 size，改由型号决定。
- *   - 一张图 / 首尾帧走 `metadata.mode` + `first_frame_url` / `last_frame_url`
- *     （或 `image_urls`），不是 `input_reference`。
- *   - 画幅在 `metadata.ratio`（`16:9` / `9:16` / …），且**首尾帧模式下画幅
- *     由素材决定**，填了 ratio 也可能不按它裁。
- *   - 素材必须有**公网可访问地址**：本机图片要先 `POST /reference-assets`
- *     上传换 `url`。data URI 这条路在该协议下不保证可用。
- *   - 生产环境要带 `Idempotency-Key`（24 小时内防重复扣费）。
+ * 下面的代码有意**只做最小共识**：提交/查询/下载的 URL 形状、鉴权头、状态值。
+ * **不内置任何特定中转站的字段名、限制、或能力表** —— 那些各家不一样，
+ * 强行内置只会让其他家以为「这就是标准」，出了问题很难定位。
+ *
+ * 中转站的具体行为差异：
+ *   - 字段：有的用 `input_reference`（OpenAI 官方风格），有的用
+ *     `metadata.mode` + `first_frame_url`（更常见的兼容形态）。
+ *     由用户通过 generic 协议 / extraBody 自配；本模块按通用形状发请求。
+ *   - 素材：有的要公网 URL（先 POST /reference-assets 换），有的直接吃 data URI。
+ *     用户在设置页填 `assetUploadPath`，留空则拒绝本地图片、要求传公网 URL。
+ *   - 模型能力（时长 / 画幅 / 是否支持首尾帧）：每家不同，无法穷举。
+ *     不拦 —— 提交错误时如实把 400 信息传回去，让用户自己看清。
  */
 export const RELAY_DEFAULTS = {
   enabled: false,
@@ -72,6 +74,8 @@ export const RELAY_DEFAULTS = {
   size: '',
   seconds: 4,
   ratio: '16:9',
+  // 参考素材字段形态：metadata（默认，多数 /videos 兼容站）或 input_reference（OpenAI 官方风格）
+  referenceStyle: 'metadata',
   // 参考素材上传路径：每个中转站都不一样，**不预设默认值**。
   // 没填时直接拒收本地图片、要求用公网 URL —— 让用户主动去查自家文档。
   assetUploadPath: '',
@@ -104,7 +108,8 @@ const list = (v, fb) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string
 /**
  * 把 Base URL 规整成「协议根」。
  *
- * ★ 必须**保留** `/v1`。星盘这类中转站的接口就是 `https://host/v1/videos`，
+ * ★ 必须**保留** `/v1`。常见中转站（含 OpenAI 兼容形态）的接口就是
+ *   `https://host/v1/videos`，剥掉 `/v1` 就会 404。
  * 早期版本把 `/v1` 剥掉当根，结果请求打到 `https://host/videos` → 404，
  * 而报错只说「not found」，很难看出是这里少了一层。
  * 只剥「用户粘贴时多带的整条视频路径」，不动 `/v1`。
@@ -136,6 +141,7 @@ export function normalizeRelayConfig(raw = {}) {
     // 画幅：只接受 16:9 这类「数字:数字」，用户写成全角冒号 / 1920x1080 时纠正，
     // 因为平台会直接 400（指南第 3 节明确要求英文冒号）。
     ratio: normalizeRatio(ratio),
+    referenceStyle: ['metadata', 'input_reference'].includes(raw.referenceStyle) ? raw.referenceStyle : RELAY_DEFAULTS.referenceStyle,
     assetUploadPath: str(raw.assetUploadPath, RELAY_DEFAULTS.assetUploadPath),
     submitMethod: str(raw.submitMethod, RELAY_DEFAULTS.submitMethod).toUpperCase(),
     submitPath: str(raw.submitPath, RELAY_DEFAULTS.submitPath),
@@ -184,56 +190,21 @@ export function normalizeRatio(value) {
 }
 
 /**
- * 星盘AI 已知型号的能力表（照抄接入指南第 2、3 节）。
+ * 不内置任何中转站的型号能力表。
  *
- * 有了它，「时长超范围」「不支持首尾帧」「该型号没有 21:9」这类事能在
- * 提交**之前**用一句人话说清，而不是让用户拿一个 400 自己猜。
- * 不在表里的型号按最宽松处理（不拦），因为中转站可以自己加型号。
+ * 为什么：中转站可以自加型号、把模型名改成任何东西；把某一家的型号限制
+ * 写死下来，其他家会误用，用户也会以为这是协议标准，一旦自己家的型号
+ * 行为不同，定位就难。
+ *
+ * 用户该怎么做：
+ *   - 知道自家型号限制的话，直接用「时长」「画幅」字段控制；
+ *     超时 / 超画幅时平台会返回 400，错误原文如实回显。
+ *   - 不确定的话：先按中转站默认时长跑一条，看返回报错再调。
+ *   - 想知道有哪些型号：设置页点「获取模型」走中转站自己的 /models。
  */
-export const RELAY_MODEL_CAPS = {
-  'minimax-h3-768p-per-second': { label: 'H3 768P 按秒', seconds: [4, 15], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', 'auto'], frames: true, pricePerSecond: 0.15 },
-  'minimax-h3-2k-per-second': { label: 'H3 2K 按秒', seconds: [4, 15], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', 'auto'], frames: true, pricePerSecond: 0.2 },
-  'seedance-2.5-vip-480p': { label: 'SD 2.5 稳定 480P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 0.55 },
-  'seedance-2.5-vip-720p': { label: 'SD 2.5 稳定 720P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 1.18 },
-  'seedance-2.5-vip-1080p': { label: 'SD 2.5 稳定 1080P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1'], frames: true, pricePerSecond: 4.38 },
-  'seedance-2.5-discount-480p': { label: 'SD 2.5 折扣 480P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 0.44 },
-  'seedance-2.5-discount-720p': { label: 'SD 2.5 折扣 720P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 0.66 },
-  'seedance-2.5-special-480p': { label: 'SD 2.5 特殊 480P', seconds: [4, 30], ratios: ['16:9', '9:16'], frames: true, pricePerSecond: 0.63 },
-  'seedance-2.5-special-720p': { label: 'SD 2.5 特殊 720P', seconds: [4, 30], ratios: ['16:9', '9:16'], frames: true, pricePerSecond: 0.88 },
-  'wan-3.0': { label: 'Wan 3.0', seconds: [5, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4'], frames: false, pricePerSecond: 0.45 },
-  'wan-3.0-prime': { label: 'Wan 3.0 Prime', seconds: [5, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4'], frames: false, pricePerSecond: 0.45 },
-}
 
-export const relayModelCaps = (model) => RELAY_MODEL_CAPS[String(model ?? '').trim()] ?? null
-
-/** 提交前把「已知型号的限制」变成一条人能读的提示；没问题返回 undefined。 */
-export function relayModelWarning(model, { seconds, ratio, hasLastFrame } = {}) {
-  const caps = relayModelCaps(model)
-  if (caps === null) return undefined
-  const problems = []
-  if (Number.isFinite(seconds)) {
-    const [lo, hi] = caps.seconds
-    if (seconds < lo || seconds > hi) problems.push(`时长 ${seconds}s 超出 ${lo}–${hi}s`)
-  }
-  if (ratio && ratio !== 'auto' && !caps.ratios.includes(ratio)) {
-    problems.push(`画幅 ${ratio} 不在该型号支持的 ${caps.ratios.join(' / ')} 里`)
-  }
-  if (hasLastFrame && caps.frames === false) problems.push(`${caps.label} 不支持首尾帧`)
-  return problems.length > 0 ? problems.join('；') : undefined
-}
-
-/** 转发一个 GET /models 之外的能力查询：给设置页「型号」下拉用。 */
-export const relayKnownModels = () =>
-  Object.entries(RELAY_MODEL_CAPS).map(([id, caps]) => ({
-    id,
-    label: caps.label,
-    seconds: caps.seconds,
-    ratios: caps.ratios,
-    frames: caps.frames,
-    pricePerSecond: caps.pricePerSecond,
-  }))
-
-/** 中转站是否「配好了」：要不要启用 + 四要素齐不齐。 */export function relayReady(cfg) {
+/** 中转站是否「配好了」：要不要启用 + 四要素齐不齐。 */
+export function relayReady(cfg) {
   if (!cfg || cfg.enabled !== true) return false
   if (!cfg.baseURL || !cfg.apiKey) return false
   if (cfg.protocol === 'generic') return Boolean(cfg.submitPath && cfg.model)
@@ -311,21 +282,21 @@ async function request(url, init, timeoutMs, what) {
   return json
 }
 
-/* ───────────────────────── openai 协议（星盘式 /videos） ────────────────── */
+/* ───────────────────────── openai 协议（通用 /videos 形状） ────────────────── */
 
 /**
  * 把本地图片上传成**公网可访问的 url**。
  *
- * 为什么必须上传：星盘协议要求素材是 URL，且明确不接受本机路径 / Base64。
+ * 各中转站的上传端点都不一样，路径放在 `cfg.assetUploadPath`。
+ * 没填时直接拒收本地图片 —— 让用户去查自家文档后再启用，而不是悄悄给个错的。
  * 上传方式是「文件原始内容 + Content-Type」，不是 JSON、不是 multipart。
- * 返回的 `url` 24 小时后过期，所以每一步都现传，不缓存。
+ * 返回的 `url` 通常几小时就过期（各中转站策略不同），所以每一步都现传，不缓存。
  */
 export async function relayUploadAsset(cfg, filePath, mime) {
-  // ★ 星盘的 reference-assets 挂在**主机根**上，不在 /v1 下面。
-  // 所以这里从 baseURL 里取 origin 再拼，不能直接 joinUrl(baseURL, path)。
   const uploadPath = cfg.assetUploadPath
   // 空路径 = 不上传：要求用户传公网 URL，或者在设置页填一个自己的上传端点。
-  if (uploadPath === '') throw new RelayError('没有设置素材上传路径：本地图片必须先上传换 url。在「中转站」卡的「高级选项」里填一个上传端点（如 /reference-assets），或者直接传公网 URL。')
+  if (uploadPath === '') throw new RelayError('没有设置素材上传路径：本地图片必须先上传换 url。在「中转站」卡的「高级选项」里填一个上传端点，或者直接传公网 URL。')
+  // 上传端点常挂在主机根上（不带 /v1）。如果是绝对 URL 就用 URL 本身。
   const url = /^https?:\/\//i.test(uploadPath)
     ? uploadPath
     : `${originOf(cfg.baseURL)}${uploadPath.startsWith('/') ? '' : '/'}${uploadPath}`
@@ -359,41 +330,37 @@ export async function relayUploadAsset(cfg, filePath, mime) {
 }
 
 /**
- * 决定 `metadata.mode` 与素材字段。
+ * 参考素材字段的两种常见形态（由 `cfg.referenceStyle` 选，**不预设某一家**）：
  *
- * 指南第 3 节的映射表（H3）：
- *   纯文字     → text_to_video（不带素材）
- *   一张图     → frames + first_frame_url
- *   首尾帧     → frames + first_frame_url + last_frame_url
- *   普通参考   → omni_reference + image_urls
+ *   - `metadata`（默认）：`metadata.mode` + `metadata.first_frame_url` /
+ *     `metadata.last_frame_url`。很多 /videos 兼容中转站用这种。
+ *   - `input_reference`：`metadata.ratio` + 顶层 `input_reference` 数组
+ *     （OpenAI 官方风格）。
  *
- * 本插件的输入**恰好就这两种**（首帧 / 首尾帧），所以默认走 frames；
- * 用户显式指定 omni_reference 且有两张图时按普通参考处理。
+ * 两种都不是「某家的私有格式」，而是目前能见到的两种公共约定；
+ * 选错了会得到 400，改一下开关即可。要更细的字段映射，用 `extraBody`。
  */
-export function buildModeFields({ mode, firstFrameUrl, lastFrameUrl, ratio }) {
-  const metadata = { ratio: ratio || '16:9' }
-  if (mode === 'omni_reference') {
-    const urls = [firstFrameUrl, lastFrameUrl].filter(Boolean)
-    if (urls.length === 0) {
-      metadata.mode = 'text_to_video'
-    } else {
-      metadata.mode = 'omni_reference'
-      metadata.image_urls = urls
-    }
-    return metadata
+export function buildReferenceFields({ firstFrameUrl, lastFrameUrl, ratio, style = 'metadata' }) {
+  const meta = { ratio: ratio || '16:9' }
+  const out = { metadata: meta }
+
+  if (style === 'input_reference') {
+    const refs = []
+    if (firstFrameUrl) refs.push({ type: 'first_frame', url: firstFrameUrl })
+    if (lastFrameUrl) refs.push({ type: 'last_frame', url: lastFrameUrl })
+    if (refs.length > 0) out.input_reference = refs
+    return out
   }
+
+  // metadata 风格
   if (!firstFrameUrl && !lastFrameUrl) {
-    metadata.mode = 'text_to_video'
-    return metadata
+    meta.mode = 'text_to_video'
+    return out
   }
-  if (!firstFrameUrl && lastFrameUrl) {
-    // H3 不允许「只给尾帧」（指南第 3 节）。在本地就说清楚，不要发给平台换一个 400。
-    throw new RelayError('首尾帧模式必须给首帧：H3 不支持只提供尾帧')
-  }
-  metadata.mode = 'frames'
-  metadata.first_frame_url = firstFrameUrl
-  if (lastFrameUrl) metadata.last_frame_url = lastFrameUrl
-  return metadata
+  meta.mode = 'frames'
+  if (firstFrameUrl) meta.first_frame_url = firstFrameUrl
+  if (lastFrameUrl) meta.last_frame_url = lastFrameUrl
+  return out
 }
 
 /** 生成一个幂等键（同一任务重试必须复用同一个值，否则会重复扣费）。 */
@@ -424,11 +391,11 @@ async function submitOpenAI(cfg, input) {
     model: cfg.model,
     prompt: input.prompt,
     seconds,
-    metadata: buildModeFields({
-      mode: input.relayMode ?? 'frames',
+    ...buildReferenceFields({
       firstFrameUrl,
       lastFrameUrl,
       ratio: input.ratio ?? cfg.ratio,
+      style: input.referenceStyle ?? cfg.referenceStyle,
     }),
   }
   // 型号决定清晰度：只有用户显式填了 size 才发，避免把高档型号降级。
@@ -482,10 +449,8 @@ async function queryOpenAI(cfg, taskId) {
 }
 
 /**
- * 下载视频。星盘的内容端点**需要鉴权头**，不能把地址直接交给播放器。
- *
- * 指南第 6 节要求严格校验：只有 HTTP 200 且 Content-Type 是 video/* 才算成片。
- * 这里按字节头再兜一层（有的服务器给 application/octet-stream）。
+ * 下载视频。**内容端点要鉴权头**，不能把地址直接交给播放器。
+ * 必须由插件自己带着 Key 下回来。
  */
 async function downloadOpenAI(cfg, taskId, query, timeoutMs) {
   const headers = headersFor(cfg)

@@ -50,18 +50,21 @@ description: 用视频模型（首尾帧）生成动作，再抽帧 + 抠图做�
 - **自选本地视频**：零额度兜底，用 ffprobe 判是不是视频（不看扩展名）。
 
 
-### 星盘式 /videos 协议的几个硬约束（接中转站时最容易错）
+### 接中转站时最容易错的几处
 
-- **Base URL 要带 `/v1`**（`https://xingpan.site/v1`）。只有素材上传 `/reference-assets` 在主机根上、不带 `/v1`。
-- **本机图片必须先上传换 url**：data URI / 本机路径 / Base64 都不保证被接受。
-- **首帧 / 首尾帧走 `metadata.mode=frames` + `first_frame_url` / `last_frame_url`**，
-  不要顺便再发 `image_urls`（首尾帧与普通素材数组互斥）。
-- **H3 不能只给尾帧**；Wan 根本不支持首尾帧。这些在本地就该拦住。
-- **清晰度由型号决定**，`size` / `resolution` 不能拿来升降档。
-- **首尾帧模式下画幅由素材决定**，`ratio` 填了也不保证强制裁切；
-  要固定构图先把输入图裁成目标比例。
-- **`delivering` 不是完成**：主 status 仍是 in_progress/99%，要等 `delivery_status=ready`。
-- 下载要带 Bearer，且只有 HTTP 200 + video/* 才算成片；成片 24 小时过期。
+插件**不内置**任何中转站的型号名 / 价格 / 能力表 —— 各家不一样，写死一家会误导其他家。
+型号用设置页「获取模型」从你自己的 `/models` 拉，或手填；超范围时平台 400 原文直接回显。
+
+协议层只做公共约定：
+
+- **Base URL 保留 `/v1`**（常见是 `https://host/v1/videos`）；上传端点常挂在主机根上。
+- **本机图片要先上传换公网 url**：上传路径由用户填；留空时插件会拒绝本地图片、要求直接传公网 URL。
+- **参考素材字段有两种公共形态**，选错了会 400，换一个即可：
+  `metadata.mode` + `first_frame_url` / `last_frame_url`，或 `input_reference` 数组。
+- **清晰度**：默认不下发 `size`，很多型号自带档位。
+- **`delivering` 不是完成**：要等 `delivery_status=ready`。
+- 下载要带 Bearer，且只有 200 + video/* 才算成片；成片通常会过期，尽快下载。
+- 错误原文（含 400 的字段级提示）会完整回显 —— 据此调整，不要盲试。
 
 ## 二、没有视频额度时的替代做法（按推荐顺序）
 

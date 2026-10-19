@@ -72,24 +72,23 @@
 `auto` 的优先级是 **中转站 > MiniMax > 报错** —— 你主动配了中转站，多半就是想用它。
 也可以按作业显式指定：`/taptap-video backend relay|minimax|local`。
 
-中转站的「OpenAI 兼容」协议 = **星盘AI 那套 `/videos`**（[接入指南](https://xingpan.site)），已经逐条对齐：
+中转站的「OpenAI 兼容」协议只实现**公共约定**，不绑定任何一家：
 
-| 指南要求 | 实现 |
+| 项 | 实现 |
 |---|---|
-| Base URL 带 `/v1` | 保留 `/v1`，只剥掉用户多粘的 `/videos`、`/videos/{id}` |
-| 素材必须是公网 URL | 本机图片先 `POST /reference-assets`（**主机根，不带 /v1**）上传换 `url`，原始字节 + 真实 Content-Type |
-| `metadata.mode` 选模式 | `frames`（首帧 / 首尾帧）/ `omni_reference`（多图参考）/ `text_to_video` 自动判定 |
-| 首尾帧用 `first_frame_url` / `last_frame_url` | 用这两个字段，**不混发** `image_urls` |
-| H3 不能只给尾帧 | 本地就拦下，不发出去换 400 |
-| 清晰度由型号决定 | 默认不下发 `size`，避免把高档型号降级 |
-| `metadata.ratio` 用英文冒号 | 全角 `16：9`、`1920x1080`、`9/16` 都会自动纠正 |
-| 生产必须带 `Idempotency-Key` | 每个任务生成 UUID，24 小时防重复扣费 |
-| `delivering` 不是完成 | `completed` + `delivery_status=ready` 才算完成，否则继续等 |
-| 下载要鉴权且是视频 | 带 Bearer 下 `/content`，再按文件头校验容器；JSON/HTML 响应不会被当成片 |
-| 24 小时过期 | `download_expired` 直接报「需要重新生成」，不空转轮询 |
+| Base URL | 保留 `/v1`（只剥掉用户多粘的 `/videos`、`/videos/{id}`） |
+| 素材 | 本机图片先上传换公网 `url`；上传路径由你自己填（留空则要求直接传公网 URL） |
+| 参考素材字段 | 可选两种形态：`metadata.mode` + `first_frame_url` / `last_frame_url`，或 `input_reference` 数组 |
+| 画幅 | `metadata.ratio`；全角 `16：9`、`1920x1080`、`9/16` 会自动纠正成 `16:9` |
+| 清晰度 | 默认不下发 `size`（很多型号自带清晰度档位） |
+| 幂等 | 每个任务带 `Idempotency-Key`（UUID） |
+| 状态 | `completed` + `delivery_status=ready` 才算完成；`delivering` 继续等 |
+| 下载 | 带 Bearer 下 `/content`，按文件头校验容器；JSON/HTML 不会被当成片 |
+| 过期 | `download_expired` 直接报「需要重新生成」，不空转轮询 |
 
-型号限制也内置了（H3 4–15s、Wan 5–30s 且不支持首尾帧、SD 1080P 没有 21:9…），
-设置页选型号时就会提示并自动把时长/画幅拉到合法值。
+**不内置**任何型号名、价格、能力表（时长范围 / 画幅支持 / 是否支持首尾帧）——
+各家中转站不一样，写死一家会误导其他家。型号列表用设置页「获取模型」从你自己的
+`/models` 拉，或者手填；超范围时平台返回的 400 原文会直接回显。
 
 各家协议不一样时切到「自定义」，填提交/查询路径与响应字段路径即可 ——
 报错会明确说「哪个字段没取到」，不会只给一句「失败」。

@@ -789,7 +789,7 @@ export function apply(ctx, config = {}) {
           let parsed
           try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
           const patch = {}
-          for (const key of ['protocol', 'baseURL', 'apiKey', 'model', 'size', 'ratio', 'mode', 'assetUploadPath', 'submitMethod', 'submitPath', 'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader', 'authPrefix', 'extraQuery', 'extraBody']) {
+          for (const key of ['protocol', 'baseURL', 'apiKey', 'model', 'size', 'ratio', 'referenceStyle', 'assetUploadPath', 'submitMethod', 'submitPath', 'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader', 'authPrefix', 'extraQuery', 'extraBody']) {
             if (typeof parsed[key] === 'string') patch[key] = parsed[key]
           }
           if (typeof parsed.enabled === 'boolean') patch.enabled = parsed.enabled

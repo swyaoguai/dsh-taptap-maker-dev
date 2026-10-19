@@ -35,7 +35,7 @@ import {
   modelsSupportingLastFrame, normalizeDuration, normalizeResolution,
   protocolOf, queryVideo, retrieveFile, submitVideo,
 } from './minimax-video.mjs'
-import { relayDownload, relayQuery, relaySubmit, relayReady, normalizeRatio, relayModelWarning } from './video-relay.mjs'
+import { relayDownload, relayQuery, relaySubmit, relayReady, normalizeRatio } from './video-relay.mjs'
 import {
   MediaError, checkFfmpeg, encodePng, extractFramesAt, mimeOf,
   planSampleTimes, probeDuration, probeFps, probeSize, runFfmpeg, toJpegDataUri,
@@ -55,8 +55,8 @@ export const DEFAULT_SETTINGS = {
   promptOptimizer: true,
   // 抽帧
   frameCount: 12,
-  // 中转站专用：星盘协议要显式给 mode 与 ratio；官方 MiniMax 后端忽略这两个字段。
-  relayMode: 'frames',   // frames（首帧/首尾帧）| omni_reference（普通多图参考）
+  // 中转站专用的画幅设置（默认 16:9，自动纠正全角冒号 / 像素分辨率）。
+  // 不再内置 mode/能力表 —— 那些由各家协议自己定义。
   relayRatio: '16:9',    // 16:9 | 9:16 | 1:1 | 4:3 | 3:4 | 21:9 | auto
   arrange: 'uniform',   // uniform | first-last | loop
   longEdge: 768,        // 抽帧后长边；抠像在 JS 里跑，768 已经足够给 256 的格子
@@ -152,7 +152,6 @@ function normalizeSettings(raw, fallbackModel) {
   s.promptOptimizer = raw.promptOptimizer !== false
   s.frameCount = clamp(raw.frameCount, s.frameCount, 1, 64)
   s.arrange = ['uniform', 'first-last', 'loop'].includes(raw.arrange) ? raw.arrange : s.arrange
-  s.relayMode = ['frames', 'omni_reference'].includes(raw.relayMode) ? raw.relayMode : 'frames'
   s.relayRatio = normalizeRatio(raw.relayRatio ?? s.relayRatio)
   s.longEdge = clamp(raw.longEdge, s.longEdge, 128, 2048)
   s.cropInset = Math.min(0.2, Math.max(0, num(raw.cropInset, 0)))
@@ -284,16 +283,8 @@ export async function submitJobVideo(home, id, config) {
       throw new Error(`${job.settings.model} 不支持尾帧，请换 ${modelsSupportingLastFrame().join(' / ')} 或清掉尾帧`)
     }
   }
-  if (backend === 'relay') {
-    // 中转站若是我们认识的型号（星盘那批），把「时长 / 画幅 / 首尾帧」三条限制
-    // 在提交前查一遍。查不到型号就放行 —— 中转站可以自己加型号。
-    const warning = relayModelWarning(config.relay.model, {
-      seconds: job.settings.duration,
-      ratio: job.settings.relayRatio,
-      hasLastFrame: Boolean(job.refs.lastFrame),
-    })
-    if (warning) throw new Error(`中转站型号 ${config.relay.model}：${warning}`)
-  }
+  // 不在中转站提交前做型号校验：每家中转站可以有自己的能力表，
+  // 写死一家反而误导其他家。超时 / 超画幅 / 不支持尾帧 → 平台 400 时如实回显。
 
   const effectiveModel = backend === 'relay' ? (config.relay?.model || job.settings.model) : job.settings.model
   const submitId = `s${Date.now().toString(36)}`
@@ -336,8 +327,8 @@ export async function submitJobVideo(home, id, config) {
         lastFrameImage,
         seconds: job.settings.duration,
         size: relaySizeFor(job.settings),
-        // 星盘式协议要求素材是公网 url：把本地文件路径一并给它，
-        // 由 relay 自己上传 /reference-assets 换 url（不缓存，24 小时过期）。
+        // 中转站协议要求素材是公网 url：把本地文件路径一并给它，
+        // 由 relay 自己上传换 url（不缓存，各家过期时间不同）。
         assetFiles: {
           firstFrame: job.refs.firstFrame
             ? { path: absPath(home, id, job.refs.firstFrame.file), mime: mimeOf(job.refs.firstFrame.file) }
@@ -346,10 +337,7 @@ export async function submitJobVideo(home, id, config) {
             ? { path: absPath(home, id, job.refs.lastFrame.file), mime: mimeOf(job.refs.lastFrame.file) }
             : undefined,
         },
-        // 作业设置优先；没设过就用设置页里的全局默认。
-        // （作业设置总是有默认值 frames/16:9，所以这里写 `||` 就够。）
-        relayMode: job.settings.relayMode || config.relay.mode || 'frames',
-        ratio: job.settings.relayRatio || config.relay.ratio || '16:9',
+        ratio: job.settings.relayRatio,
       })
       // directUrl：少数中转站在提交响应里就把成品地址给了，跳过轮询。
       relayTaskId = submitted.taskId

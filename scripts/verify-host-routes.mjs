@@ -107,7 +107,7 @@ console.log('\n[3] 视频中转站路由')
     apiKey: 'sk-relay-demo', model: 'vid-model',
   })
   ok(s.status === 200, '保存中转站 200')
-  ok(s.json.relay.baseURL === 'https://relay.example.com/v1', '只剥掉 /videos，保留 /v1（星盘接口在 /v1 下）')
+  ok(s.json.relay.baseURL === 'https://relay.example.com/v1', '只剥掉 /videos，保留 /v1')
   ok(s.json.backends.relay === true, '启用后 relay 可用')
   ok(s.json.backends.minimax === false, '没配 MiniMax 时 minimax 绿点必须为 false（不能写死）')
 
@@ -131,3 +131,4 @@ console.log('\n[4] 未知路由仍然 404（没有把用户页面挂死）')
 server.close()
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exitCode = failed === 0 ? 0 : 1
+
