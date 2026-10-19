@@ -121,7 +121,7 @@ const server = http.createServer((req, res) => {
 
 await new Promise((r) => server.listen(0, '127.0.0.1', r))
 const baseURL = `http://127.0.0.1:${server.address().port}/v1`  // 与星盘一样带 /v1
-const cfg = normalizeRelayConfig({ enabled: true, protocol: 'openai', baseURL, apiKey: KEY, model: 'minimax-h3-768p-per-second' })
+const cfg = normalizeRelayConfig({ enabled: true, protocol: 'openai', baseURL, apiKey: KEY, model: 'minimax-h3-768p-per-second', assetUploadPath: '/reference-assets' })
 
 console.log(`mock 中转站：${baseURL}\n`)
 
@@ -262,6 +262,26 @@ console.log('\n[9] 作业层：本地图片自动上传后提交')
 }
 
 server.close()
+
+console.log('\n[10] 没配上传路径时的行为')
+{
+  const noUploadCfg = normalizeRelayConfig({ enabled: true, protocol: 'openai', baseURL, apiKey: KEY, model: 'minimax-h3-768p-per-second' })
+  ok(noUploadCfg.assetUploadPath === '', 'assetUploadPath 默认空（不预设）')
+  let msg = ''
+  try {
+    await relaySubmit(noUploadCfg, { prompt: 'x', firstFrameImage: 'data:image/png;base64,AA', seconds: 4, assetFiles: { firstFrame: { path: frameA, mime: 'image/png' } } })
+  } catch (e) { msg = e.message }
+  ok(/没有设置素材上传路径/.test(msg), '没配上传路径 + 本地图片 → 明确报错', msg)
+
+  // 没传 assetFiles + firstFrameImage 是 data URI 时也应该报「需要上传路径」
+  // （不是悄悄接受 data URI 当作公网 URL）。
+  let msg2 = ''
+  try {
+    await relaySubmit(noUploadCfg, { prompt: 'x', firstFrameImage: 'data:image/png;base64,AA', seconds: 4 })
+  } catch (e) { msg2 = e.message }
+  ok(/需要上传/.test(msg2) || /需要先上传/.test(msg2), 'data URI 不会被静默接受为公网 URL', msg2)
+}
+
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exitCode = failed === 0 ? 0 : 1
 

@@ -72,8 +72,9 @@ export const RELAY_DEFAULTS = {
   size: '',
   seconds: 4,
   ratio: '16:9',
-  // 参考素材上传（星盘的地址不带 /v1，是根路径）
-  assetUploadPath: '/reference-assets',
+  // 参考素材上传路径：每个中转站都不一样，**不预设默认值**。
+  // 没填时直接拒收本地图片、要求用公网 URL —— 让用户主动去查自家文档。
+  assetUploadPath: '',
   // generic 协议
   submitMethod: 'POST',
   submitPath: '/videos',
@@ -322,7 +323,9 @@ async function request(url, init, timeoutMs, what) {
 export async function relayUploadAsset(cfg, filePath, mime) {
   // ★ 星盘的 reference-assets 挂在**主机根**上，不在 /v1 下面。
   // 所以这里从 baseURL 里取 origin 再拼，不能直接 joinUrl(baseURL, path)。
-  const uploadPath = cfg.assetUploadPath || '/reference-assets'
+  const uploadPath = cfg.assetUploadPath
+  // 空路径 = 不上传：要求用户传公网 URL，或者在设置页填一个自己的上传端点。
+  if (uploadPath === '') throw new RelayError('没有设置素材上传路径：本地图片必须先上传换 url。在「中转站」卡的「高级选项」里填一个上传端点（如 /reference-assets），或者直接传公网 URL。')
   const url = /^https?:\/\//i.test(uploadPath)
     ? uploadPath
     : `${originOf(cfg.baseURL)}${uploadPath.startsWith('/') ? '' : '/'}${uploadPath}`
@@ -405,9 +408,9 @@ async function submitOpenAI(cfg, input) {
   //    该协议不保证接受 Base64，静默退回会让用户以为「上传成功了其实没有」。
   const upload = async (dataUri, label) => {
     if (!dataUri) return undefined
-    if (!/^data:/.test(dataUri)) return dataUri // 已经是公网 URL
+    if (/^https?:\/\//i.test(dataUri)) return dataUri // 已经是公网 URL
     if (!input.assetFiles?.[label]) {
-      throw new RelayError(`${label} 需要先上传成公网 url：这个协议不接受 Base64 直传`)
+      throw new RelayError(`${label} 需要先上传成公网 url：传公网 URL，或者设置「参考素材上传路径」让插件自动上传本地文件`)
     }
     const asset = await relayUploadAsset(cfg, input.assetFiles[label].path, input.assetFiles[label].mime)
     return asset.url

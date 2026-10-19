@@ -41,6 +41,9 @@ console.log('\n[1] 中转站配置规整')
   // size 默认留空：清晰度由型号决定，不能靠 size 升降档。
   ok(c.seconds === 4 && c.size === '', '默认 4 秒、不下发 size')
   ok(c.ratio === '16:9', '默认画幅 16:9')
+  // ★ 上传路径不预设默认值：每个中转站都不一样。
+  //   设了星盘专属的 /reference-assets 当默认，会让其他家以为「这就是标准」。
+  ok(c.assetUploadPath === '', `assetUploadPath 默认空（实际 "${c.assetUploadPath}"）`)
   ok(relayReady(c) === false, '没启用时 relayReady 为 false')
   ok(relayReady({ ...c, enabled: true }) === true, '启用且四要素齐 → ready')
   const g = normalizeRelayConfig({ enabled: true, protocol: 'generic', baseURL: 'https://g.example.com', apiKey: 'k', model: 'm' })
