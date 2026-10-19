@@ -49,6 +49,20 @@ description: 用视频模型（首尾帧）生成动作，再抽帧 + 抠图做�
 - **MiniMax 官方**：有订阅（Explore+）或按量 Key 时用。
 - **自选本地视频**：零额度兜底，用 ffprobe 判是不是视频（不看扩展名）。
 
+
+### 星盘式 /videos 协议的几个硬约束（接中转站时最容易错）
+
+- **Base URL 要带 `/v1`**（`https://xingpan.site/v1`）。只有素材上传 `/reference-assets` 在主机根上、不带 `/v1`。
+- **本机图片必须先上传换 url**：data URI / 本机路径 / Base64 都不保证被接受。
+- **首帧 / 首尾帧走 `metadata.mode=frames` + `first_frame_url` / `last_frame_url`**，
+  不要顺便再发 `image_urls`（首尾帧与普通素材数组互斥）。
+- **H3 不能只给尾帧**；Wan 根本不支持首尾帧。这些在本地就该拦住。
+- **清晰度由型号决定**，`size` / `resolution` 不能拿来升降档。
+- **首尾帧模式下画幅由素材决定**，`ratio` 填了也不保证强制裁切；
+  要固定构图先把输入图裁成目标比例。
+- **`delivering` 不是完成**：主 status 仍是 in_progress/99%，要等 `delivery_status=ready`。
+- 下载要带 Bearer，且只有 HTTP 200 + video/* 才算成片；成片 24 小时过期。
+
 ## 二、没有视频额度时的替代做法（按推荐顺序）
 
 1. **在 MiniMax Code 应用里用签到积分生成**（免费），下载 mp4 后导入本管线

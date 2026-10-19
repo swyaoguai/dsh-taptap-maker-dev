@@ -29,9 +29,26 @@ window.__ModuleLoader__.load({
     const SIZES = ['1024x1024', '1024x1536', '1536x1024', '512x512', '768x768']
     const API_BASE = '/api/taptap-maker-dev'
 
+    /**
+     * 中转站已知型号的能力（与 src/video-relay.mjs 的 RELAY_MODEL_CAPS 保持同步）。
+     * 放在客户端只为「填完立刻提示」，真正的拦截在宿主侧。
+     */
+    const VIDEO_MODEL_CAPS = {
+      'minimax-h3-768p-per-second': { label: 'H3 768P 按秒', seconds: [4, 15], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', 'auto'], frames: true, pricePerSecond: 0.15 },
+      'minimax-h3-2k-per-second': { label: 'H3 2K 按秒', seconds: [4, 15], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', 'auto'], frames: true, pricePerSecond: 0.2 },
+      'seedance-2.5-vip-480p': { label: 'SD 2.5 稳定 480P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 0.55 },
+      'seedance-2.5-vip-720p': { label: 'SD 2.5 稳定 720P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 1.18 },
+      'seedance-2.5-vip-1080p': { label: 'SD 2.5 稳定 1080P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1'], frames: true, pricePerSecond: 4.38 },
+      'seedance-2.5-discount-480p': { label: 'SD 2.5 折扣 480P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 0.44 },
+      'seedance-2.5-discount-720p': { label: 'SD 2.5 折扣 720P', seconds: [4, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'], frames: true, pricePerSecond: 0.66 },
+      'seedance-2.5-special-480p': { label: 'SD 2.5 特殊 480P', seconds: [4, 30], ratios: ['16:9', '9:16'], frames: true, pricePerSecond: 0.63 },
+      'seedance-2.5-special-720p': { label: 'SD 2.5 特殊 720P', seconds: [4, 30], ratios: ['16:9', '9:16'], frames: true, pricePerSecond: 0.88 },
+      'wan-3.0': { label: 'Wan 3.0', seconds: [5, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4'], frames: false, pricePerSecond: 0.45 },
+      'wan-3.0-prime': { label: 'Wan 3.0 Prime', seconds: [5, 30], ratios: ['16:9', '9:16', '1:1', '4:3', '3:4'], frames: false, pricePerSecond: 0.45 },
+    }
+
     const S = {
-      page: { padding: '20px 24px', maxWidth: 760, display: 'flex', flexDirection: 'column', gap: 20 },
-      h1: { fontSize: 18, fontWeight: 600, margin: 0 },
+      page: { padding: '20px 24px', maxWidth: 760, display: 'flex', flexDirection: 'column', gap: 20 },      h1: { fontSize: 18, fontWeight: 600, margin: 0 },
       sub: { fontSize: 13, opacity: 0.7, margin: '4px 0 0', lineHeight: 1.6 },
       card: { border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))', borderRadius: 10, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 },
       cardTitle: { fontSize: 14, fontWeight: 600, margin: 0, display: 'flex', alignItems: 'center', gap: 8 },
@@ -1599,6 +1616,20 @@ window.__ModuleLoader__.load({
 
       const relayOn = Boolean(relay.enabled)
       const generic = (relay.protocol || protocol) === 'generic'
+      // 认识的型号（星盘那批）在界面上就把「能不能这么传」说清楚，
+      // 不用等提交后吃一个 400。
+      const relayCaps = VIDEO_MODEL_CAPS[String(relay.model || '').trim()] || null
+      const relayWarn = relayCaps === null ? '' : (() => {
+        const problems = []
+        const sec = Number(relay.seconds ?? 4)
+        if (Number.isFinite(sec) && (sec < relayCaps.seconds[0] || sec > relayCaps.seconds[1])) {
+          problems.push(`时长 ${sec}s 超出 ${relayCaps.seconds[0]}–${relayCaps.seconds[1]}s`)
+        }
+        const rt = relay.ratio || '16:9'
+        if (rt !== 'auto' && !relayCaps.ratios.includes(rt)) problems.push(`画幅 ${rt} 不受支持`)
+        if (!relayCaps.frames) problems.push('该型号不支持首尾帧（只能单图）')
+        return problems.join('；')
+      })()
 
       return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
         // ────────── 1. 后端优先级 ──────────
@@ -1677,25 +1708,66 @@ window.__ModuleLoader__.load({
               style: S.input, value: relay.model || '', placeholder: '你的中转站视频模型 id',
               onChange: (e) => setR('model', e.target.value), spellCheck: false, autoComplete: 'off',
             }),
+            h('select', {
+              style: S.input, value: '',
+              onChange: (e) => {
+                // 选中已知型号时顺带把时长 / 画幅拉到合法值，省得填完再吃警告。
+                const id = e.target.value
+                if (!id) return
+                setRelay((f) => {
+                  const caps = VIDEO_MODEL_CAPS[id]
+                  const next = { ...(f || {}), model: id }
+                  if (caps) {
+                    const sec = Number(next.seconds ?? 4)
+                    next.seconds = Math.min(caps.seconds[1], Math.max(caps.seconds[0], sec))
+                    if ((next.ratio || '16:9') !== 'auto' && !caps.ratios.includes(next.ratio || '16:9')) next.ratio = caps.ratios[0]
+                  }
+                  return next
+                })
+              },
+            },
+            [h('option', { key: '__', value: '' }, '从已知型号里选（星盘那批）…'),
+              ...Object.entries(VIDEO_MODEL_CAPS).map(([id, c]) => h('option', { key: id, value: id }, `${c.label} · ¥${c.pricePerSecond}/秒`))]),
             Array.isArray(models)
               ? (models.length > 0
                 ? h('select', { style: S.input, value: '', onChange: (e) => { if (e.target.value) setR('model', e.target.value) } },
-                  [h('option', { key: '__', value: '' }, `从 ${models.length} 个模型中选择…`),
+                  [h('option', { key: '__', value: '' }, `或从你的端点 /models 选（${models.length} 个）…`),
                     ...models.map((m) => h('option', { key: m, value: m }, m))])
                 : h('p', { style: S.hint }, '端点 /models 未返回任何模型（有些中转站禁用该接口，直接手填即可）。'))
               : null,
             models === 'error' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, `获取模型失败：${modelsErr}`) : null),
 
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '模式（metadata.mode，官方 MiniMax 后端会忽略）'),
+            h('select', { style: S.input, value: relay.mode || 'frames', onChange: (e) => setR('mode', e.target.value) },
+              h('option', { value: 'frames' }, 'frames · 首帧 / 首尾帧（做动作帧用这个）'),
+              h('option', { value: 'omni_reference' }, 'omni_reference · 多图普通参考'))),
+
           h('button', { style: { ...S.ghostBtn, alignSelf: 'flex-start' }, onClick: () => setShowAdvanced((v) => !v) },
-            showAdvanced ? '▾ 收起高级选项' : '▸ 高级选项（时长 / 尺寸 / 字段映射）'),
+            showAdvanced ? '▾ 收起高级选项' : '▸ 高级选项（时长 / 画幅 / 模式 / 字段映射）'),
           showAdvanced ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
             h('div', { style: S.bar },
               h('div', { style: { ...S.row, flex: 1 } },
-                h('label', { style: S.label }, '时长（秒）'),
+                h('label', { style: S.label }, '时长（秒，整数）'),
                 h('input', { style: S.input, type: 'number', min: 1, max: 60, value: relay.seconds ?? 4, onChange: (e) => setR('seconds', Number(e.target.value)) })),
               h('div', { style: { ...S.row, flex: 1 } },
-                h('label', { style: S.label }, '尺寸'),
-                h('input', { style: S.input, value: relay.size || '1280x720', onChange: (e) => setR('size', e.target.value), placeholder: '1280x720' }))),
+                h('label', { style: S.label }, '画幅（metadata.ratio）'),
+                h('select', { style: S.input, value: relay.ratio || '16:9', onChange: (e) => setR('ratio', e.target.value) },
+                  ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', 'auto'].map((r) => h('option', { key: r, value: r }, r))))),
+            h('p', { style: S.hint },
+              '首尾帧模式下画幅主要由素材决定，ratio 不能保证强制裁切；要固定构图先把输入图裁成目标比例。'),
+            // 型号限制提示：认识的型号（星盘那批）直接告诉用户能不能这么传
+            relayCaps ? h('p', { style: { ...S.hint, color: relayWarn ? 'var(--dsh-warn, #f08c00)' : 'inherit' } },
+              `${relayCaps.label}：${relayCaps.seconds[0]}–${relayCaps.seconds[1]} 秒 · 画幅 ${relayCaps.ratios.join('/')} · ${relayCaps.frames ? '支持首尾帧' : '不支持首尾帧'} · ¥${relayCaps.pricePerSecond}/秒`,
+              relayWarn ? ` ⚠ ${relayWarn}` : '') : null,
+            h('div', { style: S.row },
+              h('label', { style: S.label }, '尺寸（留空 = 由型号决定，不要用它升降清晰度）'),
+              h('input', { style: S.input, value: relay.size || '', onChange: (e) => setR('size', e.target.value), placeholder: '留空' })),
+            h(LabeledInput, {
+              label: '参考素材上传路径', value: relay.assetUploadPath || '/reference-assets',
+              onChange: (v) => setR('assetUploadPath', v),
+              hint: '本机图片会先传到这里换公网 url（星盘是 /reference-assets，挂在主机根上，不带 /v1）',
+            }),
             generic ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
               h('p', { style: S.hint }, '自定义协议：按中转站文档填路径与「响应里的字段路径」。{taskId} 会被替换成任务 id。'),
               h('div', { style: S.bar },
