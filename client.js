@@ -61,6 +61,54 @@ window.__ModuleLoader__.load({
       warnTitle: { fontSize: 13, fontWeight: 600, color: 'var(--dsh-warn, #f08c00)' },
       dangerBtn: { padding: '7px 12px', borderRadius: 7, border: 'none', background: 'var(--dsh-danger, #e03131)', color: '#fff', font: 'inherit', fontSize: 12, fontWeight: 600, cursor: 'pointer' },
       offPill: { fontSize: 11, padding: '2px 8px', borderRadius: 999, background: 'rgba(224,49,49,0.15)', color: 'var(--dsh-danger, #e03131)', fontWeight: 600 },
+      // ---- 分组导航（重构后）：把十几张卡按「你在做什么」收进四组 ----
+      // 之前所有卡平铺在一页里，滚动到底要穿过一堆不相关的配置；
+      // 现在顶部有分组标签 + 一句总览，一次只看一组。
+      tabs: { display: 'flex', gap: 6, flexWrap: 'wrap', borderBottom: '1px solid var(--dsh-border, rgba(128,128,128,0.25))', paddingBottom: 10 },
+      tab: { padding: '7px 14px', borderRadius: 8, border: '1px solid transparent', background: 'transparent', color: 'inherit', font: 'inherit', fontSize: 13, cursor: 'pointer', opacity: 0.7, display: 'flex', alignItems: 'center', gap: 6 },
+      tabActive: { padding: '7px 14px', borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,0.35))', background: 'rgba(79,124,255,0.12)', color: 'inherit', font: 'inherit', fontSize: 13, fontWeight: 600, cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 6 },
+      tabCount: { fontSize: 11, padding: '0 6px', borderRadius: 999, background: 'rgba(128,128,128,0.2)', opacity: 0.9 },
+      // 状态总览条：一眼看出「哪条通道现在是通的」
+      overview: { display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
+      chip: { fontSize: 12, padding: '4px 10px', borderRadius: 999, border: '1px solid var(--dsh-border, rgba(128,128,128,0.3))', display: 'flex', alignItems: 'center', gap: 6 },
+      chipOn: { fontSize: 12, padding: '4px 10px', borderRadius: 999, border: '1px solid rgba(55,178,77,0.5)', background: 'rgba(55,178,77,0.1)', display: 'flex', alignItems: 'center', gap: 6 },
+      chipOff: { fontSize: 12, padding: '4px 10px', borderRadius: 999, border: '1px solid rgba(128,128,128,0.3)', background: 'transparent', opacity: 0.55, display: 'flex', alignItems: 'center', gap: 6 },
+      dot: { width: 7, height: 7, borderRadius: 999, background: 'var(--dsh-success, #37b24d)', display: 'inline-block' },
+      dotOff: { width: 7, height: 7, borderRadius: 999, background: 'rgba(128,128,128,0.6)', display: 'inline-block' },
+      empty: { fontSize: 13, opacity: 0.6, padding: '24px 4px', textAlign: 'center' },
+      sectionIntro: { fontSize: 12, opacity: 0.65, margin: 0, lineHeight: 1.6 },
+    }
+
+    /**
+     * 一次只显示一组的容器。
+     *
+     * 用 `display:none` 而不是卸载：卡里都有各自的 useState（账号列表、
+     * 表单草稿），切走再切回不该把用户刚填一半的东西丢掉。副作用是
+     * 所有卡在进入设置页时都会跑一次加载 —— 这些都是本地文件读取，
+     * 量级可以忽略。
+     */
+    function PanelGroup(props) {
+      return h('div', { style: props.active ? { display: 'flex', flexDirection: 'column', gap: 16 } : { display: 'none' } }, props.children)
+    }
+
+    /** 分组 tab：数字是这一组里的卡数，帮助判断「这里有多少要配」。 */
+    function GroupTabs(props) {
+      return h('div', { style: S.tabs },
+        props.groups.map((g) => h('button', {
+          key: g.id,
+          style: props.value === g.id ? S.tabActive : S.tab,
+          onClick: () => props.onChange(g.id),
+          title: g.desc,
+        },
+        h('span', null, g.icon, ' ', g.label),
+        g.count > 0 ? h('span', { style: S.tabCount }, String(g.count)) : null)))
+    }
+
+    /** 通道状态 chip：绿点 = 现在能用，灰点 = 没配好。 */
+    function StatusChip(props) {
+      return h('span', { style: props.on ? S.chipOn : S.chipOff, title: props.title || '' },
+        h('span', { style: props.on ? S.dot : S.dotOff }),
+        props.label)
     }
 
     function Toggle(props) {
@@ -1475,56 +1523,286 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 视频生成配置。
+     *
+     * 三段式，对应三种真正的使用场景（不是一个设置表单拆零碎）：
+     *   1. 走哪条：后端优先级（auto / 官方 / 中转站 / 自选本地视频）；
+     *   2. MiniMax 共用：Key + 站点 + 模型 —— 订阅 Key 与按量 Key 都填这里；
+     *   3. 中转站 / 自选本地视频。
+     *
+     * 每一段右下角都有「现在能不能用」的状态点，不要让人配完还要去对话里试。
+     */
+    function VideoConfig() {
+      const [relay, setRelay] = useState(null) // null=loading
+      const [mmx, setMmx] = useState({ apiKey: '', baseURL: '', model: '' })
+      const [backends, setBackends] = useState({ relay: false, minimax: false, local: true })
+      const [keyKindText, setKeyKindText] = useState('')
+      const [protocol, setProtocol] = useState('openai')
+      const [showAdvanced, setShowAdvanced] = useState(false)
+      const [status, setStatus] = useState('')
+      const [models, setModels] = useState(null)
+      const [modelsErr, setModelsErr] = useState('')
+      const [down, setDown] = useState(false)
+
+      const load = useCallback(() => {
+        fetch(`${API_BASE}/video-relay`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => {
+            setDown(false)
+            setRelay(j.relay || {})
+            setProtocol((j.relay && j.relay.protocol) || 'openai')
+            setBackends(j.backends || { relay: false, minimax: false, local: true })
+            setKeyKindText((j.minimax && j.minimax.keyKindText) || '')
+            // Minimax 的 Key 不回显：后端只回「有没有」，设置页沿用「留空=不修改」的惯例。
+            setMmx({ apiKey: '', baseURL: (j.minimax && j.minimax.baseURL) || '', model: (j.minimax && j.minimax.model) || '' })
+          })
+          .catch(() => { setDown(true); setRelay({}); })
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const setR = useCallback((k, v) => setRelay((f) => ({ ...(f || {}), [k]: v })), [])
+      const setM = useCallback((k, v) => setMmx((f) => ({ ...f, [k]: v })), [])
+
+      const saveRelay = useCallback(() => {
+        if (!relay) return
+        setStatus('saving')
+        fetch(`${API_BASE}/video-relay`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(relay) })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => { setStatus('saved'); setBackends(j.backends || backends); setDown(false); try { setTimeout(() => setStatus(''), 2500) } catch (_e) { /* no-op */ } })
+          .catch(() => { setStatus('error'); setDown(true) })
+      }, [relay, backends])
+
+      const saveMmx = useCallback(() => {
+        setStatus('saving')
+        fetch(`${API_BASE}/video-minimax`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(mmx) })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => { setStatus('saved'); setKeyKindText(j.keyKindText || ''); setBackends((b) => ({ ...b, minimax: Boolean(j.hasApiKey) })); setMmx((f) => ({ ...f, apiKey: '' })) })
+          .catch(() => setStatus('error'))
+      }, [mmx])
+
+      const getModels = useCallback(() => {
+        if (!relay) return
+        setModels('loading'); setModelsErr('')
+        fetch(`${API_BASE}/video-relay/models`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ baseURL: relay.baseURL, apiKey: relay.apiKey }) })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (ok && j.ok && Array.isArray(j.models)) setModels(j.models)
+            else { setModels('error'); setModelsErr(j.error || '获取失败') }
+          })
+          .catch(() => { setModels('error'); setModelsErr('请求失败：宿主 web 服务可能未就绪。') })
+      }, [relay])
+
+      if (relay === null) {
+        return h('div', { style: S.card }, h('h2', { style: S.cardTitle }, '🎬 视频生成'), h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
+      }
+
+      const relayOn = Boolean(relay.enabled)
+      const generic = (relay.protocol || protocol) === 'generic'
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 16 } },
+        // ────────── 1. 后端优先级 ──────────
+        h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, '🎬 视频生成 · 走哪条通道'),
+          h('p', { style: { ...S.sub, marginTop: 0 } },
+            '三个后端任选或让插件自动挑。只有「出视频」花钱；抽帧 / 抠像 / 合成 / 导入全本地、反复调不产生费用。'),
+          h('div', { style: S.overview },
+            h(StatusChip, { on: backends.relay, label: '中转站', title: backends.relay ? '已配置，可出片' : '未配置或未启用' }),
+            h(StatusChip, { on: backends.minimax, label: 'MiniMax', title: backends.minimax ? '有可用 Key' : '没有 Key' }),
+            h(StatusChip, { on: true, label: '自选本地视频', title: '始终可用，零额度' })),
+          h('p', { style: S.hint },
+            'auto 的优先级：先看你是否配了中转站（配了说明你想用它），其次 MiniMax Key，最后落到「没配好」的明确报错。'),
+        ),
+
+        // ────────── 2. MiniMax（订阅 / 按量共用） ──────────
+        h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, 'MiniMax（订阅 Key 与按量 Key 都填这里）'),
+          h('p', { style: { ...S.sub, marginTop: 0 } },
+            '两种 Key 打的是同一批接口，只有额度来源不同：',
+            h('span', { style: S.codeInline }, 'sk-cp-…'), ' 是 M Plan 订阅 Key（扣套餐额度，Go 档不含视频模型）；',
+            h('span', { style: S.codeInline }, 'sk-api-…'), ' 是按量 Key（扣账户余额，任何档位都能出片）。'),
+          keyKindText ? h('p', { style: S.hint }, keyKindText) : null,
+          h(LabeledInput, {
+            label: 'API Key（留空 = 不修改；当前状态见下方提示）',
+            value: mmx.apiKey, onChange: (v) => setM('apiKey', v), secret: true,
+            placeholder: backends.minimax ? '已配置（留空保持不变）' : 'sk-cp-… 或 sk-api-…',
+            hint: '仅保存在本机 minimax.json。留空时会自动用环境变量 MINIMAX_API_KEY 或本机 mmx 登录态。',
+          }),
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '站点'),
+            h('select', { style: S.input, value: mmx.baseURL, onChange: (e) => setM('baseURL', e.target.value) },
+              h('option', { value: 'https://api.minimaxi.com' }, '国内站 api.minimaxi.com（人民币计费）'),
+              h('option', { value: 'https://api.minimax.io' }, '国际站 api.minimax.io（美元计费）'))),
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '模型'),
+            h('select', { style: S.input, value: mmx.model, onChange: (e) => setM('model', e.target.value) },
+              h('option', { value: 'MiniMax-H3' }, 'MiniMax-H3 · 768P/2K · 首尾帧（推荐）'),
+              h('option', { value: 'MiniMax-H3-Max' }, 'MiniMax-H3-Max · 极速'),
+              h('option', { value: 'MiniMax-Hailuo-02' }, 'MiniMax-Hailuo-02 · v1 首尾帧'),
+              h('option', { value: 'MiniMax-Hailuo-2.3' }, 'MiniMax-Hailuo-2.3 · 只支持首帧'),
+              h('option', { value: 'MiniMax-Hailuo-2.3-Fast' }, 'MiniMax-Hailuo-2.3-Fast · 只支持首帧'))),
+          h('div', { style: S.bar },
+            h('button', { style: S.btn, disabled: status === 'saving', onClick: saveMmx }, '保存 MiniMax 配置'),
+            status === 'saved' ? h('span', { style: S.ok }, '已保存 ✓ 即时生效') : null,
+            status === 'error' ? h('span', { style: S.warn }, '保存失败') : null),
+        ),
+
+        // ────────── 3. 中转站 ──────────
+        h('div', { style: S.card },
+          h('div', { style: S.rowBetween },
+            h('h2', { style: S.cardTitle }, '视频中转站（OpenAI 兼容 / 自定义端点）'),
+            h('label', { style: { ...S.label, display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' } },
+              h('input', { type: 'checkbox', checked: relayOn, onChange: (e) => setR('enabled', e.target.checked) }),
+              relayOn ? '已启用' : '未启用')),
+          h('p', { style: { ...S.sub, marginTop: 0 } },
+            '和「中转站生图」同一套逻辑：用你自己的地址 / Key / 模型，不花 Maker 额度和 MiniMax 额度。'),
+          down ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+            '宿主 web 服务未就绪，暂不能自动保存。可先填好，服务就绪后再点保存。') : null,
+
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '协议'),
+            h('select', { style: S.input, value: relay.protocol || 'openai', onChange: (e) => setR('protocol', e.target.value) },
+              h('option', { value: 'openai' }, 'OpenAI 兼容 /videos（最通用）'),
+              h('option', { value: 'minimax' }, 'MiniMax 协议（中转站代理了 MiniMax）'),
+              h('option', { value: 'generic' }, '自定义（自己填路径与字段映射）'))),
+
+          h(LabeledInput, {
+            label: 'Base URL', value: relay.baseURL || '', onChange: (v) => setR('baseURL', v),
+            placeholder: 'https://your-relay.example.com/v1', hint: '填到 /v1 这层即可，粘整条 /videos 路径也会自动收敛。',
+          }),
+          h(LabeledInput, { label: 'API Key', value: relay.apiKey || '', onChange: (v) => setR('apiKey', v), secret: true, placeholder: 'sk-...', hint: '仅保存在本机 video-relay.json。' }),
+          h('div', { style: S.row },
+            h('label', { style: S.label }, '模型'),
+            h('input', {
+              style: S.input, value: relay.model || '', placeholder: '你的中转站视频模型 id',
+              onChange: (e) => setR('model', e.target.value), spellCheck: false, autoComplete: 'off',
+            }),
+            Array.isArray(models)
+              ? (models.length > 0
+                ? h('select', { style: S.input, value: '', onChange: (e) => { if (e.target.value) setR('model', e.target.value) } },
+                  [h('option', { key: '__', value: '' }, `从 ${models.length} 个模型中选择…`),
+                    ...models.map((m) => h('option', { key: m, value: m }, m))])
+                : h('p', { style: S.hint }, '端点 /models 未返回任何模型（有些中转站禁用该接口，直接手填即可）。'))
+              : null,
+            models === 'error' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, `获取模型失败：${modelsErr}`) : null),
+
+          h('button', { style: { ...S.ghostBtn, alignSelf: 'flex-start' }, onClick: () => setShowAdvanced((v) => !v) },
+            showAdvanced ? '▾ 收起高级选项' : '▸ 高级选项（时长 / 尺寸 / 字段映射）'),
+          showAdvanced ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+            h('div', { style: S.bar },
+              h('div', { style: { ...S.row, flex: 1 } },
+                h('label', { style: S.label }, '时长（秒）'),
+                h('input', { style: S.input, type: 'number', min: 1, max: 60, value: relay.seconds ?? 4, onChange: (e) => setR('seconds', Number(e.target.value)) })),
+              h('div', { style: { ...S.row, flex: 1 } },
+                h('label', { style: S.label }, '尺寸'),
+                h('input', { style: S.input, value: relay.size || '1280x720', onChange: (e) => setR('size', e.target.value), placeholder: '1280x720' }))),
+            generic ? h('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
+              h('p', { style: S.hint }, '自定义协议：按中转站文档填路径与「响应里的字段路径」。{taskId} 会被替换成任务 id。'),
+              h('div', { style: S.bar },
+                h('div', { style: { ...S.row, flex: 1 } }, h('label', { style: S.label }, '提交方法'), h('input', { style: S.input, value: relay.submitMethod || 'POST', onChange: (e) => setR('submitMethod', e.target.value) })),
+                h('div', { style: { ...S.row, flex: 2 } }, h('label', { style: S.label }, '提交路径'), h('input', { style: S.input, value: relay.submitPath || '/videos', onChange: (e) => setR('submitPath', e.target.value) }))),
+              h('div', { style: S.bar },
+                h('div', { style: { ...S.row, flex: 1 } }, h('label', { style: S.label }, '查询方法'), h('input', { style: S.input, value: relay.queryMethod || 'GET', onChange: (e) => setR('queryMethod', e.target.value) })),
+                h('div', { style: { ...S.row, flex: 2 } }, h('label', { style: S.label }, '查询路径'), h('input', { style: S.input, value: relay.queryPath || '/videos/{taskId}', onChange: (e) => setR('queryPath', e.target.value) }))),
+              h(LabeledInput, { label: '任务 id 字段路径', value: relay.taskIdPath || 'id', onChange: (v) => setR('taskIdPath', v), hint: '默认 id；嵌套写法 data.task_id' }),
+              h(LabeledInput, { label: '状态字段路径', value: relay.statusPath || 'status', onChange: (v) => setR('statusPath', v) }),
+              h(LabeledInput, { label: '视频地址字段路径', value: relay.videoUrlPath || '', onChange: (v) => setR('videoUrlPath', v), hint: '响应里视频 URL 的字段路径，例如 data.output.url（必填，否则成功后拿不到片子）' }),
+              h(LabeledInput, { label: '完成状态值', value: Array.isArray(relay.doneValues) ? relay.doneValues.join(',') : (relay.doneValues || 'succeeded,completed,success'), onChange: (v) => setR('doneValues', v), hint: '逗号分隔' }),
+              h(LabeledInput, { label: '失败状态值', value: Array.isArray(relay.failedValues) ? relay.failedValues.join(',') : (relay.failedValues || 'failed,error,cancelled'), onChange: (v) => setR('failedValues', v), hint: '逗号分隔' }),
+            ) : null,
+          ) : null,
+
+          h('div', { style: S.bar },
+            h('button', { style: S.btn, disabled: status === 'saving', onClick: saveRelay }, status === 'saving' ? '保存中…' : '保存中转站配置'),
+            h('button', { style: S.ghostBtn, disabled: models === 'loading', onClick: getModels }, models === 'loading' ? '获取中…' : '获取模型'),
+            status === 'saved' ? h('span', { style: S.ok }, '已保存 ✓ 即时生效') : null,
+            status === 'error' ? h('span', { style: S.warn }, '保存失败') : null)),
+      )
+    }
+
+    /**
+     *
+     * 以前十几张卡平铺一页，配视频要塞在两块生图之间、找 skill 要滚到底。
+     * 现在按「你在做什么」分成四组，顶部一条通道状态总览：
+     *   生成通道（图 / 视频）· 音频素材 · 治理与工具 · 怎么用
+     * 每组内部把「先配什么、后配什么」按使用频率排好。
+     */
     function TaptapMakerSettings() {
+      const [group, setGroup] = useState('render')
+      const groups = [
+        { id: 'render', icon: '🎨', label: '生成通道', desc: '生图与视频的 Key / 中转站', count: 4 },
+        { id: 'audio', icon: '🔊', label: '音频素材', desc: '音效库与 BGM 账号', count: 2 },
+        { id: 'govern', icon: '🛡️', label: '治理与工具', desc: '额度红线、skills', count: 2 },
+        { id: 'help', icon: '📖', label: '怎么用', desc: '日常全部在对话里完成', count: 0 },
+      ]
       return h('div', { style: S.page },
         h('div', null,
           h('h1', { style: S.h1 }, 'TapTap Maker 本地开发'),
           h('p', { style: S.sub },
-            '为 TapTap 制造（Maker）本地开发配置：自定义生图通道、额度红线、内置可更新 skills。',
-            '生图 Key 只写进本机 ', h('span', { style: S.codeInline }, 'image.json'),
+            '通道配置、音频素材、治理开关与 skills。所有 Key 只写进本机 ',
+            h('span', { style: S.codeInline }, '$DSH_HOME/taptap-maker-dev/'),
             '，绝不进入会自动提交的 Maker 工作区。'),
         ),
 
-        h(PolicyToggle),
+        h(GroupTabs, { groups, value: group, onChange: setGroup }),
 
-        // 网页生图是首选 → 排在前面；中转站降为回退。
-        h(GptAccount),
+        // ── 生成通道：生图（网页→中转站）+ 视频（三后端） ──
+        h(PanelGroup, { active: group === 'render' },
+          h('p', { style: S.sectionIntro },
+            '生图：优先 ChatGPT 网页（免费），不可用时回退中转站。视频：MiniMax / 中转站 / 自选本地视频三选一。'),
+          h(GptAccount),
+          h(ImageConfig),
+          h(VideoConfig),
+        ),
 
-        h(ImageConfig),
+        // ── 音频素材 ──
+        h(PanelGroup, { active: group === 'audio' },
+          h('p', { style: S.sectionIntro },
+            '音效走本地 CC0 库（零成本）；BGM 走网页生成，账号只影响额度。'),
+          h(BgmAccount),
+          h(AudioLibrary),
+        ),
 
-        h(BgmAccount),
+        // ── 治理与工具 ──
+        h(PanelGroup, { active: group === 'govern' },
+          h('p', { style: S.sectionIntro },
+            '额度红线防误花 Maker 内置额度；skills 决定模型能用到哪些游戏开发知识。'),
+          h(PolicyToggle),
+          h(SkillManager),
+        ),
 
-        h(AudioLibrary),
-
-        h(SkillManager),
-
-        h('div', { style: S.card },
-          h('h2', { style: S.cardTitle }, '怎么用（全部在对话里，不用回设置页）'),
-          h('p', { style: { ...S.sub, marginTop: 0 } },
-            '本页只放一次性配置。日常使用直接跟模型说中文，或打斜杠命令：'),
-          h('ul', { style: S.ul },
-            h('li', null, '生图（首选）：说「生成一个蓝色盾牌图标」，默认走 ChatGPT 网页生图。',
-              '首次需 ', h('span', { style: S.codeInline }, '/taptap-gpt login'), ' 登录一次。'),
-            h('li', null, '关掉网页生图：本页「ChatGPT 网页生图」卡右上角开关，或 ',
-              h('span', { style: S.codeInline }, '/taptap-gpt lane off'), '（关掉后自动改走中转站）'),
-            h('li', null, '生图（回退）：网页通道不可用时用 ',
-              h('span', { style: S.codeInline }, '/taptap-image <描述>'), '（中转站，需先配 baseURL/key/model）'),
-            h('li', null, '账号池：/taptap-gpt pool list 看账号，add --id <名> 添加账号，login --account <名> 登录，unban 恢复冷却账号'),
-            h('li', null, '音效：说「加个金币音效」，或 ',
-              h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
-            h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
-            h('li', null, 'BGM 试听 / 裁剪：生成后点', h('span', { style: S.codeInline }, '输入框旁的 🎵 BGM 挂件'),
-              '，可试听、拖波形裁剪、一键导入项目（生成完会亮红点提醒）。'),
-            h('li', null, '换 BGM 账号 / 查额度：说「退出登录」或「查额度」，也在本页「BGM 账号」卡。'),
-            h('li', null, '音频转格式：说「把这些音效转成 wav」，或 ',
-              h('span', { style: S.codeInline }, '/taptap-audio-convert')),
-            h('li', null, '初始化 Maker：说「帮我初始化 taptap maker」。'),
-            h('li', null, 'Skills：说「把用不上的 skill 关掉」，或 ',
-              h('span', { style: S.codeInline }, '/taptap-skills')),
-            h('li', null, '额度红线开关：说「关掉额度红线」即可（会先跟你确认）。'),
+        // ── 怎么用 ──
+        h(PanelGroup, { active: group === 'help' },
+          h('div', { style: S.card },
+            h('h2', { style: S.cardTitle }, '怎么用（全部在对话里，不用回设置页）'),
+            h('p', { style: { ...S.sub, marginTop: 0 } },
+              '本页只放一次性配置。日常使用直接跟模型说中文，或打斜杠命令：'),
+            h('ul', { style: S.ul },
+              h('li', null, '生图（首选）：说「生成一个蓝色盾牌图标」，默认走 ChatGPT 网页生图。首次需 ',
+                h('span', { style: S.codeInline }, '/taptap-gpt login'), ' 登录一次。'),
+              h('li', null, '生图（回退）：网页通道不可用时用 ',
+                h('span', { style: S.codeInline }, '/taptap-image <描述>'), '（中转站，需先配 baseURL/key/model）。'),
+              h('li', null, '视频（让角色动起来）：',
+                h('span', { style: S.codeInline }, '/taptap-video'),
+                ' —— 首尾帧出视频 → 抽帧 → 抠图 → 导入 Maker。先跑 ',
+                h('span', { style: S.codeInline }, '/taptap-video doctor'), ' 看哪条通道通。'),
+              h('li', null, '视频（零额度）：在 MiniMax Code 里用签到积分出片，下载后 ',
+                h('span', { style: S.codeInline }, '/taptap-video use <mp4>'), ' 挂进来照样能抽帧抠图。'),
+              h('li', null, '音效：说「加个金币音效」，或 ',
+                h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
+              h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
+              h('li', null, 'BGM 试听 / 裁剪：生成后点', h('span', { style: S.codeInline }, '输入框旁的 🎵 BGM 挂件'),
+                '，可试听、拖波形裁剪、一键导入项目（生成完会亮红点提醒）。'),
+              h('li', null, '音频转格式：说「把这些音效转成 wav」，或 ',
+                h('span', { style: S.codeInline }, '/taptap-audio-convert')),
+              h('li', null, '初始化 Maker：说「帮我初始化 taptap maker」。'),
+              h('li', null, 'Skills：说「把用不上的 skill 关掉」，或 ',
+                h('span', { style: S.codeInline }, '/taptap-skills')),
+              h('li', null, '额度红线开关：说「关掉额度红线」即可（会先跟你确认）。'),
+            ),
+            h('p', { style: { ...S.hint, marginTop: 8 } },
+              '各配置文件（image.json / video-relay.json / minimax.json）改完即时生效；插件代码改动需重启 DSH。'),
           ),
-          h('p', { style: { ...S.hint, marginTop: 8 } },
-            'image.json / music 配置改完即时生效；插件代码与设置页改动需重启 DSH。'),
         ),
       )
     }

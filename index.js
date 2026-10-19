@@ -35,13 +35,14 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, discoverMinimaxKey, listVideoJobs } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, listVideoJobs, readVideoRelayConfigRaw, writeVideoRelayConfigPatch } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
   getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
-  setReference as setVideoReference, clearReference as clearVideoReference, submitJobVideo,
+  setReference as setVideoReference, clearReference as clearVideoReference, submitJobVideo, useLocalVideo,
 } from './src/video-sequence.mjs'
-import { listModels as listVideoModels, estimateCostCny } from './src/minimax-video.mjs'
+import { listModels as listVideoModels, estimateCostCny, detectKeyKind, describeKey } from './src/minimax-video.mjs'
+import { normalizeRelayConfig, relayListModels, RELAY_PROTOCOLS } from './src/video-relay.mjs'
 import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
 import os from 'node:os'
@@ -754,6 +755,130 @@ export function apply(ctx, config = {}) {
             size: merged.size ?? '',
             hasApiKey: Boolean(merged.apiKey),
             file: imageConfigPath(home),
+          })
+        }
+        // ── 视频中转站（与上面「中转站生图」同一套心智，只是视频是异步任务）──
+        // GET  /video-relay   → 当前配置 + Key 类型 + 三个后端可用性
+        // POST /video-relay   → 保存（允许把字段写成空字符串：清空 Key 必须真生效）
+        // POST /video-relay/models → 用中转站自己的 /models 列模型（免费自检）
+        if (req.method === 'GET' && sub === 'video-relay') {
+          const cfg = normalizeRelayConfig(readVideoRelayConfigRaw(home))
+          const mmx = readMinimaxConfigRaw(home)
+          const mmxKey = mmx.apiKey || (process.env.MINIMAX_API_KEY ?? '').trim()
+          return sendJson(res, 200, {
+            ok: true,
+            relay: cfg,
+            protocols: RELAY_PROTOCOLS,
+            minimax: {
+              keyKind: detectKeyKind(mmxKey),
+              keyKindText: describeKey(mmxKey),
+              baseURL: mmx.baseURL,
+              model: mmx.model,
+            },
+            // 设置页用它画「现在能走哪条」，不用自己再推断。
+            backends: {
+              relay: Boolean(cfg.enabled && cfg.baseURL && cfg.apiKey && cfg.model),
+              minimax: Boolean(mmxKey),
+              local: true,
+            },
+            file: videoRelayConfigFile(home),
+          })
+        }
+        if (req.method === 'POST' && sub === 'video-relay') {
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const patch = {}
+          for (const key of ['protocol', 'baseURL', 'apiKey', 'model', 'size', 'submitMethod', 'submitPath', 'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader', 'authPrefix', 'extraQuery', 'extraBody']) {
+            if (typeof parsed[key] === 'string') patch[key] = parsed[key]
+          }
+          if (typeof parsed.enabled === 'boolean') patch.enabled = parsed.enabled
+          if (typeof parsed.idInBody === 'boolean') patch.idInBody = parsed.idInBody
+          if (typeof parsed.seconds === 'number') patch.seconds = parsed.seconds
+          for (const key of ['doneValues', 'failedValues', 'pendingValues']) {
+            if (typeof parsed[key] === 'string') patch[key] = parsed[key].split(',').map((s) => s.trim()).filter(Boolean)
+            else if (Array.isArray(parsed[key])) patch[key] = parsed[key]
+          }
+          const merged = writeVideoRelayConfigPatch(home, patch)
+          const cfg = normalizeRelayConfig(merged)
+          // 这里的 minimax 必须按**真实** Key 算，不能写死 true：设置页的绿点
+          // 是「现在能不能走」，写死就变成了「看起来能走」。
+          const mmxKey = (readMinimaxConfigRaw(home).apiKey || (process.env.MINIMAX_API_KEY ?? '')).trim()
+          return sendJson(res, 200, {
+            ok: true,
+            relay: cfg,
+            backends: {
+              relay: Boolean(cfg.enabled && cfg.baseURL && cfg.apiKey && cfg.model),
+              minimax: Boolean(mmxKey),
+              local: true,
+            },
+            hasApiKey: Boolean(cfg.apiKey),
+            file: videoRelayConfigFile(home),
+          })
+        }
+        if (req.method === 'POST' && sub === 'video-relay/models') {
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const saved = normalizeRelayConfig(readVideoRelayConfigRaw(home))
+          // 用表单里当前填的值试，没填的退回已保存的 —— 用户可以「先试再存」。
+          const probe = normalizeRelayConfig({
+            ...saved,
+            baseURL: (typeof parsed.baseURL === 'string' && parsed.baseURL.trim()) || saved.baseURL,
+            apiKey: (typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) || saved.apiKey,
+          })
+          try {
+            const models = await relayListModels(probe)
+            return sendJson(res, 200, { ok: true, models })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // GET/POST /video-minimax —— 设置页管 MiniMax 共用配置（站点 + 模型 + Key）。
+        // Key 只回「有没有」与「是什么类型」，绝不回显明文。
+        if (req.method === 'GET' && sub === 'video-minimax') {
+          const cfg = readMinimaxConfigRaw(home)
+          const key = cfg.apiKey || (process.env.MINIMAX_API_KEY ?? '').trim()
+          return sendJson(res, 200, {
+            ok: true,
+            baseURL: cfg.baseURL,
+            model: cfg.model,
+            hasApiKey: Boolean(key),
+            keyKind: detectKeyKind(key),
+            keyKindText: describeKey(key),
+            models: listVideoModels().map((m) => ({ id: m.id, note: m.note, supportsLastFrame: m.supportsLastFrame })),
+          })
+        }
+        if (req.method === 'POST' && sub === 'video-minimax') {
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          // 空 Key = 「不修改」（与生图卡同一惯例）；要清空得显式传 clear: true。
+          const file = path.join(dataDir(home), 'minimax.json')
+          let patch = {}
+          if (typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) patch.apiKey = parsed.apiKey.trim()
+          if (typeof parsed.baseURL === 'string' && parsed.baseURL.trim()) patch.baseURL = parsed.baseURL.trim()
+          if (typeof parsed.model === 'string' && parsed.model.trim()) patch.model = parsed.model.trim()
+          if (parsed.clear === true) {
+            // 清空 Key：直接从文件里删掉这一项。
+            // 不能走 writeMinimaxConfigPatch —— 它会忽略空串，结果是「界面上清空了、
+            // 文件里还留着旧 Key」。这个分支单独处理并写盘，再把 patch 清掉。
+            const raw = readJson(file) ?? {}
+            delete raw.apiKey
+            writeJson(file, raw)
+          }
+          patch = Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== ''))
+          const merged = Object.keys(patch).length > 0
+            ? writeMinimaxConfigPatch(home, patch)
+            : (readJson(file) ?? {})
+          const key = (merged.apiKey || (process.env.MINIMAX_API_KEY ?? '')).trim()
+          return sendJson(res, 200, {
+            ok: true,
+            baseURL: merged.baseURL || 'https://api.minimaxi.com',
+            model: merged.model || 'MiniMax-H3',
+            hasApiKey: Boolean(key),
+            keyKind: detectKeyKind(key),
+            keyKindText: describeKey(key),
           })
         }
         // BGM ACCOUNT routes: which account is logged in, logging in, logging
@@ -2189,11 +2314,21 @@ function pickVideoJob(home, raw) {
   return all.length > 0 ? all[0] : undefined
 }
 
+/** 视频中转站配置文件的绝对路径（设置页显示「存在哪」，不把内容回给前端）。 */
+function videoRelayConfigFile(home) {
+  return path.join(dataDir(home), 'video-relay.json')
+}
+
 /** 视频配置：文件优先于 env（设置页保存后要能立刻看到自己写的值）。 */
 function videoConfigOf(home) {
   const raw = readMinimaxConfigRaw(home)
   const key = raw.apiKey || (process.env.MINIMAX_API_KEY ?? '').trim()
-  return { apiKey: key, baseURL: raw.baseURL, model: raw.model }
+  return {
+    apiKey: key,
+    baseURL: raw.baseURL,
+    model: raw.model,
+    relay: normalizeRelayConfig(readVideoRelayConfigRaw(home)),
+  }
 }
 
 async function videoCommand(home, rawInput) {
@@ -2208,13 +2343,28 @@ async function videoCommand(home, rawInput) {
     }
 
     if (sub === 'models' || sub === '模型') {
+      if (parseVideoFlags(raw).relay) {
+        // 中转站的模型列表由它自己给，跟官方能力表无关。
+        try {
+          const models = await relayListModels(config.relay)
+          return {
+            kind: 'success',
+            text: models.length === 0
+              ? '中转站 /models 没返回任何模型（有些中转站禁用了这个接口，直接手填模型名即可）。'
+              : [`中转站可用模型 ${models.length} 个：`, ...models.map((m) => `  - ${m}`)].join('\n'),
+          }
+        } catch (error) {
+          return { kind: 'error', text: `获取中转站模型失败：${error?.message ?? error}` }
+        }
+      }
       const models = listVideoModels()
-      const lines = ['视频模型（★ = 支持首尾帧，是做动作帧的关键）：']
+      const lines = ['MiniMax 官方模型（★ = 支持首尾帧，是做动作帧的关键）：']
       for (const m of models) {
         const cost = estimateCostCny({ model: m.id, duration: m.protocol === 'v2' ? 4 : 6, resolution: m.resolutions[0] })
         lines.push(`  ${m.supportsLastFrame ? '★' : ' '} ${m.id.padEnd(24)} ${m.note}${cost ? ` · 约 ¥${cost}/${m.protocol === 'v2' ? '4秒' : '条'}` : ''}`)
       }
-      lines.push('', '设置：设置页「视频生成」一栏选模型、填 Key（或让插件用 mmx 登录态）。')
+      lines.push('', '中转站：/taptap-video models --relay（列出你中转站的模型）')
+      lines.push('自选本地视频：/taptap-video use <mp4 路径>（零额度）')
       return { kind: 'success', text: lines.join('\n') }
     }
 
@@ -2222,17 +2372,21 @@ async function videoCommand(home, rawInput) {
       const d = await videoDoctor(home, config)
       const lines = ['视频动作帧 · 自检结果：', '']
       lines.push(`  ffmpeg：${d.ffmpeg.ok ? '✓ ' + (d.ffmpeg.version ?? '') : '✗ ' + d.ffmpeg.error}`)
-      lines.push(`  Key：${d.hasKey ? '已配置' : '未配置'}`)
-      lines.push(`  站点：${d.baseURL}`)
-      lines.push(`  默认模型：${d.model}`)
+      lines.push('', '  三个后端：')
+      lines.push(`    ${d.backends.relay ? '✓' : '·'} 中转站${d.relay.configured ? `（${d.relay.protocol} · ${d.relay.model}）` : '（未配置）'}`)
+      lines.push(`    ${d.backends.minimax ? '✓' : '·'} MiniMax ${d.baseURL}${d.hasKey ? `（${describeKey(config.apiKey)}）` : '（无 Key）'}`)
+      lines.push('    ✓ 自选本地视频（零额度，随便用）')
+      lines.push('', `  当前默认模型：${d.model}`)
       if (d.estimate !== null) lines.push(`  参考单价：H3 768P 4 秒约 ¥${d.estimate}`)
       if (d.probe) {
-        lines.push('', '  远端探测（免费）：')
+        lines.push('', '  MiniMax 远端探测（免费）：')
         lines.push(`    鉴权：${d.probe.auth}`)
+        lines.push(`    Key 类型：${d.probe.keyKindText ?? d.probe.keyKind}`)
         lines.push(`    套餐：${d.probe.planMessage || d.probe.plan}`)
         for (const note of d.probe.notes ?? []) lines.push(`    · ${note}`)
         if (d.probe.hint) lines.push('', `  ⚠ ${d.probe.hint}`)
       }
+      if (d.backends.relay) lines.push('', `  想验证中转站：/taptap-video models --relay`)
       if (!d.hasKey) {
         const found = discoverMinimaxKey(home)
         if (found.found) {
@@ -2289,6 +2443,43 @@ async function videoCommand(home, rawInput) {
       if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
       const updated = await pollJobVideo(home, job.id, config)
       return { kind: 'success', text: renderVideoJob(updated) }
+    }
+
+    if (sub === 'use' || sub === '用') {
+      if (rest === '') return { kind: 'error', text: '用法：/taptap-video use <mp4 路径>（挂本地视频，零额度）' }
+      let job = pickVideoJob(home, raw)
+      if (!job) job = createVideoJob(home, undefined)
+      const updated = await useLocalVideo(home, job.id, rest.replace(/--\S+\s+\S+/g, '').trim())
+      return {
+        kind: 'success',
+        text: [
+          `已挂上本地视频 → 作业 ${updated.id}（${updated.video.width}×${updated.video.height}，${(updated.video.duration ?? 0).toFixed(2)}s）`,
+          '',
+          '这一步不花钱。接下来：',
+          '  /taptap-video frames → /taptap-video key → /taptap-video sheet',
+        ].join('\n'),
+      }
+    }
+
+    if (sub === 'backend' || sub === '后端') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const which = (rest.split(/\s+/)[0] ?? '').trim()
+      if (!['auto', 'minimax', 'relay', 'local'].includes(which)) {
+        return {
+          kind: 'error',
+          text: [
+            '用法：/taptap-video backend auto|minimax|relay|local',
+            '',
+            '  auto     按可用性自动挑（配了中转站优先，其次 MiniMax Key）',
+            '  minimax  MiniMax 官方（订阅 Key 或按量 Key）',
+            '  relay    视频中转站（OpenAI 兼容 / 自定义端点）',
+            '  local    自选本地视频（配合 /taptap-video use <mp4>）',
+          ].join('\n'),
+        }
+      }
+      const updated = saveVideoJob(home, job.id, { settings: { backend: which } })
+      return { kind: 'success', text: `作业 ${updated.id} 的后端已设为：${which}` }
     }
 
     if (sub === 'frames' || sub === '抽帧') {
@@ -2411,3 +2602,4 @@ async function videoCommand(home, rawInput) {
     }
   }
 }
+

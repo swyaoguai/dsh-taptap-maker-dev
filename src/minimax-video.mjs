@@ -109,6 +109,42 @@ export const MODEL_CAPABILITIES = {
 
 export const DEFAULT_MODEL = 'MiniMax-H3'
 
+/**
+ * Key 的种类 —— 决定额度从哪扣，**这是最容易搞混的一件事**：
+ *
+ *   - `subscription`（前缀 `sk-cp-`）：M Plan 订阅 Key，扣套餐额度 + 积分包。
+ *     视频能否用取决于**档位**：Go 档不含视频模型，Explore/Build 才有。
+ *   - `api`（前缀 `sk-api-`，以及大多数旧格式 JWT）：按量计费 Key，扣账户余额。
+ *     任何档位都能出视频，只是要充值。
+ *   - `unknown`：无法从前缀判断，交给远端报错。
+ *
+ * 两种 Key 打的是**同一批接口**，区别只在计费来源。所以插件不需要用户
+ * 「选订阅还是按量」—— 填哪个就用哪个，下面 detectKeyKind 只用来决定
+ * 界面上该提示什么。
+ */
+export function detectKeyKind(apiKey) {
+  const key = String(apiKey ?? '').trim()
+  if (key === '') return 'none'
+  if (key.startsWith('sk-cp-')) return 'subscription'
+  if (key.startsWith('sk-api-')) return 'api'
+  if (/^ey[A-Za-z0-9_-]+\./.test(key)) return 'api' // 老式 JWT（按量）
+  return 'unknown'
+}
+
+/** 给界面 / 对话用的一句话，说明这个 Key 走什么额度。 */
+export function describeKey(apiKey) {
+  switch (detectKeyKind(apiKey)) {
+    case 'subscription':
+      return 'M Plan 订阅 Key（sk-cp-）：扣套餐额度。视频模型只有 Explore/Build 档才有，Go 档会收到额度不足。'
+    case 'api':
+      return '按量计费 Key：扣账户余额，任何档位都能出视频（H3 768P 约 ¥0.5/秒）。'
+    case 'unknown':
+      return '无法从前缀判断 Key 类型，交给远端校验。'
+    default:
+      return '未填 Key：插件会用环境变量 MINIMAX_API_KEY 或本机 mmx 登录态。'
+  }
+}
+
 export const protocolOf = (model) => (/^MiniMax-H3/i.test(String(model).trim()) ? 'v2' : 'v1')
 
 /** 用户能选的模型（设置页下拉 / 首尾帧模式的过滤都用它）。 */
@@ -454,10 +490,13 @@ export async function downloadVideo(url, timeoutMs) {
 export async function testMiniMax(input) {
   assertKey(input.apiKey)
   const root = rootOf(input.baseUrl)
+  const kind = detectKeyKind(input.apiKey)
   const result = {
     ok: false,
     baseUrl: root,
     model: input.model ?? DEFAULT_MODEL,
+    keyKind: kind,
+    keyKindText: describeKey(input.apiKey),
     auth: 'unknown',
     plan: 'unknown',
     planMessage: '',
@@ -487,7 +526,15 @@ export async function testMiniMax(input) {
   }
 
   // 2) M Plan 套餐状态（免费）。只有国内站有 www.minimax.cn 这个入口。
-  if (/minimaxi?\.com|minimaxi?\.cn/i.test(root)) {
+  //    按量 Key 查这个接口没有意义（它本来就不走套餐），所以只对订阅 Key 查，
+  //    避免把「按量 Key 没有 M Plan」误读成「没有额度」。
+  if (kind !== 'subscription') {
+    result.plan = 'n/a'
+    result.planMessage = kind === 'api' || kind === 'unknown'
+      ? '按量计费 Key，不走 M Plan 套餐额度（直接扣账户余额）'
+      : '未填 Key'
+    result.notes.push('已跳过套餐查询：这类 Key 不适用 M Plan 额度。')
+  } else if (/minimaxi?\.com|minimaxi?\.cn/i.test(root)) {
     try {
       const response = await fetch('https://www.minimax.cn/v1/token_plan/remains', {
         headers: { Authorization: `Bearer ${input.apiKey}` },

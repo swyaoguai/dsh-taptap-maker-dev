@@ -808,6 +808,46 @@ export function clearMinimaxPending(dshHome) {
  * 视频序列帧 —— 项目目录（模型无关：Minimax 只是后端之一）
  * ------------------------------------------------------------------------- */
 
+/** Path to the video relay config (OpenAI-compatible / custom video endpoint). */
+export function videoRelayConfigPath(dshHome) {
+  return path.join(dataDir(dshHome), 'video-relay.json')
+}
+
+/** Read the raw video-relay config, or {} when missing / unreadable. */
+export function readVideoRelayConfigRaw(dshHome) {
+  return readJson(videoRelayConfigPath(dshHome)) ?? {}
+}
+
+/**
+ * Merge a patch into video-relay.json.
+ *
+ * 与 writeMinimaxConfigPatch 不同，这里**允许写空字符串**：用户清空 Key
+ * 或关掉中转站必须真的生效，否则会出现「界面上关掉了、后台还在用旧 Key」。
+ */
+export function writeVideoRelayConfigPatch(dshHome, patch = {}) {
+  const file = videoRelayConfigPath(dshHome)
+  const merged = { ...(readJson(file) ?? {}) }
+  const stringKeys = [
+    'protocol', 'baseURL', 'apiKey', 'model', 'size', 'submitMethod', 'submitPath',
+    'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader',
+    'authPrefix', 'extraQuery', 'extraBody',
+  ]
+  for (const key of stringKeys) {
+    if (typeof patch[key] === 'string') merged[key] = patch[key]
+  }
+  if (typeof patch.enabled === 'boolean') merged.enabled = patch.enabled
+  if (typeof patch.idInBody === 'boolean') merged.idInBody = patch.idInBody
+  if (typeof patch.seconds === 'number') merged.seconds = patch.seconds
+  for (const key of ['doneValues', 'failedValues', 'pendingValues']) {
+    if (Array.isArray(patch[key])) merged[key] = patch[key]
+  }
+  if (typeof merged._comment !== 'string') {
+    merged._comment = '视频中转站（OpenAI 兼容 / 自定义视频端点）。此文件在 $DSH_HOME 下，不在任何 Maker 工作区内。'
+  }
+  writeJson(file, merged)
+  return merged
+}
+
 /**
  * 一次「抽帧 → 抠图 → 合成 → 导入」作业的根目录。
  *

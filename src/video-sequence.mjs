@@ -31,10 +31,11 @@ import {
   clearMinimaxPending, readVideoJob, writeVideoJob, dataDir,
 } from './paths.js'
 import {
-  MiniMaxError, capabilityOf, downloadVideo, estimateCostCny,
+  MiniMaxError, capabilityOf, detectKeyKind, downloadVideo, estimateCostCny,
   modelsSupportingLastFrame, normalizeDuration, normalizeResolution,
   protocolOf, queryVideo, retrieveFile, submitVideo,
 } from './minimax-video.mjs'
+import { relayDownload, relayQuery, relaySubmit, relayReady } from './video-relay.mjs'
 import {
   MediaError, checkFfmpeg, encodePng, extractFramesAt,
   planSampleTimes, probeDuration, probeFps, probeSize, runFfmpeg, toJpegDataUri,
@@ -46,6 +47,8 @@ import { composeSheet, DEFAULT_KEY_OPTIONS, keyFrame } from './video-chroma.mjs'
 const JOB_ID = /^v[a-z0-9]{4,40}$/
 
 export const DEFAULT_SETTINGS = {
+  // 后端：'auto' 按可用性自动挑（订阅/按量 Key → 中转站），也可显式指定。
+  backend: 'auto',      // auto | minimax | relay | local
   model: 'MiniMax-H3',
   resolution: '768P',
   duration: 4,
@@ -139,6 +142,7 @@ function normalizeSettings(raw, fallbackModel) {
   }
   const clamp = (v, d, lo, hi) => Math.min(hi, Math.max(lo, Math.round(num(v, d))))
   const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : (fallbackModel ?? s.model)
+  s.backend = ['auto', 'minimax', 'relay', 'local'].includes(raw.backend) ? raw.backend : 'auto'
   s.model = model
   s.resolution = normalizeResolution(model, raw.resolution ?? s.resolution)
   s.duration = normalizeDuration(model, raw.duration ?? s.duration)
@@ -261,17 +265,28 @@ export async function submitJobVideo(home, id, config) {
   }
   const prompt = `${job.prompt.trim()}${job.suffix.trim() ? `\n${job.suffix.trim()}` : ''}`
   if (prompt.trim() === '') throw new Error('提示词为空：先写一句「角色在做什么」')
-  const cap = capabilityOf(job.settings.model)
   if (job.mode === 'frames' && !job.refs.firstFrame) {
     throw new Error('首尾帧模式至少要一张首帧图（可用 /taptap-video first <图片路径> 指定）')
   }
-  if (job.refs.lastFrame && !cap.supportsLastFrame) {
-    throw new Error(`${job.settings.model} 不支持尾帧，请换 ${modelsSupportingLastFrame().join(' / ')} 或清掉尾帧`)
+  const backend = resolveBackend(job, config)
+  if (backend === 'local') {
+    throw new Error('当前是「自选视频」后端：没有可提交的远程任务。直接用 /taptap-video use <mp4 路径> 挂上本地视频')
+  }
+  // 模型能力只在官方 MiniMax 后端下有意义：中转站的模型名由中转站自己定义。
+  if (backend === 'minimax') {
+    const cap = capabilityOf(job.settings.model)
+    if (job.refs.lastFrame && !cap.supportsLastFrame) {
+      throw new Error(`${job.settings.model} 不支持尾帧，请换 ${modelsSupportingLastFrame().join(' / ')} 或清掉尾帧`)
+    }
   }
 
+  const effectiveModel = backend === 'relay' ? (config.relay?.model || job.settings.model) : job.settings.model
   const submitId = `s${Date.now().toString(36)}`
-  job.video = { status: 'running', submitId, remoteStatus: '提交中', taskId: undefined, backend: 'minimax', model: job.settings.model, updatedAt: Date.now() }
-  log(job, 'info', `提交视频（${job.settings.model} · ${job.settings.resolution} · ${job.settings.duration}s）`)
+  job.video = {
+    status: 'running', submitId, remoteStatus: '提交中', taskId: undefined,
+    backend, model: effectiveModel, updatedAt: Date.now(),
+  }
+  log(job, 'info', `提交视频（${backend === 'relay' ? '中转站' : 'MiniMax'} · ${effectiveModel} · ${job.settings.resolution} · ${job.settings.duration}s）`)
   writeVideoJob(home, job)
 
   let firstFrameImage
@@ -297,22 +312,38 @@ export async function submitJobVideo(home, id, config) {
   }
 
   try {
-    const taskId = await submitVideo({
-      baseUrl: config.baseURL,
-      apiKey: config.apiKey,
-      model: job.settings.model,
-      timeoutMs: 120_000,
-      prompt,
-      firstFrameImage,
-      lastFrameImage,
-      duration: job.settings.duration,
-      resolution: job.settings.resolution,
-      promptOptimizer: job.settings.promptOptimizer,
-    })
+    let taskId
+    let relayTaskId
+    if (backend === 'relay') {
+      const submitted = await relaySubmit(config.relay, {
+        prompt,
+        firstFrameImage,
+        lastFrameImage,
+        seconds: job.settings.duration,
+        size: relaySizeFor(job.settings),
+      })
+      // directUrl：少数中转站在提交响应里就把成品地址给了，跳过轮询。
+      relayTaskId = submitted.taskId
+      taskId = submitted.taskId
+      if (submitted.directUrl) relayTaskId = submitted.taskId
+    } else {
+      taskId = await submitVideo({
+        baseUrl: config.baseURL,
+        apiKey: config.apiKey,
+        model: job.settings.model,
+        timeoutMs: 120_000,
+        prompt,
+        firstFrameImage,
+        lastFrameImage,
+        duration: job.settings.duration,
+        resolution: job.settings.resolution,
+        promptOptimizer: job.settings.promptOptimizer,
+      })
+    }
     const fresh = getJob(home, id)
     fresh.video = { ...fresh.video, status: 'running', taskId, remoteStatus: '已提交', updatedAt: Date.now() }
     log(fresh, 'info', `视频任务已提交：${taskId}`)
-    return { taskId, submitId, job: writeVideoJob(home, fresh) }
+    return { taskId, submitId, backend, job: writeVideoJob(home, fresh) }
   } catch (error) {
     const fresh = getJob(home, id)
     fresh.video = {
@@ -326,10 +357,45 @@ export async function submitJobVideo(home, id, config) {
 }
 
 /**
+ * 决定这次走哪个后端。
+ *
+ * `auto` 的优先级：显式配好的中转站 > MiniMax（Key 或订阅）。中转站排在前面
+ * 是因为**用户主动配了它**多半就是想用它（比如官方额度用完了）；而 MiniMax
+ * 是「发现登录态就自动用」的兜底，不该抢用户的显式选择。
+ */
+export function resolveBackend(job, config) {
+  const wanted = job?.settings?.backend ?? 'auto'
+  if (wanted === 'relay') {
+    if (!relayReady(config?.relay)) throw new Error('作业选择的是「中转站」后端，但中转站没配好（设置页 → 视频生成 → 中转站）')
+    return 'relay'
+  }
+  if (wanted === 'minimax') {
+    if (!config?.apiKey) throw new Error('作业选择的是「MiniMax」后端，但没有可用的 Key')
+    return 'minimax'
+  }
+  if (wanted === 'local') return 'local'
+  if (relayReady(config?.relay)) return 'relay'
+  if (config?.apiKey) return 'minimax'
+  return 'relay' // 都没配 → 交给 relaySubmit 报出「没配好」，比含糊的「没有 Key」有用
+}
+
+/** 中转站的 size 参数：官方后端用 768P/2K 档位，中转站普遍要 WxH。 */
+function relaySizeFor(settings) {
+  if (/^\d+x\d+$/.test(settings.resolution)) return settings.resolution
+  if (settings.resolution === '2K') return '1920x1080'
+  if (settings.resolution === '1080P') return '1920x1080'
+  if (settings.resolution === '480P') return '854x480'
+  return '1280x720'
+}
+
+/**
  * 查询一次任务状态；成功则把视频下载进 videos/ 并返回作业。
  *
  * 设计成「可用任意进程调用、幂等」：只要 job.video.status 还是 running，
  * 就能接着查；已经 ready 的直接返回，不发请求。
+ *
+ * 后端按**作业上记的那个值**分派，不按当前配置：用户完全可能在任务跑的
+ * 中间改设置，那时按配置去查就会拿 MiniMax 的协议去查一个中转站的 taskId。
  */
 export async function pollJobVideo(home, id, config) {
   const job = getJob(home, id)
@@ -338,10 +404,13 @@ export async function pollJobVideo(home, id, config) {
   const taskId = job.video.taskId
   if (!taskId) return job // 还在提交阶段
 
+  const backend = job.video.backend === 'relay' ? 'relay' : 'minimax'
   const model = job.video.model || job.settings.model
   let query
   try {
-    query = await queryVideo({ baseUrl: config.baseURL, apiKey: config.apiKey, model, taskId, timeoutMs: 60_000 })
+    query = backend === 'relay'
+      ? await relayQuery(config.relay, taskId)
+      : await queryVideo({ baseUrl: config.baseURL, apiKey: config.apiKey, model, taskId, timeoutMs: 60_000 })
   } catch (error) {
     // 单次查询失败 ≠ 任务失败，保留 running 让下一轮重试。
     const fresh = getJob(home, id)
@@ -356,28 +425,68 @@ export async function pollJobVideo(home, id, config) {
     return writeVideoJob(home, fresh)
   }
   if (query.status !== 'succeeded') {
-    fresh.video = { ...fresh.video, remoteStatus: query.remoteStatus || query.status, updatedAt: Date.now() }
+    fresh.video = { ...fresh.video, remoteStatus: query.remoteStatus || query.status, progress: query.progress, updatedAt: Date.now() }
     return writeVideoJob(home, fresh)
   }
-  // 成功：v2 直接有地址；v1 要先拿 file_id 换一次下载地址。
-  const url = query.videoUrl
-    ?? (query.fileId ? await retrieveFile({ baseUrl: config.baseURL, apiKey: config.apiKey, model, fileId: query.fileId, timeoutMs: 60_000 }) : undefined)
-  if (!url) {
-    fresh.video = { ...fresh.video, status: 'error', error: '任务已成功，但响应里没有视频地址', updatedAt: Date.now() }
-    return writeVideoJob(home, fresh)
+  let bytes
+  if (backend === 'relay') {
+    bytes = await relayDownload(config.relay, taskId, query, 300_000)
+  } else {
+    // 成功：v2 直接有地址；v1 要先拿 file_id 换一次下载地址。
+    const url = query.videoUrl
+      ?? (query.fileId ? await retrieveFile({ baseUrl: config.baseURL, apiKey: config.apiKey, model, fileId: query.fileId, timeoutMs: 60_000 }) : undefined)
+    if (!url) {
+      fresh.video = { ...fresh.video, status: 'error', error: '任务已成功，但响应里没有视频地址', updatedAt: Date.now() }
+      return writeVideoJob(home, fresh)
+    }
+    bytes = await downloadVideo(url, 300_000)
   }
-  const bytes = await downloadVideo(url, 300_000)
   const target = 'videos/output.mp4'
   writeFileSync(absPath(home, id, target), bytes)
   fresh.video = {
     ...fresh.video, status: 'ready', file: target, remoteStatus: query.remoteStatus || 'succeeded',
-    bytes: bytes.length, error: undefined, hint: undefined, updatedAt: Date.now(),
+    bytes: bytes.length, error: undefined, hint: undefined, progress: undefined, updatedAt: Date.now(),
   }
   fresh.frames = { status: 'empty', count: 0, files: [], keyed: [], report: [] }
   fresh.sheet = { status: 'empty' }
-  log(fresh, 'info', `视频已下载（${(bytes.length / 1024 / 1024).toFixed(1)} MB）`)
+  log(fresh, 'info', `视频已下载（${(bytes.length / 1024 / 1024).toFixed(1)} MB，后端 ${backend}）`)
   clearMinimaxPending(home)
   return writeVideoJob(home, fresh)
+}
+
+/**
+ * 挂一段**本地视频**：不花任何额度，直接把文件收进作业目录并标记就绪。
+ *
+ * 用途：MiniMax Code 用签到积分生成的、录屏、别人给的参考视频 —— 都能走
+ * 后面的抽帧 / 抠像 / 合成 / 导入。这让整条链路在**零额度**下也能完整跑通。
+ */
+export async function useLocalVideo(home, id, sourcePath) {
+  const job = getJob(home, id)
+  if (!job) throw new Error(`视频作业不存在：${id}`)
+  const source = path.resolve(String(sourcePath ?? ''))
+  if (!existsSync(source)) throw new Error(`读不到文件：${source}`)
+  // 用 ffprobe 而不是扩展名判断「是不是视频」：从聊天工具下来的文件常被改名。
+  let size
+  try {
+    size = await probeSize(source)
+  } catch {
+    throw new Error(`这不是一段能解码的视频：${source}`)
+  }
+  const ext = path.extname(source).toLowerCase() || '.mp4'
+  const target = `videos/output${ext === '.mov' ? '.mov' : '.mp4'}`
+  const dest = absPath(home, id, target)
+  mkdirSync(path.dirname(dest), { recursive: true })
+  writeFileSync(dest, readFileSync(source))
+  const duration = await probeDuration(dest).catch(() => 0)
+  job.video = {
+    status: 'ready', backend: 'local', file: target, remoteStatus: '本地视频',
+    model: 'local', width: size.width, height: size.height, duration, updatedAt: Date.now(),
+  }
+  job.frames = { status: 'empty', count: 0, files: [], keyed: [], report: [] }
+  job.sheet = { status: 'empty' }
+  job.import = undefined
+  log(job, 'info', `挂上本地视频：${path.basename(source)}（${size.width}×${size.height}，${duration.toFixed(2)}s）`)
+  return writeVideoJob(home, job)
 }
 
 /* ─────────────────────────────── 抽帧 ──────────────────────────────────── */
@@ -705,16 +814,31 @@ export function nextStepOf(job) {
   return '✓ 已完成，可以进游戏里看效果'
 }
 
-/** 环境自检：ffmpeg / Key / 站点 / 套餐（设置页与 /taptap-video doctor 共用）。 */
+/** 环境自检：ffmpeg / Key 类型 / 站点 / 套餐 / 中转站（设置页与 /taptap-video doctor 共用）。 */
 export async function doctor(home, config) {
   const ffmpeg = await checkFfmpeg()
+  const kind = detectKeyKind(config.apiKey)
   const out = {
     ffmpeg,
     baseURL: config.baseURL,
     model: config.model,
     hasKey: Boolean(config.apiKey && config.apiKey.trim()),
+    keyKind: kind,
     estimate: null,
     probe: null,
+    relay: {
+      configured: relayReady(config.relay),
+      protocol: config.relay?.protocol ?? 'openai',
+      baseURL: config.relay?.baseURL ?? '',
+      model: config.relay?.model ?? '',
+      hasKey: Boolean(config.relay?.apiKey),
+    },
+    // 三个后端的可用性，界面按这个画「现在能走哪条」。
+    backends: {
+      minimax: Boolean(config.apiKey && config.apiKey.trim()),
+      relay: relayReady(config.relay),
+      local: true, // 自选本地视频永远可用（零额度）
+    },
   }
   if (out.hasKey) {
     out.estimate = estimateCostCny({ model: config.model, duration: 4, resolution: '768P' })
