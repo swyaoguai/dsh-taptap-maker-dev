@@ -17,8 +17,53 @@
 | **完整 BGM** | 自动生成提示词 + 打开 MiniMax Audio 网页；下载后**自动导入**（转格式 + 装进 `assets/audio/bgm/` + 生成 `.meta`） |
 | **BGM 工作台挂件** | 主界面输入框旁的 🎵 挂件：**试听**刚生成的 BGM、**拖波形裁剪**选区间（可加淡入淡出防爆音）、**一键导入**项目；生成完自动亮红点提醒 |
 | **音频转换** | ffmpeg 批量转格式 / 压缩 / 响度归一 / 去静音 / 淡入淡出 / 短音拼循环 |
+| **视频动作帧** | 视频模型按**首尾帧**出一段动作 → 精确时间点**抽帧** → **本地抠像**（绿/蓝/品红幕，带逐帧自检）→ 对齐合成透明序列帧 → 一键导入 Maker（`.meta` + `seq.json` + Lua 切图）。只有出视频那一步花钱，抽帧/抠像/合成可无限重调 |
 | **可更新 skills** | 内置游戏开发 skills + 周期更新检测；设置页可勾选禁用不需要的 |
 | **初始化引导** | 直接用中文说「帮我初始化 taptap maker」即可触发，不必记斜杠命令 |
+
+## 视频动作帧（视频 → 序列帧素材）
+
+手里只有一张静帧、想让角色**动起来**，这条链路就是干这个的：
+
+```sh
+/taptap-video doctor                            # 自检 ffmpeg / Key / 站点 / 有没有视频额度
+/taptap-video new 剑士行走
+/taptap-video first ./refs/swordsman.png        # 首帧（绿幕全身图最理想）
+/taptap-video last  ./refs/swordsman_end.png    # 尾帧可选（H3 / Hailuo-02 才支持）
+/taptap-video prompt 角色原地走三步，全身入镜，相机固定，绿幕背景
+/taptap-video run                               # 唯一花钱的一步：提交视频
+/taptap-video poll                              # 1~6 分钟，可反复调；重启后也能接着查
+/taptap-video frames --count 12 --arrange loop  # 抽帧（本地）
+/taptap-video key --chroma auto --tol 40        # 抠像（本地，带逐帧自检报告）
+/taptap-video sheet --cell 256                  # 对齐合成整图（本地）
+/taptap-video import ../my-game --fps 12        # 导入 Maker
+```
+
+设计上的几个取舍：
+
+- **抽帧排法可选**：`uniform`（等分取中点，**首尾都不碰** —— 第 0 帧往往是还没动的静帧）、
+  `first-last`（首尾帧模式想让两张图都算数）、`loop`（行走/跑步/待机要无缝循环）。
+- **抠像主判据是四边洪水填充**，不是绿色优势值 —— 视频模型常把纯色背景重新打光成渐变，
+  只认绿色在那类帧上会整片失效。调色板只取背景主色簇，角色贴边时不会被顺着身体吃进去。
+- **逐帧自检**：每帧给背景占比与「可信」标记。主体只占画面一小块时占比 > 95%、
+  标记不可信是**正确结论**，不是 bug；真素材主体一般占 15%~50%。
+- **对齐用同一包围盒**：所有帧共用一个 alpha 包围盒、贴底放在同一基线，上下起伏不会飘。
+  包围盒必须在**抠完的帧**上算 —— 在原帧上算等于没裁，主体会被缩成一点。
+- **只把成品写进 `assets/`**：中间的视频与原始帧留在 `$DSH_HOME/taptap-maker-dev/video-jobs/`，
+  因为 Maker 运行时会给 `assets/` 下任何新文件补 `.meta` 并打进构建。
+
+### 额度与计费（实情）
+
+| Key / 套餐 | 能否出视频 |
+|---|---|
+| M Plan **Go**（最低档） | ❌ 官方明确不含视频模型，调用返回 `1008 insufficient balance` / HTTP 402 |
+| M Plan **Explore / Build** | ✅ 含 H3，视频只受周窗口限制 |
+| 积分包（¥7 / 1000 积分） | ✅ 支持 H3，套餐额度先用、超出扣积分 |
+| 按量计费 Key（`sk-api-…`） | ✅ H3 768P ≈ ¥0.5/秒、2K ≈ ¥0.8/秒，4 秒 ≈ ¥2 |
+
+⚠️ **MiniMax Code 每日签到积分 ≠ 开放平台积分包**：签到积分只用于 MiniMax Code 应用内
+的多模态创作（30 天有效），不能拿来让本插件通过 API 出片。想白嫖就在 MiniMax Code 里
+用签到积分生成视频、下载 mp4，再当「自选视频」喂给这条链路做抽帧。
 
 ## BGM 试听 / 裁剪挂件（主界面）
 
@@ -149,6 +194,10 @@ node <plugin-dir>/src/taptap-skills-update.mjs
 6. **ChatGPT 网页生图依赖界面选择器**。OpenAI 改版频繁，脚本可能失效——失效时它会如实报告卡在第几步（`no_composer` / `no_image` / `download_failed`），不会假装成功；此时回退到中转站。
 7. **网页出图要 1~3 分钟**。脚本会等"生成中"结束、只认本次新出现的图再下载（不会把上一轮对话里的旧图当结果）。真等超时会记住那个对话的链接：用 `grab` 抓回来即可，**不要重新生成**（会白烧一次额度）。
 7. **多账号轮询违反 OpenAI 服务条款**。轮换账号会绕过单账号配额，可能导致账号被封。这是应要求实现的功能，**风险由你承担**；每个账号用独立浏览器 profile 隔离，且不会自动重试被标记封禁的账号。
+8. **视频动作帧有三个诚实限制**：
+   - M Plan **Go 档没有视频模型**，订阅 Key 打视频接口会收到 `1008 insufficient balance`。这不是插件 bug，也不是 Key 不对（鉴权是通的）。Explore/Build 档、积分包、按量 Key 才能出片。
+   - **M Plan 每日签到积分不能用于 API**：它只在 MiniMax Code 应用内有效。想在插件里出片，只能在 MiniMax Code 里生成后下载视频再导入。
+   - 抽帧率的上限由视频本身决定：模型只生成了 4 秒 24fps，就抽不出 60 帧真正不同的画面，**帧数要按动作时长配**，别指望插值。
 
 ## 关于「额度红线」
 
@@ -161,8 +210,10 @@ node <plugin-dir>/src/taptap-skills-update.mjs
 
 ## 隐私
 
-- API Key 只写进 `$DSH_HOME/taptap-maker-dev/{image,music}.json`，**绝不进入会自动提交的 Maker 工作区**。
-- 本插件不联网上报任何遥测；联网只发生在你主动下载素材或调用你自己的生图 / 音乐端点时。
+- API Key 只写进 `$DSH_HOME/taptap-maker-dev/{image,music,minimax}.json`，**绝不进入会自动提交的 Maker 工作区**。
+- 视频作业（整段视频、原始帧、抠像中间产物）全部落在 `$DSH_HOME/taptap-maker-dev/video-jobs/`，
+  只有最后合成的那一张整图会被复制进项目 `assets/image/`。
+- 本插件不联网上报任何遥测；联网只发生在你主动下载素材或调用你自己的生图 / 音乐 / 视频端点时。
 - 发布前可运行 `node scripts/sanitize-for-release.mjs` 清掉本机路径与密钥残留。
 
 ---

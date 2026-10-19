@@ -654,3 +654,218 @@ export function maskSecret(value) {
   if (value.length <= 10) return `${value.slice(0, 2)}…`
   return `${value.slice(0, 5)}…${value.slice(-4)}`
 }
+
+/* ------------------------------------------------------------------------- *
+ * MINIMAX VIDEO — config + pending-task recovery for the H3 video lane
+ * (taptap-video.mjs). Same privacy rule as image.json: the API key lives
+ * under $DSH_HOME, never inside a Maker workspace.
+ *
+ * - 国际站 api.minimax.io（美元计价，按量付费）
+ * - 国内站 api.minimaxi.com（人民币计价，注意域名多一个 i）
+ * - M Plan 订阅（MiniMax Code）不覆盖视频生成 API——视频走标准 API Key +
+ *   平台余额按量扣费，两套体系独立。
+ * ------------------------------------------------------------------------- */
+
+/** Path to the MiniMax video config file (minimax.json). */
+export function minimaxConfigPath(dshHome) {
+  return path.join(dataDir(dshHome), 'minimax.json')
+}
+
+/**
+ * Resolve effective MiniMax video config with precedence:
+ *   env vars (MINIMAX_API_KEY / MINIMAX_BASE_URL / MINIMAX_VIDEO_MODEL)
+ *   > minimax.json  > defaults.
+ */
+export function resolveMinimaxConfig(dshHome) {
+  const fromFile = readJson(minimaxConfigPath(dshHome)) ?? {}
+  const pick = (...vals) => vals.find((v) => typeof v === 'string' && v.trim().length > 0)
+  const model = pick(
+    process.env.MINIMAX_VIDEO_MODEL,
+    fromFile.model,
+  ) ?? 'MiniMax-H3'
+  // 国际站 v2 与国内站 v2 的路径相同，只有域名不同。
+  let baseURL = pick(
+    process.env.MINIMAX_BASE_URL,
+    fromFile.baseURL,
+  ) ?? 'https://api.minimax.io'
+  baseURL = baseURL.replace(/\/+$/, '').replace(/\/v2$/, '') // 统一存根域名
+  return {
+    apiKey: pick(process.env.MINIMAX_API_KEY, fromFile.apiKey) ?? '',
+    baseURL,
+    model,
+  }
+}
+
+/** Merge a {apiKey, baseURL, model} patch into minimax.json. */
+export function writeMinimaxConfigPatch(dshHome, patch = {}) {
+  const file = minimaxConfigPath(dshHome)
+  const merged = { ...(readJson(file) ?? {}) }
+  for (const key of ['apiKey', 'baseURL', 'model']) {
+    if (typeof patch[key] === 'string' && patch[key].trim().length > 0) merged[key] = patch[key].trim()
+  }
+  if (typeof patch.measurements === 'object' && patch.measurements !== null) {
+    merged.measurements = { ...(merged.measurements ?? {}), ...patch.measurements }
+  }
+  if (typeof merged._comment !== 'string') {
+    merged._comment = 'MiniMax 视频生成（H3，/v2/video_generation，按量计费）。此文件在 $DSH_HOME 下，不在任何 Maker 工作区内。'
+  }
+  writeJson(file, merged)
+  return merged
+}
+
+/**
+ * 同一份 minimax.json 的「无 env 覆盖」读取。
+ *
+ * resolveMinimaxConfig 让环境变量优先（CI 里方便）；但设置页保存后必须立刻
+ * 回读到自己刚写进去的值 —— 若那时恰好有 MINIMAX_API_KEY 环境变量，界面会
+ * 显示成另一个 Key，看起来像「保存没生效」。设置页用这个。
+ */
+export function readMinimaxConfigRaw(dshHome) {
+  const fromFile = readJson(minimaxConfigPath(dshHome)) ?? {}
+  const str = (v, fb) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : fb)
+  return {
+    apiKey: str(fromFile.apiKey, ''),
+    baseURL: str(fromFile.baseURL, 'https://api.minimaxi.com').replace(/\/+$/, '').replace(/\/(v1|v2)$/i, ''),
+    model: str(fromFile.model, 'MiniMax-H3'),
+    measurements: typeof fromFile.measurements === 'object' && fromFile.measurements !== null ? fromFile.measurements : {},
+  }
+}
+
+/**
+ * 自动发现一个已经登录好的 MiniMax Key（设置页「自动发现」按钮与首次使用）。
+ *
+ * 用户机器上常见三种登录痕迹，按可信度排序：
+ *   1. MiniMax 官方 CLI（`mmx auth login`）→ `~/.mmx/config.json` 的 `api_key`，
+ *      前缀 `sk-cp-…` 是 **M Plan 订阅 Key**（用套餐额度，不是账户余额）；
+ *   2. 环境变量 `MINIMAX_API_KEY`；
+ *   3. `~/.mmx/config.json` 里 `base_url` 用来猜站点（国内套餐配国内站）。
+ *
+ * 只读已存在的配置、**不写入**任何东西 —— 是否采用由用户点保存决定。
+ * 返回 `{ found, source, keyPrefix, baseURL, region }`，绝不把完整 Key 回给界面。
+ */
+export function discoverMinimaxKey(dshHome) {
+  const out = { found: false, source: '', keyPrefix: '', baseURL: '', region: '', note: '' }
+  const envKey = (process.env.MINIMAX_API_KEY ?? '').trim()
+  let fileKey = ''
+  let fileBase = ''
+  try {
+    const cfgPath = path.join(os.homedir(), '.mmx', 'config.json')
+    const cfg = readJson(cfgPath)
+    if (cfg && typeof cfg.api_key === 'string') fileKey = cfg.api_key.trim()
+    if (cfg && typeof cfg.base_url === 'string') fileBase = cfg.base_url.trim()
+    if (cfg && typeof cfg.region === 'string') out.region = cfg.region
+  } catch { /* 没装 mmx */ }
+
+  const key = fileKey || envKey
+  if (key === '') {
+    out.note = '没有找到登录痕迹：MiniMax CLI（mmx）未登录，环境变量 MINIMAX_API_KEY 也没设。'
+    return out
+  }
+  out.found = true
+  out.source = fileKey ? 'mmx-cli' : 'env'
+  out.keyPrefix = key.startsWith('sk-cp-') ? 'sk-cp-(M Plan 订阅 Key)'
+    : key.startsWith('sk-api-') ? 'sk-api-(按量计费 Key)'
+      : `${key.slice(0, 5)}…`
+  out.baseURL = fileBase || (out.region === 'global' ? 'https://api.minimax.io' : 'https://api.minimaxi.com')
+  out.note = fileKey
+    ? '来自 MiniMax CLI（mmx）的登录态。订阅 Key 走 M Plan 额度；Go 档不含视频模型。'
+    : '来自环境变量 MINIMAX_API_KEY。'
+  return out
+}
+/** Path to the in-flight MiniMax video task record (crash/timeout recovery). */
+export function minimaxPendingPath(dshHome) {
+  return path.join(dataDir(dshHome), 'video-pending.json')
+}
+
+/** Read the pending video task record, or undefined when there is none. */
+export function readMinimaxPending(dshHome) {
+  const data = readJson(minimaxPendingPath(dshHome))
+  if (typeof data?.taskId !== 'string' || data.taskId.length === 0) return undefined
+  return {
+    taskId: data.taskId,
+    model: typeof data.model === 'string' ? data.model : '',
+    prompt: typeof data.prompt === 'string' ? data.prompt : '',
+    mode: typeof data.mode === 'string' ? data.mode : '',
+    seconds: typeof data.seconds === 'number' ? data.seconds : 0,
+    resolution: typeof data.resolution === 'string' ? data.resolution : '',
+    at: typeof data.at === 'number' ? data.at : 0,
+  }
+}
+
+/** Persist the pending video task record (merge). */
+export function writeMinimaxPending(dshHome, patch = {}) {
+  const merged = { ...(readJson(minimaxPendingPath(dshHome)) ?? {}), ...patch }
+  writeJson(minimaxPendingPath(dshHome), merged)
+  return merged
+}
+
+/** Forget the pending video task record. */
+export function clearMinimaxPending(dshHome) {
+  try { fs.rmSync(minimaxPendingPath(dshHome), { force: true }) } catch { /* ignore */ }
+}
+
+/* ------------------------------------------------------------------------- *
+ * 视频序列帧 —— 项目目录（模型无关：Minimax 只是后端之一）
+ * ------------------------------------------------------------------------- */
+
+/**
+ * 一次「抽帧 → 抠图 → 合成 → 导入」作业的根目录。
+ *
+ * 放在 $DSH_HOME 而不是 Maker 工程的 assets/ 下：Maker 运行时会自动给
+ * assets/ 里的每个新文件补 .meta 并纳入构建，中间产物（整段视频、未裁的
+ * 原始帧）落在那里会变成资源表里的脏条目。只有**最后那一张**裁好的整图
+ * 才被复制进项目。
+ */
+export function videoJobsRoot(dshHome) {
+  const dir = path.join(dataDir(dshHome), 'video-jobs')
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 单个作业目录（id 必须以 v 开头且只含小写字母数字，防目录穿越）。 */
+export function videoJobDir(dshHome, id) {
+  const safe = String(id ?? '')
+  if (!/^v[a-z0-9]{4,40}$/.test(safe)) throw new Error(`非法的视频作业 id：${id}`)
+  const dir = path.join(videoJobsRoot(dshHome), safe)
+  fs.mkdirSync(dir, { recursive: true })
+  return dir
+}
+
+/** 作业清单文件。 */
+export function videoJobFile(dshHome, id) {
+  return path.join(videoJobDir(dshHome, id), 'job.json')
+}
+
+/** 读一个作业；不存在返回 undefined。 */
+export function readVideoJob(dshHome, id) {
+  try { return readJson(videoJobFile(dshHome, id)) ?? undefined } catch { return undefined }
+}
+
+/** 写一个作业（原子替换）。 */
+export function writeVideoJob(dshHome, job) {
+  if (!job || typeof job.id !== 'string') throw new Error('writeVideoJob 需要一个带 id 的作业对象')
+  writeJson(videoJobFile(dshHome, job.id), job)
+  return job
+}
+
+/** 列出全部作业的摘要，按更新时间倒序。 */
+export function listVideoJobs(dshHome) {
+  const root = videoJobsRoot(dshHome)
+  let names = []
+  try { names = fs.readdirSync(root) } catch { return [] }
+  const jobs = []
+  for (const name of names) {
+    if (!/^v[a-z0-9]{4,40}$/.test(name)) continue
+    const job = readJson(path.join(root, name, 'job.json'))
+    if (!job) continue
+    jobs.push(job)
+  }
+  jobs.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  return jobs
+}
+
+/** 删掉一个作业（含视频与全部中间产物）。 */
+export function deleteVideoJob(dshHome, id) {
+  const dir = videoJobDir(dshHome, id)
+  fs.rmSync(dir, { recursive: true, force: true })
+}

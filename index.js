@@ -35,7 +35,13 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, discoverMinimaxKey, listVideoJobs } from './src/paths.js'
+import {
+  composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
+  getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
+  setReference as setVideoReference, clearReference as clearVideoReference, submitJobVideo,
+} from './src/video-sequence.mjs'
+import { listModels as listVideoModels, estimateCostCny } from './src/minimax-video.mjs'
 import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
 import os from 'node:os'
@@ -81,6 +87,14 @@ try {
       cacheDir: Schema.string().default('')
         .description('音频库缓存目录，留空用 $DSH_HOME/taptap-maker-dev/skills-cache/audio'),
     }).description('CC0 音效 / BGM（Kenney，可商用免署名）'),
+    video: Schema.object({
+      apiKey: Schema.string().role('secret').default('')
+        .description('MiniMax Key：M Plan 订阅 Key（sk-cp-…，Explore/Build 档才有视频额度）或按量计费 Key（sk-api-…）。留空则用环境变量 MINIMAX_API_KEY / mmx 登录态'),
+      baseURL: Schema.string().default('https://api.minimaxi.com')
+        .description('国内站 https://api.minimaxi.com（人民币计费）或国际站 https://api.minimax.io（美元计费）'),
+      model: Schema.string().default('MiniMax-H3')
+        .description('视频模型：MiniMax-H3（768P/2K、首尾帧）/ MiniMax-H3-Max（极速）/ MiniMax-Hailuo-02（v1 首尾帧）'),
+    }).description('视频生成（MiniMax 图生视频 / 首尾帧 → 抽帧 → 抠图 → 序列帧素材）'),
     skills: Schema.object({
       autoUpdate: Schema.boolean().default(true).description('定期检查并拉取 skill 更新'),
       updateIntervalHours: Schema.number().default(24).description('更新检查间隔（小时）'),
@@ -2014,6 +2028,13 @@ export function apply(ctx, config = {}) {
     })
 
     scoped.commands.register({
+      name: 'taptap-video',
+      description: '视频生成动作帧：首尾帧视频 → 抽帧 → 抠图 → 序列帧素材导入 Maker（本地抠像不花额度）',
+      input: { hint: 'new / first <图> / last <图> / prompt <文字> / run / poll / frames / key / sheet / import <工程目录> / doctor / status' },
+      handler: async (invocation) => videoCommand(home, invocation?.rawInput ?? ''),
+    })
+
+    scoped.commands.register({
       name: 'taptap-skills',
       description: '管理游戏开发 skills：list / disable <名> / enable <名> / reset / update',
       input: { hint: '留空=列表+更新检测；disable <名>…；enable <名>…；reset；update' },
@@ -2090,4 +2111,303 @@ export function apply(ctx, config = {}) {
       },
     })
   })
+}
+
+/* ------------------------------------------------------------------------- *
+ * /taptap-video —— 视频动作帧管线
+ *
+ * 一条链路上每一步都得能单独重跑：视频很贵（按秒计费），但抽帧 / 抠像 /
+ * 合成全是本地的，调参数不用重新出片。所以命令按阶段拆开，而 `run` 只是
+ * 「把剩下的步骤一次跑完」的糖。
+ * ------------------------------------------------------------------------- */
+
+/** 解析 `--flag value` 形式的参数（命令行风格，路径可以带引号）。 */
+function parseVideoFlags(raw) {
+  const flags = {}
+  const pattern = /--([a-zA-Z]+)\s+("[^"]*"|'[^']*'|\S+)/g
+  let m
+  while ((m = pattern.exec(raw)) !== null) {
+    flags[m[1]] = m[2].replace(/^["']|["']$/g, '')
+  }
+  return flags
+}
+
+const VIDEO_HELP = [
+  '视频动作帧（视频模型以首尾帧生成序列帧 → 抽帧 → 抠图 → 导入 Maker）：',
+  '',
+  '  /taptap-video doctor            自检：ffmpeg / Key / 站点 / 套餐有没有视频额度',
+  '  /taptap-video new [名字]        新建作业',
+  '  /taptap-video first <图片路径>  设首帧（必填；建议绿幕/纯色背景的全身图）',
+  '  /taptap-video last <图片路径>   设尾帧（可选；只有 H3 系列和 Hailuo-02 支持）',
+  '  /taptap-video prompt <提示词>   写「角色在做什么」',
+  '  /taptap-video run               一次跑完：提交视频 → 等 → 抽帧 → 抠像 → 合成',
+  '  /taptap-video poll              只查视频进度（可反复调；重启后也能接着查）',
+  '  /taptap-video frames [--count 12] [--arrange uniform|first-last|loop]',
+  '  /taptap-video key [--chroma auto|green|blue|magenta] [--tol 40]',
+  '  /taptap-video sheet [--cell 256] [--layout auto|row|grid]',
+  '  /taptap-video import <Maker工程目录> [--name 文件名] [--fps 12]',
+  '  /taptap-video status           看当前作业进度与逐帧抠像报告',
+  '  /taptap-video models           列出视频模型、是否支持尾帧、大致单价',
+  '',
+  '计费：只有 `run` / 提交视频那一步花钱（H3 768P 约 ¥0.5/秒，4 秒 ≈ ¥2）。',
+  '抽帧 / 抠像 / 合成 / 导入全是本地计算，反复调参数不产生费用。',
+  'M Plan Go 档不含视频模型，需要 Explore/Build 档或按量计费 Key。',
+].join('\n')
+
+/** 把一个作业渲染成一段人话（状态 + 逐帧报告）。 */
+function renderVideoJob(job) {
+  const lines = [`作业 ${job.id} · ${job.name}`]
+  lines.push(`  视频：${job.video?.status ?? 'empty'}${job.video?.remoteStatus ? `（${job.video.remoteStatus}）` : ''}${job.video?.error ? ` — ${job.video.error}` : ''}`)
+  if (job.video?.hint) lines.push(`  ↳ ${job.video.hint}`)
+  if (job.frames?.status === 'ready') {
+    lines.push(`  帧：${job.frames.count} 张 · ${job.frames.width}×${job.frames.height} · ${job.frames.duration?.toFixed(2)}s · ${job.frames.arrange}`)
+    const report = job.frames.report ?? []
+    if (report.length > 0) {
+      const bad = report.filter((r) => r.confident === false)
+      lines.push(`  抠像：${job.frames.keyed.length} 帧已完成，${report.length - bad.length}/${report.length} 帧背景占比可信`)
+      if (bad.length > 0) {
+        lines.push(`  ⚠ ${bad.length} 帧背景占比异常（${bad.slice(0, 5).map((r) => `${r.index + 1}→${(r.backgroundFraction * 100).toFixed(0)}%`).join(', ')}${bad.length > 5 ? '…' : ''}）`)
+        lines.push('    多数是主体太贴边或整屏被抠光；调 --tol（背景容差）或换一段主体更居中的视频。')
+      }
+    }
+  } else if (job.frames?.status === 'error') {
+    lines.push(`  帧：失败 — ${job.frames.error}`)
+  }
+  if (job.sheet?.status === 'ready') {
+    lines.push(`  整图：${job.sheet.width}×${job.sheet.height}（${job.sheet.columns} 列 × ${job.sheet.rows} 行 × ${job.sheet.cellWidth}px）`)
+  }
+  if (job.import) lines.push(`  已导入：${job.import.asset}（${job.import.fps} fps）`)
+  lines.push(`  下一步：${nextStepOf(job)}`)
+  return lines.join('\n')
+}
+
+/** 解析「当前作业」：`--job <id>` 显式指定，否则取最近更新的那个。 */
+function pickVideoJob(home, raw) {
+  const flags = parseVideoFlags(raw)
+  if (flags.job) return getVideoJob(home, flags.job)
+  const all = listVideoJobs(home)
+  return all.length > 0 ? all[0] : undefined
+}
+
+/** 视频配置：文件优先于 env（设置页保存后要能立刻看到自己写的值）。 */
+function videoConfigOf(home) {
+  const raw = readMinimaxConfigRaw(home)
+  const key = raw.apiKey || (process.env.MINIMAX_API_KEY ?? '').trim()
+  return { apiKey: key, baseURL: raw.baseURL, model: raw.model }
+}
+
+async function videoCommand(home, rawInput) {
+  const raw = String(rawInput ?? '').trim()
+  const sub = (raw.split(/\s+/)[0] ?? '').toLowerCase()
+  const rest = raw.slice(sub.length).trim()
+  const config = videoConfigOf(home)
+
+  try {
+    if (raw === '' || sub === 'help' || sub === '帮助') {
+      return { kind: 'success', text: VIDEO_HELP }
+    }
+
+    if (sub === 'models' || sub === '模型') {
+      const models = listVideoModels()
+      const lines = ['视频模型（★ = 支持首尾帧，是做动作帧的关键）：']
+      for (const m of models) {
+        const cost = estimateCostCny({ model: m.id, duration: m.protocol === 'v2' ? 4 : 6, resolution: m.resolutions[0] })
+        lines.push(`  ${m.supportsLastFrame ? '★' : ' '} ${m.id.padEnd(24)} ${m.note}${cost ? ` · 约 ¥${cost}/${m.protocol === 'v2' ? '4秒' : '条'}` : ''}`)
+      }
+      lines.push('', '设置：设置页「视频生成」一栏选模型、填 Key（或让插件用 mmx 登录态）。')
+      return { kind: 'success', text: lines.join('\n') }
+    }
+
+    if (sub === 'doctor' || sub === '自检') {
+      const d = await videoDoctor(home, config)
+      const lines = ['视频动作帧 · 自检结果：', '']
+      lines.push(`  ffmpeg：${d.ffmpeg.ok ? '✓ ' + (d.ffmpeg.version ?? '') : '✗ ' + d.ffmpeg.error}`)
+      lines.push(`  Key：${d.hasKey ? '已配置' : '未配置'}`)
+      lines.push(`  站点：${d.baseURL}`)
+      lines.push(`  默认模型：${d.model}`)
+      if (d.estimate !== null) lines.push(`  参考单价：H3 768P 4 秒约 ¥${d.estimate}`)
+      if (d.probe) {
+        lines.push('', '  远端探测（免费）：')
+        lines.push(`    鉴权：${d.probe.auth}`)
+        lines.push(`    套餐：${d.probe.planMessage || d.probe.plan}`)
+        for (const note of d.probe.notes ?? []) lines.push(`    · ${note}`)
+        if (d.probe.hint) lines.push('', `  ⚠ ${d.probe.hint}`)
+      }
+      if (!d.hasKey) {
+        const found = discoverMinimaxKey(home)
+        if (found.found) {
+          lines.push('', `  发现可用登录态：${found.source}（${found.keyPrefix}），站点 ${found.baseURL}。`)
+          lines.push('  在设置页「视频生成」里点保存即可采用，或直接依赖它（不填 Key 时自动用）。')
+        }
+      }
+      return { kind: 'success', text: lines.join('\n') }
+    }
+
+    if (sub === 'new' || sub === '新建') {
+      const job = createVideoJob(home, rest || undefined)
+      return {
+        kind: 'success',
+        text: [
+          `已建作业 ${job.id}（${job.name}）`,
+          '',
+          '接下来：',
+          `  /taptap-video first <首帧图片路径>`,
+          `  /taptap-video prompt <角色在做什么>`,
+          `  /taptap-video run`,
+        ].join('\n'),
+      }
+    }
+
+    if (sub === 'first' || sub === 'last' || sub === '首帧' || sub === '尾帧') {
+      const kind = (sub === 'last' || sub === '尾帧') ? 'lastFrame' : 'firstFrame'
+      if (rest === '') return { kind: 'error', text: `用法：/taptap-video ${sub} <图片路径>` }
+      let job = pickVideoJob(home, raw)
+      if (!job) job = createVideoJob(home, undefined)
+      const updated = await setVideoReference(home, job.id, kind, rest)
+      const ref = updated.refs[kind]
+      const lines = [`已设${kind === 'firstFrame' ? '首帧' : '尾帧'}：${ref.name}（${ref.width}×${ref.height}）→ 作业 ${updated.id}`]
+      for (const w of ref.warnings ?? []) lines.push(`  ⚠ ${w}`)
+      return { kind: 'success', text: lines.join('\n') }
+    }
+
+    if (sub === 'prompt' || sub === '提示词') {
+      if (rest === '') return { kind: 'error', text: '用法：/taptap-video prompt <提示词>' }
+      let job = pickVideoJob(home, raw)
+      if (!job) job = createVideoJob(home, undefined)
+      const updated = saveVideoJob(home, job.id, { prompt: rest })
+      return { kind: 'success', text: `已写提示词 → 作业 ${updated.id}:\n  ${rest}\n\n下一步：/taptap-video run` }
+    }
+
+    if (sub === 'status' || sub === '状态') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'success', text: `还没有作业。开始：/taptap-video new\n\n${VIDEO_HELP}` }
+      return { kind: 'success', text: renderVideoJob(job) }
+    }
+
+    if (sub === 'poll' || sub === '查') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const updated = await pollJobVideo(home, job.id, config)
+      return { kind: 'success', text: renderVideoJob(updated) }
+    }
+
+    if (sub === 'frames' || sub === '抽帧') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const flags = parseVideoFlags(raw)
+      const overrides = {}
+      if (flags.count) overrides.frameCount = Number(flags.count)
+      if (flags.arrange) overrides.arrange = flags.arrange
+      if (flags.edge) overrides.longEdge = Number(flags.edge)
+      const updated = await extractJobFrames(home, job.id, overrides)
+      return { kind: 'success', text: renderVideoJob(updated) }
+    }
+
+    if (sub === 'key' || sub === '抠图') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const flags = parseVideoFlags(raw)
+      const overrides = {}
+      if (flags.chroma) overrides.chroma = flags.chroma
+      if (flags.tol) overrides.bgTolerance = Number(flags.tol)
+      if (flags.low) overrides.keyLow = Number(flags.low)
+      if (flags.high) overrides.keyHigh = Number(flags.high)
+      if (flags.despill) overrides.despill = Number(flags.despill)
+      const updated = await keyJobFrames(home, job.id, overrides)
+      return { kind: 'success', text: renderVideoJob(updated) }
+    }
+
+    if (sub === 'sheet' || sub === '合成') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const flags = parseVideoFlags(raw)
+      const overrides = {}
+      if (flags.cell) {
+        overrides.cellWidth = Number(flags.cell)
+        overrides.cellHeight = Number(flags.cell)
+      }
+      if (flags.layout) overrides.layout = flags.layout
+      if (flags.columns) overrides.columns = Number(flags.columns)
+      const updated = await composeJobSheet(home, job.id, overrides)
+      return { kind: 'success', text: renderVideoJob(updated) }
+    }
+
+    if (sub === 'import' || sub === '导入') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const flags = parseVideoFlags(raw)
+      const target = flags.project ?? rest.replace(/--\S+\s+\S+/g, '').trim()
+      if (!target) return { kind: 'error', text: '用法：/taptap-video import <Maker工程目录> [--name 文件名] [--fps 12]' }
+      const result = await importToMaker(home, job.id, {
+        projectDir: target,
+        assetName: flags.name,
+        fps: flags.fps ? Number(flags.fps) : undefined,
+      })
+      return {
+        kind: 'success',
+        text: [
+          `已导入 Maker 工程：${path.relative(process.cwd(), result.file) || result.file}`,
+          `  .meta：${path.basename(result.meta)}（uuid ${result.manifest.uuid}）`,
+          `  清单：${path.basename(result.manifest ? job.import.manifest : '')}`,
+          '',
+          '游戏里按格子切图（直接贴进 Lua）：',
+          '',
+          result.lua,
+        ].join('\n'),
+      }
+    }
+
+    if (sub === 'set' || sub === '设置') {
+      const job = pickVideoJob(home, raw)
+      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      const flags = parseVideoFlags(raw)
+      const settings = {}
+      if (flags.model) settings.model = flags.model
+      if (flags.resolution) settings.resolution = flags.resolution
+      if (flags.duration) settings.duration = Number(flags.duration)
+      if (flags.count) settings.frameCount = Number(flags.count)
+      const updated = saveVideoJob(home, job.id, { settings })
+      const lines = [`已更新作业 ${updated.id} 的设置：`]
+      for (const [k, v] of Object.entries(settings)) lines.push(`  ${k} = ${v}`)
+      return { kind: 'success', text: lines.join('\n') }
+    }
+
+    if (sub === 'run' || sub === '跑') {
+      let job = pickVideoJob(home, raw)
+      if (!job) job = createVideoJob(home, undefined)
+      if (!config.apiKey) {
+        const found = discoverMinimaxKey(home)
+        return {
+          kind: 'error',
+          text: [
+            '没有可用的 MiniMax Key。',
+            found.found ? `发现 ${found.source} 的登录态（${found.keyPrefix}），但插件配置里是空的 —— 在设置页「视频生成」点保存采用，或设环境变量 MINIMAX_API_KEY。` : '',
+            '先跑 /taptap-video doctor 看看还能缺什么。',
+          ].filter(Boolean).join('\n'),
+        }
+      }
+      const cost = estimateCostCny(config.model)
+      const submitted = await submitJobVideo(home, job.id, config)
+      return {
+        kind: 'success',
+        text: [
+          `已提交视频任务 ${submitted.taskId}（${job.settings.model} · ${job.settings.resolution} · ${job.settings.duration}s${cost ? ` · 约 ¥${estimateCostCny({ model: job.settings.model, duration: job.settings.duration, resolution: job.settings.resolution })}` : ''}）`,
+          '',
+          '生成通常要 1~6 分钟。接下来：',
+          '  /taptap-video poll    查进度（可以反复调，进程重启也能接着查）',
+          '  出片后：/taptap-video frames → /taptap-video key → /taptap-video sheet',
+        ].join('\n'),
+      }
+    }
+
+    return { kind: 'error', text: `未知子命令：${sub}\n\n${VIDEO_HELP}` }
+  } catch (error) {
+    return {
+      kind: 'error',
+      text: [
+        `${error?.message ?? error}`,
+        error?.hint ? `\n提示：${error.hint}` : '',
+      ].filter(Boolean).join('\n'),
+    }
+  }
 }
