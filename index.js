@@ -49,6 +49,7 @@ import {
   readLanes, writeLanes,
 } from './src/lanes.mjs'
 import { resolveAssetDir as resolveAssetDirForApi } from './src/assets.mjs'
+import { guardUserSetting, guardrailLines, hasApproval, requireApproval } from './src/guards.mjs'
 
 // API 层的短别名：路由函数里反复写 readLanes/writeLanes 太长，且和已有的
 // read*FromApi 风格不一致。
@@ -370,6 +371,8 @@ function policyText(config, gptLaneOn = true) {
     '- 用户没有明说要用内置额度 / 要用这些工具时，一律视为禁止，不要“顺手”生成，也不要为补素材而自作主张调用。',
     '- 只有当用户明确说“用内置额度 / 用 Maker 的 generate_image / 用 2.5 生成视频”之类时才可调用，并遵守其原有的二次确认与计费提示规则。',
     '- 只读 / 状态 / 构建 / 反馈 / LSP 类 Maker 工具（如 maker 状态、构建、玩家反馈、Lua LSP）不消耗生成额度，可正常使用。',
+    '',
+    ...guardrailLines(),
     '',
     ...imageLines,
     '',
@@ -2317,8 +2320,8 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'taptap-skills',
-      description: '管理游戏开发 skills：list / disable <名> / enable <名> / reset / update',
-      input: { hint: '留空=列表+更新检测；disable <名>…；enable <名>…；reset；update' },
+      description: '管理游戏开发 skills：list / disable <名> / enable <名> / restore / reset / update',
+      input: { hint: '留空=列表+更新检测；disable <名>…；enable <名>…；restore（恢复误清空的禁用表）；reset（清空，需 --yes）；update' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const parts = raw.split(/[\s,，]+/).filter(Boolean)
@@ -2330,6 +2333,12 @@ export function apply(ctx, config = {}) {
         // disable / 隐藏 / 删除
         if (sub === 'disable' || sub === '隐藏' || sub === '删除' || sub === 'remove') {
           if (argNames.length === 0) return { kind: 'error', text: '用法：/taptap-skills disable <skill名> [更多名…]' }
+          // 禁用表是用户维护的清单：AI 觉得「这个 skill 没用了」就把用户的选择改掉，
+          // 是越权。要禁用得他明说（带 --yes 或自己点名）。
+          const gate = guardUserSetting('lanes.enabled', { rawInput, from: '当前禁用表', to: `额外禁用 ${argNames.join('、')}` })
+          if (!gate.ok) {
+            return { kind: 'error', text: `${gate.text}\n\n（如果确实要禁用这些，请加 --yes 或自己点名要求。）` }
+          }
           const all = new Set(provider.listAll().map((s) => s.name))
           const unknown = argNames.filter((n) => !all.has(n))
           const next = writeDisabledSkills(home, [...readDisabledSkills(home), ...argNames])
@@ -2353,11 +2362,62 @@ export function apply(ctx, config = {}) {
           return { kind: 'success', text: `已恢复：${argNames.join('、')}。当前禁用共 ${next.length} 个。` }
         }
 
-        // reset：清空禁用表
+        // reset：清空禁用表。
+        // ⚠️ 禁用表是用户攒出来的（可能禁用了很多用不上的 skill），清空即丢失。
+        //    以前一句 reset 就抹掉，没有确认也没有备份 —— 被误触发时无法挽回。
+        //    现在：先备份，再要求用户明确同意。
         if (sub === 'reset' || sub === '清空') {
+          const current = readDisabledSkills(home)
+          if (current.length === 0) {
+            return { kind: 'success', text: '禁用表本来就是空的，无需清空。' }
+          }
+          // 先备份：即使之后用户后悔，也能一行恢复。
+          const backupName = `skills-disabled.backup-${Date.now().toString(36)}.json`
+          try {
+            writeJson(path.join(dataDir(home), backupName), { disabled: current })
+          } catch { /* 备份失败也要继续提示用户，只是没有退路 */ }
+          const gate = requireApproval({
+            rawInput,
+            action: '清空 skill 禁用表',
+            consequence: `当前禁用 ${current.length} 个：${current.join('、')}。清空后它们会全部重新出现在 skill 列表里。`,
+            undo: `/taptap-skills restore（本次已备份到 ${backupName}）`,
+          })
+          if (!gate.ok) {
+            return {
+              kind: 'error',
+              text: [
+                gate.text,
+                '',
+                `（已先把当前禁用表备份到 ${backupName}，所以即使清了也能一行恢复。）`,
+                '要清空请加 --yes。',
+              ].join('\n'),
+            }
+          }
           writeDisabledSkills(home, [])
           refresh()
-          return { kind: 'success', text: '已清空禁用表，所有 skill 恢复可用。' }
+          return {
+            kind: 'success',
+            text: `已清空禁用表（${current.length} 个 skill 恢复可用）。备份：${backupName}，可用 /taptap-skills restore 恢复。`,
+          }
+        }
+
+        // restore：从最近一次备份恢复禁用表
+        if (sub === 'restore' || sub === '恢复禁用') {
+          const dir = dataDir(home)
+          let files = []
+          try {
+            files = fs.readdirSync(dir).filter((f) => f.startsWith('skills-disabled.backup-') && f.endsWith('.json')).sort().reverse()
+          } catch { files = [] }
+          if (files.length === 0) {
+            return { kind: 'error', text: '没有可用的禁用表备份（备份只在 reset 时生成）。' }
+          }
+          const picked = files[0]
+          const raw = readJson(path.join(dir, picked)) ?? {}
+          const names = Array.isArray(raw.disabled) ? raw.disabled.filter((n) => typeof n === 'string') : []
+          if (names.length === 0) return { kind: 'error', text: `备份 ${picked} 里没有内容。` }
+          writeDisabledSkills(home, names)
+          refresh()
+          return { kind: 'success', text: `已从 ${picked} 恢复禁用表：${names.join('、')}` }
         }
 
         // update：强制跑一次更新（忽略冷却）
@@ -2549,6 +2609,17 @@ async function videoCommand(home, rawInput) {
       if (flags.off) patch.groups.video.enabled = { [String(flags.off)]: false }
       if (flags.on) patch.groups.video.enabled = { ...(patch.groups.video.enabled ?? {}), [String(flags.on)]: true }
       if ('fallback' in flags) patch.autoFallback = String(flags.fallback) !== 'false' && String(flags.fallback) !== 'off'
+      const before = readLanes(home)
+      // 通道顺序与开关是用户亲手排的：换通道 = 可能走到另一条要花钱的通道。
+      // 必须用户自己点头，AI 不得自行调整。
+      const gate = guardUserSetting('lanes.order', {
+        rawInput: raw,
+        from: before.groups.video.order.filter((id) => before.groups.video.enabled[id]).join(' → '),
+        to: patch.groups.video.order
+          ? patch.groups.video.order.join(' → ')
+          : Object.entries(patch.groups.video.enabled ?? {}).map(([k, v]) => `${k} ${v ? '开' : '关'}`).join('、') || '（不变）',
+      })
+      if (!gate.ok) return { kind: 'error', text: gate.text }
       const saved = writeLanes(home, patch)
       const v = saved.groups.video
       const labelOf = { relay: '视频中转站', minimax: 'MiniMax 官方', local: '自选本地视频' }
@@ -2654,12 +2725,19 @@ async function videoCommand(home, rawInput) {
     if (sub === 'use' || sub === '用') {
       if (rest === '') return { kind: 'error', text: '用法：/taptap-video use <mp4 路径>（挂本地视频，零额度）' }
       let job = pickVideoJob(home, raw)
-      if (!job) job = createVideoJob(home, undefined)
-      const updated = await useLocalVideo(home, job.id, rest.replace(/--\S+\s+\S+/g, '').trim())
+      if (!job) job = createVideoJob(home, undefined, { model: config.model })
+      const forced = hasApproval(raw)
+      const updated = await useLocalVideo(home, job.id, rest.replace(/--\S+\s+\S+/g, '').trim(), { force: forced })
+      // 拒绝覆盖（作业里已有花钱生成的视频）→ 如实回报，不当作失败也不当作成功。
+      if (updated.overwritten === false) {
+        return { kind: 'error', text: `${updated.message}\n\n我没有覆盖它。确认要换请加 --yes。` }
+      }
       return {
         kind: 'success',
         text: [
-          `已挂上本地视频 → 作业 ${updated.id}（${updated.video.width}×${updated.video.height}，${(updated.video.duration ?? 0).toFixed(2)}s）`,
+          updated.overwritten
+            ? `⚠️ 已用本地视频**覆盖**掉原来的 ${updated.overwritten}（那段生成结果已不可用）。`
+            : `已挂上本地视频 → 作业 ${updated.id}（${updated.video.width}×${updated.video.height}，${(updated.video.duration ?? 0).toFixed(2)}s）`,
           '',
           '这一步不花钱。接下来：',
           '  /taptap-video frames → /taptap-video key → /taptap-video sheet',
@@ -2763,6 +2841,16 @@ async function videoCommand(home, rawInput) {
       if (flags.resolution) settings.resolution = flags.resolution
       if (flags.duration) settings.duration = Number(flags.duration)
       if (flags.count) settings.frameCount = Number(flags.count)
+      // 换模型 = 替用户决定花多少钱。必须用户自己说，不能由 AI「顺手优化」。
+      if (settings.model) {
+        const gate = guardUserSetting('model', { rawInput: raw, from: job.settings.model, to: settings.model })
+        if (!gate.ok) {
+          return {
+            kind: 'error',
+            text: `${gate.text}\n\n（视频按秒计费，换模型就是换价。要换请加 --yes，或你自己下指令。）`,
+          }
+        }
+      }
       const updated = saveVideoJob(home, job.id, { settings })
       const lines = [`已更新作业 ${updated.id} 的设置：`]
       for (const [k, v] of Object.entries(settings)) lines.push(`  ${k} = ${v}`)

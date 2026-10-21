@@ -774,8 +774,12 @@ export async function pollJobVideo(home, id, config) {
  *
  * 用途：MiniMax Code 用签到积分生成的、录屏、别人给的参考视频 —— 都能走
  * 后面的抽帧 / 抠像 / 合成 / 导入。这让整条链路在**零额度**下也能完整跑通。
+ *
+ * ⚠️ 覆盖保护：作业里已经有一段**花过钱生成的**视频时，这里不会默默把它覆盖掉 ——
+ * 那等于把用户已经付过钱的产物扔了，而且没法再生成一次（同样的 prompt 也不保证
+ * 一样）。没有 `force` 就返回 { overwritten: false }，由调用方转成一句询问。
  */
-export async function useLocalVideo(home, id, sourcePath) {
+export async function useLocalVideo(home, id, sourcePath, { force = false } = {}) {
   const job = getJob(home, id)
   if (!job) throw new Error(`视频作业不存在：${id}`)
   const source = path.resolve(String(sourcePath ?? ''))
@@ -787,6 +791,25 @@ export async function useLocalVideo(home, id, sourcePath) {
   } catch {
     throw new Error(`这不是一段能解码的视频：${source}`)
   }
+
+  // 已经有就绪的视频（尤其 backend=minimax/relay 的，是花钱生成的）→ 不覆盖。
+  const prev = job.video
+  const hadPaid = prev?.status === 'ready' && prev.file && prev.backend !== 'local'
+  if (hadPaid && !force) {
+    return {
+      overwritten: false,
+      job,
+      candidate: { source, width: size.width, height: size.height },
+      message: [
+        `作业 ${job.id} 里已经有一段**生成好的**视频（${prev.backend === 'relay' ? '中转站' : 'MiniMax'}`
+        + `${prev.model ? ' · ' + prev.model : ''}，${prev.file}）。`,
+        '挂新的本地视频会**覆盖**它 —— 覆盖之后那段就没了，而且不能保证再生成出一模一样的。',
+        '',
+        '确实要换，请加 `--yes`；或者先复制走：' + path.join(job.dir, prev.file),
+      ].join('\n'),
+    }
+  }
+
   const ext = path.extname(source).toLowerCase() || '.mp4'
   const target = `videos/output${ext === '.mov' ? '.mov' : '.mp4'}`
   const dest = absPath(home, id, target)
@@ -801,7 +824,9 @@ export async function useLocalVideo(home, id, sourcePath) {
   job.sheet = { status: 'empty' }
   job.import = undefined
   log(job, 'info', `挂上本地视频：${path.basename(source)}（${size.width}×${size.height}，${duration.toFixed(2)}s）`)
-  return writeVideoJob(home, job)
+  const saved = writeVideoJob(home, job)
+  // overwrote 让调用方能如实告诉用户「原来那段被换掉了」，而不是当无事发生。
+  return { ...saved, overwritten: hadPaid ? (prev?.file ?? null) : false }
 }
 
 /* ─────────────────────────────── 抽帧 ──────────────────────────────────── */
