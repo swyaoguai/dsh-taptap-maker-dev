@@ -90,6 +90,28 @@ console.log('\n[3] 订阅 Key / 按量 Key 识别')
   ok(/自检/.test(describeKey(jwt({ iss: 'minimax' }))), '不确定时引导跑自检，而不是断言按量')
 }
 
+// ⚠️ 回归：实测 MiniMax 对全 0 的 task_id 回的是 HTTP 400 + code 2013
+// （`This task_id does not exist`）——鉴权其实是**通过**的，只是任务不存在。
+// 原来只认 500 / `record not found`，于是自检每次都报「未给出明确结论」。
+console.log('\n[3b] 鉴权探针：400/2013 = Key 有效，不是「不确定」')
+{
+  const src = readFileSync(new URL('../src/minimax-video.mjs', import.meta.url), 'utf8')
+  const probe = /if \(\/record not found[\s\S]*?\{[\s\S]*?result\.auth = 'ok'/.exec(src)
+  ok(Boolean(probe), '能找到鉴权探针的成功判定分支')
+  ok(/2013/.test(probe?.[0] ?? ''), '探针认得 code 2013')
+  ok(/does not exist/i.test(probe?.[0] ?? ''), '探针认得 "task_id does not exist" 文案')
+  ok(/status === 400/.test(probe?.[0] ?? ''), '探针把 HTTP 400 纳入「任务不存在」')
+  // 鉴权真失败仍须判 failed，且必须**先于** 400 规则命中（401 分支带 return）。
+  const catchBody = /catch \(error\) \{[\s\S]*?result\.auth = 'ok'\s*\n\s*\} else \{[\s\S]*?未给出明确结论/.exec(src)?.[0] ?? ''
+  ok(catchBody.length > 0, '找到鉴权探针的 catch 体')
+  const i401 = catchBody.indexOf('status === 401')
+  const i400 = catchBody.indexOf('status === 400')
+  ok(i401 >= 0, 'catch 体里有 401 分支')
+  ok(i400 >= 0, 'catch 体里有 400 分支')
+  ok(i401 < i400, '401 判定排在 400 规则之前（否则 invalid api key 会被误判为 Key 有效）')
+  ok(/return result/.test(catchBody.slice(i401, i400)), '401 分支直接 return，不会落到后面的 400 规则')
+}
+
 console.log('\n[4] 后端选择（顺序 + 开关来自 lanes.json）')
 {
   const relayOn = { enabled: true, protocol: 'openai', baseURL: 'https://r', apiKey: 'k', model: 'm' }

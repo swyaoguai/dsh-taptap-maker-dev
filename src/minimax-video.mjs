@@ -568,8 +568,12 @@ export async function testMiniMax(input) {
       result.hint = hintFor(401, message)
       return result
     }
-    // «record not found» / 500 说明鉴权已通过，只是任务不存在。
-    if (/record not found|1000/i.test(message) || status === 500) {
+    // «task_id 不存在» 类响应说明鉴权已经通过，只是这个任务不存在。
+    // 实测 MiniMax 对全 0 的 task_id 回的是 HTTP 400 + code 2013
+    // （`This task_id does not exist`），原来只认 500 / `record not found`，
+    // 于是每次自检都报「鉴权未给出明确结论」——明明 Key 是好的。
+    if (/record not found|1000|2013|task_id does not exist|does not exist/i.test(message)
+      || status === 500 || status === 400) {
       result.auth = 'ok'
     } else {
       result.notes.push(`鉴权查询未给出明确结论：${message}`)
