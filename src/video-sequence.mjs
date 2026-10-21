@@ -915,6 +915,62 @@ export async function useLocalVideo(home, id, sourcePath, { force = false } = {}
 /* ─────────────────────────────── 抽帧 ──────────────────────────────────── */
 
 /** 按当前设置抽帧（不抠像）。返回 { files, times, duration, fps, width, height }。 */
+/* ─────────────────────── 产物落位（先备后换） ────────────────────────── */
+
+/**
+ * 把 staging 里的文件替换进 destDir，失败时用 backup 回滚。
+ *
+ * 为什么不直接 renameSync(destDir, backup)：
+ * Windows 上重命名一个**仍可能被占用**的目录会 EPERM（ffmpeg / 图片解码刚释放
+ * 句柄，时序上不稳 —— 实测踩过）。所以改成逐文件搬：先把旧文件移进 backup，
+ * 再把新文件就位。
+ *
+ * ⚠️ 回滚必须**覆盖**已就位的新文件，不能只补「缺失的」：
+ *    切换到一半失败时，前几个文件已经是新内容了；如果只把 missing 的搬回来，
+ *    结果是「新旧混杂」，比全丢还难判断。
+ */
+function rollbackSwap(destDir, backupDir) {
+  let names = []
+  try { names = fs.readdirSync(backupDir) } catch { names = [] }
+  for (const name of names) {
+    const dest = path.join(destDir, name)
+    // 无论 dest 是否存在都要搬回来 —— 存在说明是本轮换上去的新内容。
+    if (existsSync(dest)) rmSync(dest, { force: true })
+    fs.renameSync(path.join(backupDir, name), dest)
+  }
+}
+
+/**
+ * 用 staging 的内容替换 destDir。
+ *
+ * - 旧文件先备份，成功后清掉备份与临时目录；
+ * - 切换中途失败 → 回滚，destDir 回到本轮开始前的样子；
+ * - 张数变少时，多出来的旧文件会被清掉。
+ */
+function swapDirFromStaging(staging, destDir, backupDir, expectedNames) {
+  rmSync(backupDir, { recursive: true, force: true })
+  mkdirSync(backupDir, { recursive: true })
+  try {
+    for (const name of expectedNames) {
+      const dest = path.join(destDir, name)
+      if (existsSync(dest)) fs.renameSync(dest, path.join(backupDir, name))
+      fs.renameSync(path.join(staging, name), dest)
+    }
+  } catch (swapError) {
+    try { rollbackSwap(destDir, backupDir) } catch { /* 只能靠备份手工恢复 */ }
+    rmSync(staging, { recursive: true, force: true })
+    throw swapError
+  }
+  // 张数变少时清掉多余旧文件。
+  try {
+    for (const name of fs.readdirSync(destDir)) {
+      if (!expectedNames.includes(name)) rmSync(path.join(destDir, name), { force: true })
+    }
+  } catch { /* 清残留失败不影响本轮结果 */ }
+  rmSync(staging, { recursive: true, force: true })
+  rmSync(backupDir, { recursive: true, force: true })
+}
+
 export async function extractJobFrames(home, id, overrides = {}) {
   const job = getJob(home, id)
   if (!job) throw new Error(`视频作业不存在：${id}`)
@@ -939,14 +995,31 @@ export async function extractJobFrames(home, id, overrides = {}) {
       longEdge: settings.longEdge,
       cropInset: settings.cropInset,
     })
-    rmSync(path.join(jobRoot(home, id), 'frames'), { recursive: true, force: true })
-    mkdirSync(path.join(jobRoot(home, id), 'frames'), { recursive: true })
+    // ⚠️ 写进临时目录，**全部写成功后才落位**。以前是「先 rmSync 整个
+    //    frames/ 再逐张写」—— 一旦写到一半失败（磁盘满、权限、Ctrl-C），
+    //    上一轮抽出来的帧就被删光了，只剩半截新帧，而作业状态还没更新。
+    //
+    //    落位用「逐文件 rename」而不是「整目录 rename」：Windows 上重命名一个
+    //    仍被打开的目录会 EPERM（ffmpeg/图片解码刚释放句柄，时序上不稳），
+    //    单文件 rename 则始终可用。先备份旧文件、逐个替换、失败即回滚。
+    const root = jobRoot(home, id)
+    const staging = path.join(root, '.frames-staging')
+    rmSync(staging, { recursive: true, force: true })
+    mkdirSync(staging, { recursive: true })
     const files = []
-    for (let i = 0; i < frames.length; i += 1) {
-      const name = `f${String(i).padStart(2, '0')}.png`
-      writeFileSync(absPath(home, id, `frames/${name}`), encodePng(frames[i], width, height))
-      files.push(name)
+    try {
+      for (let i = 0; i < frames.length; i += 1) {
+        const name = `f${String(i).padStart(2, '0')}.png`
+        writeFileSync(path.join(staging, name), encodePng(frames[i], width, height))
+        files.push(name)
+      }
+    } catch (writeError) {
+      rmSync(staging, { recursive: true, force: true })
+      throw writeError
     }
+    const framesDir = path.join(root, 'frames')
+    mkdirSync(framesDir, { recursive: true })
+    swapDirFromStaging(staging, framesDir, path.join(root, '.frames-prev'), files)
     const fresh = getJob(home, id)
     fresh.settings = { ...fresh.settings, ...settings }
     fresh.frames = {
@@ -994,7 +1067,12 @@ export async function keyJobFrames(home, id, overrides = {}) {
   const settings = normalizeSettings({ ...job.settings, ...overrides })
   const { width, height } = job.frames
   const keyedDir = path.join(jobRoot(home, id), 'keyed')
-  mkdirSync(keyedDir, { recursive: true })
+  // 同样先写临时目录：抠像途中失败时，上一轮的 keyed/ 仍然完好，
+  // 不会出现「一半新参数、一半旧参数」的混合结果。
+  const keyedStaging = path.join(jobRoot(home, id), '.keyed-staging')
+  const keyedBackup = path.join(jobRoot(home, id), '.keyed-prev')
+  rmSync(keyedStaging, { recursive: true, force: true })
+  mkdirSync(keyedStaging, { recursive: true })
   const keyed = []
   const report = []
   let totals = 0
@@ -1010,7 +1088,12 @@ export async function keyJobFrames(home, id, overrides = {}) {
       edgeShrink: settings.edgeShrink,
     })
     const name = `k${String(i).padStart(2, '0')}.png`
-    writeFileSync(path.join(keyedDir, name), encodePng(result.rgba, width, height))
+    try {
+      writeFileSync(path.join(keyedStaging, name), encodePng(result.rgba, width, height))
+    } catch (writeError) {
+      rmSync(keyedStaging, { recursive: true, force: true })
+      throw writeError
+    }
     keyed.push(name)
     report.push({
       index: i,
@@ -1023,6 +1106,9 @@ export async function keyJobFrames(home, id, overrides = {}) {
     })
     if (result.confident) totals += 1
   }
+  // 全部成功后再落位（与抽帧同一套「先备后换」）。
+  swapDirFromStaging(keyedStaging, keyedDir, keyedBackup, keyed)
+
   const fresh = getJob(home, id)
   fresh.settings = { ...fresh.settings, ...settings }
   fresh.frames = { ...fresh.frames, keyed, report, keyedAt: Date.now() }
@@ -1034,12 +1120,34 @@ export async function keyJobFrames(home, id, overrides = {}) {
 
 /* ─────────────────────────────── 合成 ──────────────────────────────────── */
 
-/** 帧数多时自动折行，避免一张图宽到撞纹理上限（默认上限 8192）。 */
-export function chooseLayout({ count, cellWidth, maxWidth = 8192 }) {
-  const perRow = Math.max(1, Math.floor(maxWidth / Math.max(1, cellWidth)))
-  if (count <= perRow) return { layout: 'row', columns: count }
-  const columns = Math.max(1, perRow)
-  return { layout: 'grid', columns }
+/**
+ * 帧数多时自动折行，避免成品图撞上纹理 / 内存上限。
+ *
+ * ⚠️ 以前只按**宽度**算（maxWidth 8192），高度完全不管 —— 于是
+ * 「64 帧 × 格子 2048」会算出 8192×**32768** 的图：既超过 8192 的纹理上限，
+ * 单张 RGBA 还要占 1 GB；格子再大一点就直接爆内存。这里宽度和高度一起卡，
+ * 并且给总像素数设一道内存闸门。
+ *
+ * 返回 { layout, columns }；调用方按这个结果铺格子。
+ */
+export function chooseLayout({ count, cellWidth, maxWidth = 8192, maxHeight = 8192, maxPixels = 64_000_000 }) {
+  const n = Math.max(1, Math.floor(Number(count) || 1))
+  const cw = Math.max(1, Math.floor(Number(cellWidth) || 1))
+  // 宽度方向最多放几个（保持原来的行为）。
+  let perRow = Math.max(1, Math.floor(maxWidth / cw))
+  // 高度方向也得卡：行数不能多到让整图超高。
+  const maxRows = Math.max(1, Math.floor(maxHeight / cw))
+  // 内存闸门：总像素（含格子数）不许超过 maxPixels，否则单张就吃掉几 GB。
+  const pixelCap = Math.max(1, Math.floor(maxPixels / (cw * cw)))
+  const usable = Math.min(n, pixelCap)
+  const columns = Math.max(1, Math.min(perRow, usable))
+  const rows = Math.ceil(n / columns)
+  if (rows > maxRows) {
+    // 无论如何都放不下 —— 交给调用方报错，而不是硬撑出一张爆内存的图。
+    return { layout: 'grid', columns, tooLarge: true, rows, perFrameLimit: Math.max(1, Math.floor(pixelCap / Math.max(1, maxRows))) }
+  }
+  if (n <= perRow && n <= columns) return { layout: 'row', columns: n, tooLarge: false, rows: 1 }
+  return { layout: 'grid', columns, tooLarge: false, rows }
 }
 
 /** 把抠好的帧对齐合成一张透明整图。 */
@@ -1056,9 +1164,30 @@ export async function composeJobSheet(home, id, overrides = {}) {
   let layout = settings.layout
   let columns = settings.columns
   if (layout === 'auto' || columns <= 0) {
-    const chosen = chooseLayout({ count: frames.length, cellWidth: settings.cellWidth })
+    const chosen = chooseLayout({ count: frames.length, cellWidth: settings.cellWidth, cellHeight: settings.cellHeight })
     if (layout === 'auto') layout = chosen.layout
     if (columns <= 0) columns = chosen.columns
+    if (chosen.tooLarge) {
+      throw new Error(
+        `合成图会太大：${frames.length} 帧 × ${settings.cellWidth}px 格子，`
+        + '超过单张上限 8192×8192。\n'
+        + `请调小 --cell（建议不超过 ${chosen.perFrameLimit}），或减少帧数（--count），或分多次合成。`,
+      )
+    }
+  } else {
+    // 用户显式指定了 layout/columns —— 同样要拦，否则照样能撑爆内存。
+    const cellW = Math.max(1, settings.cellWidth)
+    const rows = Math.ceil(frames.length / Math.max(1, columns))
+    const outW = cellW * Math.max(1, columns)
+    const outH = cellW * rows
+    if (outW > 8192 || outH > 8192 || outW * outH > 64_000_000) {
+      const maxCols = Math.max(1, Math.floor(8192 / cellW))
+      throw new Error(
+        `按你指定的排布（layout=${layout}, columns=${columns}）算出来是 ${outW}×${outH}，`
+        + '超过单张上限 8192×8192。\n'
+        + `请把 columns 调到 ${maxCols} 以内，或调小 --cell。`,
+      )
+    }
   }
   // ★ 行对象必须用**本帧自己的 width/height**。这里如果图省事写成整图的宽高，
   // 每帧的 `frame.length < row.width*row.height*4` 判断就永远成立，合成出来
@@ -1283,3 +1412,9 @@ export async function doctor(home, config) {
 }
 
 export { MiniMaxError, MediaError, capabilityOf, estimateCostCny }
+
+// 测试专用导出：落位/回滚是本模块的核心正确性逻辑，出错会丢用户素材，
+// 但它依赖真实的文件系统时序，用纯文本断言测不到「切换到一半失败」这条路。
+// 这里导出供 scripts/verify-frame-safety.mjs 直接驱动。
+export const __testSwapDirFromStaging = swapDirFromStaging
+export const __testRollbackSwap = rollbackSwap
