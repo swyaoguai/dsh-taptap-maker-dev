@@ -24,11 +24,13 @@
  * @module src/video-sequence.mjs
  */
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import fs, { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
+import { resolveAssetDir, ensureAssetDir } from './assets.mjs'
+
 import {
-  clearMinimaxPending, readVideoJob, writeVideoJob, dataDir,
+  clearMinimaxPending, dataDir,
 } from './paths.js'
 import {
   MiniMaxError, capabilityOf, detectKeyKind, downloadVideo, estimateCostCny,
@@ -36,6 +38,7 @@ import {
   protocolOf, queryVideo, retrieveFile, submitVideo,
 } from './minimax-video.mjs'
 import { relayDownload, relayQuery, relaySubmit, relayReady, normalizeRatio } from './video-relay.mjs'
+import { fallbackCandidates, laneOrder, quotaSignal } from './lanes.mjs'
 import {
   MediaError, checkFfmpeg, encodePng, extractFramesAt, mimeOf,
   planSampleTimes, probeDuration, probeFps, probeSize, runFfmpeg, toJpegDataUri,
@@ -82,8 +85,11 @@ export function newJobId() {
   return `v${Date.now().toString(36)}${randomUUID().slice(0, 6)}`
 }
 
-function ensureJobDirs(home, id) {
-  const root = path.join(dataDir(home), 'video-jobs', id)
+function ensureJobDirs(home, id, name) {
+  // 目录名要用**作业名**，所以这里先按名字算根；建作业时名字已经定了。
+  const root = name
+    ? path.join(resolveAssetDir(home, 'video', { fallback: 'video-jobs' }).dir, `${slugFor(name)}-${id}`)
+    : jobRoot(home, id)
   for (const sub of ['refs', 'videos', 'frames', 'keyed', 'out']) {
     mkdirSync(path.join(root, sub), { recursive: true })
   }
@@ -92,11 +98,12 @@ function ensureJobDirs(home, id) {
 
 export function createJob(home, name) {
   const id = newJobId()
-  ensureJobDirs(home, id)
+  const jobName = String(name ?? '').trim().slice(0, 80) || '未命名视频作业'
+  ensureJobDirs(home, id, jobName)
   const now = Date.now()
   const job = {
     id,
-    name: String(name ?? '').trim().slice(0, 80) || '未命名视频作业',
+    name: jobName,
     createdAt: now,
     updatedAt: now,
     mode: 'frames',       // frames（首尾帧）| reference（多模态参考，H3 支持）
@@ -116,6 +123,56 @@ export function createJob(home, name) {
 export function getJob(home, id) {
   if (!JOB_ID.test(String(id ?? ''))) return undefined
   return readVideoJob(home, id)
+}
+
+/**
+ * 列出全部作业（按更新时间倒序）。
+ *
+ * 扫三处：位置索引（能找到别的项目 / 别的 cwd 建的作业）→ 当前 cwd 的
+ * `sucai/video/` → 改造前的旧位置。旧位置的作业会在读取时顺手搬迁，
+ * 所以用户升级后第一次执行命令，老作业就自动出现在列表里。
+ */
+export function listJobs(home) {
+  const jobs = []
+  const seen = new Set()
+  const add = (id) => {
+    if (!id || seen.has(id)) return
+    const job = readJobFile(home, id)
+    if (!job || job.id !== id) return
+    seen.add(id)
+    jobs.push(job)
+  }
+  for (const id of Object.keys(readIndex(home))) add(id)
+  const roots = [
+    resolveAssetDir(home, 'video', { fallback: 'video-jobs' }).dir,
+    path.join(dataDir(home), 'video-jobs'),
+  ]
+  for (const root of roots) {
+    let names = []
+    try { names = fs.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name) } catch { continue }
+    for (const name of names) {
+      // 新目录名是 `<slug>-<id>`，旧的直接是 `<id>`；两种都要认。
+      const m = /(?:^|-)(v[a-z0-9]{4,40})$/.exec(name)
+      add(m ? m[1] : (/^v[a-z0-9]{4,40}$/.test(name) ? name : undefined))
+    }
+  }
+  jobs.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))
+  return jobs
+}
+
+/** 删掉一个作业（含视频与全部中间产物）。 */
+export function deleteJob(home, id) {
+  if (!JOB_ID.test(String(id ?? ''))) throw new Error(`非法的视频作业 id：${id}`)
+  const dirs = new Set([jobRoot(home, id, safeReadJob(home, id)), legacyJobRoot(home, id)])
+  const known = readIndex(home)[id]
+  if (typeof known === 'string' && known) dirs.add(known)
+  for (const dir of dirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+  }
+  // 索引也要清：留着会指向一个已经不存在的目录。
+  const idx = readIndex(home)
+  delete idx[id]
+  try { fs.writeFileSync(indexFile(home), JSON.stringify(idx, null, 2), 'utf8') } catch { /* ignore */ }
 }
 
 export function saveJob(home, id, patch = {}) {
@@ -177,16 +234,187 @@ function log(job, level, message) {
   if (job.log.length > 200) job.log = job.log.slice(-200)
 }
 
-function jobRoot(home, id) {
+/**
+ * 作业根目录。
+ *
+ * 在 Maker 项目里跑 → `<项目>/sucai/video/<作业名>-<id>/`（跟随项目，三类素材
+ * 统一收在 sucai 下）；否则退回 `$DSH_HOME/taptap-maker-dev/video-jobs/<id>/`。
+ *
+ * ⚠️ 目录名带**作业名**而不是只用 id：用户在资源管理器里看到 `奔跑-j7k2p`
+ * 比看到 `j7k2p` 有用得多。但作业名会变，而目录名一旦定下就不能跟着变（否则
+ * 已经下载好的视频/帧就找不到了），所以固定用**建作业那一刻**的名字，之后改名
+ * 不搬目录 —— 宁可名字旧一点，也不能让 `job.frames.files` 里的相对路径全断。
+ */
+function jobRoot(home, id, knownJob) {
+  const job = knownJob ?? safeReadJob(home, id)
+  const label = job?.name ? `${slugFor(job.name)}-${id}` : id
+  const base = resolveAssetDir(home, 'video', {
+    projectDir: job?.projectDir,
+    fallback: 'video-jobs',
+  })
+  // resolveAssetDir 已经建好了 <video>/，这里只需要拼作业那一层。
+  return path.join(base.dir, label)
+}
+
+/** 作业名 → 安全的目录名片段（保留中文，去掉路径分隔与 Windows 非法字符）。 */
+function slugFor(name) {
+  const cleaned = String(name).replace(/[\\/:*?"<>"|]/g, '_').replace(/[\r\n\t]/g, ' ').replace(/\s+/g, ' ').trim()
+  // Windows 保留名（CON / PRN / AUX…）不能直接做目录名。
+  const safe = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(cleaned) ? '_' + cleaned : cleaned
+  return (safe || 'job').slice(0, 40)
+}
+
+/* ── 作业位置索引 ────────────────────────────────────────────────────────
+ *
+ * 作业目录跟着项目走（cwd 决定），但**作业本身属于用户，不属于某次命令**。
+ * 所以需要一份「id → 绝对目录」的稳定索引存在 $DSH_HOME：否则换个 cwd
+ * （或者项目被移动/改名）就再也找不到自己的作业了，而用户会以为作业丢了。
+ */
+function indexFile(home) {
+  return path.join(dataDir(home), 'video-index.json')
+}
+
+function readIndex(home) {
+  try {
+    const raw = JSON.parse(fs.readFileSync(indexFile(home), 'utf8'))
+    return raw && typeof raw === 'object' ? raw : {}
+  } catch {
+    return {}
+  }
+}
+
+function rememberJobDir(home, id, dir) {
+  const idx = readIndex(home)
+  if (idx[id] === dir) return
+  idx[id] = dir
+  try {
+    fs.mkdirSync(path.dirname(indexFile(home)), { recursive: true })
+    fs.writeFileSync(indexFile(home), JSON.stringify(idx, null, 2), 'utf8')
+  } catch { /* 索引写不进去也不影响主流程，只是换 cwd 后要靠扫目录 */ }
+}
+
+/**
+ * 读作业，**不经过 jobRoot**（否则「算目录要读作业、读作业要算目录」成环）。
+ *
+ * 顺序：索引记录的目录 → 当前 cwd 下的 sucai/video → 改造前的旧位置。
+ * 索引让作业与 cwd 解耦；后两级保证索引丢了之后仍能找回作业，而不是直接
+ * 「作业不存在」。
+ */
+function safeReadJob(home, id) {
+  const readAt = (dir) => {
+    try { return JSON.parse(fs.readFileSync(path.join(dir, 'job.json'), 'utf8')) } catch { return undefined }
+  }
+  const known = readIndex(home)[id]
+  if (typeof known === 'string' && known) {
+    const job = readAt(known)
+    if (job?.id === id) return job
+  }
+  const base = resolveAssetDir(home, 'video', { fallback: 'video-jobs' }).dir
+  try {
+    for (const entry of fs.readdirSync(base, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      if (entry.name === id || entry.name.endsWith(`-${id}`)) {
+        const dir = path.join(base, entry.name)
+        const job = readAt(dir)
+        if (job?.id === id) {
+          rememberJobDir(home, id, dir)
+          return job
+        }
+      }
+    }
+  } catch { /* 目录还不存在 */ }
+  return readAt(legacyJobRoot(home, id))
+}
+
+/** 改造前的固定位置（只用于找旧作业 / 迁移）。 */
+function legacyJobRoot(home, id) {
   return path.join(dataDir(home), 'video-jobs', id)
 }
+
+/**
+ * 把改造前的作业目录**一次性搬到**新位置。
+ *
+ * 为什么必须搬而不是只读新位置：作业的 `job.json` 记着 `frames/xxx.png` 这种
+ * **相对路径**，抽帧、抠像、拼图全靠 `absPath()` 拼根目录。只改根目录的话，
+ * 老作业里已经生成好的视频和帧会集体「找不到文件」，用户会以为文件被删了。
+ *
+ * 搬迁是**幂等**的：新位置已经有 job.json 就直接用，不重复搬；跨盘失败时
+ * 保留原目录并照常报错，绝不做出「搬一半」的半成品状态。
+ */
+function migrateLegacyJob(home, id) {
+  const legacy = legacyJobRoot(home, id)
+  if (!existsSync(legacy)) return undefined // 压根没有旧作业
+  const target = jobRoot(home, id, safeReadJob(home, id))
+  if (path.resolve(legacy) === path.resolve(target)) return target
+  try {
+    if (existsSync(target)) return target // 搬过了
+    ensureAssetDir(path.dirname(target), { insideProject: path.dirname(target).includes('sucai') })
+    renameSync(legacy, target)
+  } catch {
+    // 跨设备 rename 会 EXDEV；退回复制，失败就留着旧目录（功能不受影响，
+    // 只是素材没跟着项目走）。
+    try { fs.cpSync(legacy, target, { recursive: true }) } catch { /* ignore */ }
+  }
+  return target
+}
+
+/* ── 作业读写（本地覆盖 paths.js 的版本）──────────────────────────────
+ *
+ * paths.js 里的 readVideoJob/writeVideoJob 用的是**固定的** $DSH_HOME 路径；
+ * 目录改到 sucai/ 之后必须跟着改，否则读写的会是另一个位置的 job.json。
+ * 这里用同一套路径解析覆盖一遍，避免两处各写一份、以后改一处漏一处。
+ */
+const readJobFile = (home, id) => {
+  const job = safeReadJob(home, id)
+  if (!job) return undefined
+  // 旧作业（改造前建的）没有 `dir` 字段，也还躺在老位置 → 顺手搬到项目里。
+  if (typeof job.dir !== 'string' || !existsSync(job.dir)) {
+    const target = migrateLegacyJob(home, id)
+    if (target && existsSync(target)) {
+      try {
+        const moved = JSON.parse(fs.readFileSync(path.join(target, 'job.json'), 'utf8'))
+        moved.dir = target
+        return writeJobFile(home, moved)
+      } catch { /* 搬不动就用原样 */ }
+    }
+    // 搬不动（跨盘失败等）：仍然可用，只是素材没跟着项目走。
+    return job
+  }
+  rememberJobDir(home, id, job.dir)
+  return job
+}
+
+function writeJobFile(home, job) {
+  if (!job || typeof job.id !== 'string') throw new Error('writeVideoJob 需要一个带 id 的作业对象')
+  // 目录**记进 job.json**（`dir`）。这一条是整个改动能成立的关键：
+  // 目录名含作业名，而读作业又需要知道目录 —— 不把结果落盘的话，
+  // 「算目录 → 读作业 → 算目录」就成环了。落盘之后每次都直接用记录值，
+  // 作业改名、cwd 变化都不会让已生成的帧和视频突然找不到。
+  const dir = typeof job.dir === 'string' && job.dir.length > 0 ? job.dir : jobRoot(home, job.id, job)
+  job.dir = dir
+  ensureAssetDir(dir, { insideProject: dir.includes(`${path.sep}sucai${path.sep}`) })
+  // 原子替换：作业可能被另一个进程（对话里的命令）同时读到。
+  const target = path.join(dir, 'job.json')
+  const tmp = `${target}.${process.pid}.tmp`
+  fs.writeFileSync(tmp, JSON.stringify(job, null, 2), 'utf8')
+  fs.renameSync(tmp, target)
+  rememberJobDir(home, job.id, dir)
+  return job
+}
+
+// 与 paths.js 同名同签名，但走 sucai/ 的新位置。
+const readVideoJob = readJobFile
+const writeVideoJob = writeJobFile
 
 function rel(id, sub, file) {
   return `${sub}/${file}`
 }
 
 export function absPath(home, id, relative) {
-  const root = jobRoot(home, id)
+  // 优先用 job.json 里记下的目录：它是建作业时算出来并落盘的，之后 cwd 变了
+  // 也不会漂 —— 否则一条在项目 A 里建的作业，切到项目 B 就会读不到自己的帧。
+  const job = safeReadJob(home, id)
+  const root = (job?.dir && typeof job.dir === 'string') ? job.dir : jobRoot(home, id, job)
   const target = path.resolve(root, relative)
   if (!target.startsWith(path.resolve(root) + path.sep)) throw new Error(`非法的作业内路径：${relative}`)
   return target
@@ -272,7 +500,7 @@ export async function submitJobVideo(home, id, config) {
   if (job.mode === 'frames' && !job.refs.firstFrame) {
     throw new Error('首尾帧模式至少要一张首帧图（可用 /taptap-video first <图片路径> 指定）')
   }
-  const backend = resolveBackend(job, config)
+  const backend = resolveBackend(job, config, home)
   if (backend === 'local') {
     throw new Error('当前是「自选视频」后端：没有可提交的远程任务。直接用 /taptap-video use <mp4 路径> 挂上本地视频')
   }
@@ -317,10 +545,12 @@ export async function submitJobVideo(home, id, config) {
     throw error
   }
 
-  try {
-    let taskId
-    let relayTaskId
-    if (backend === 'relay') {
+  /**
+   * 试一条通道提交。抽出来是因为回退要**整体重试**：帧编码、首帧校验这些
+   * 准备工作与后端无关，在所有重试之间复用，不重复上传素材。
+   */
+  const attempt = async (useBackend) => {
+    if (useBackend === 'relay') {
       const submitted = await relaySubmit(config.relay, {
         prompt,
         firstFrameImage,
@@ -339,61 +569,106 @@ export async function submitJobVideo(home, id, config) {
         },
         ratio: job.settings.relayRatio,
       })
-      // directUrl：少数中转站在提交响应里就把成品地址给了，跳过轮询。
-      relayTaskId = submitted.taskId
-      taskId = submitted.taskId
-      if (submitted.directUrl) relayTaskId = submitted.taskId
-    } else {
-      taskId = await submitVideo({
-        baseUrl: config.baseURL,
-        apiKey: config.apiKey,
-        model: job.settings.model,
-        timeoutMs: 120_000,
-        prompt,
-        firstFrameImage,
-        lastFrameImage,
-        duration: job.settings.duration,
-        resolution: job.settings.resolution,
-        promptOptimizer: job.settings.promptOptimizer,
-      })
+      return submitted.taskId
     }
-    const fresh = getJob(home, id)
-    fresh.video = { ...fresh.video, status: 'running', taskId, remoteStatus: '已提交', updatedAt: Date.now() }
-    log(fresh, 'info', `视频任务已提交：${taskId}`)
-    return { taskId, submitId, backend, job: writeVideoJob(home, fresh) }
-  } catch (error) {
-    const fresh = getJob(home, id)
-    fresh.video = {
-      status: 'error', submitId, remoteStatus: '提交失败',
-      error: error?.message ?? String(error), hint: error?.hint, updatedAt: Date.now(),
-    }
-    log(fresh, 'error', `视频提交失败：${error?.message ?? error}`)
-    writeVideoJob(home, fresh)
-    throw error
+    return submitVideo({
+      baseUrl: config.baseURL,
+      apiKey: config.apiKey,
+      model: job.settings.model,
+      timeoutMs: 120_000,
+      prompt,
+      firstFrameImage,
+      lastFrameImage,
+      duration: job.settings.duration,
+      resolution: job.settings.resolution,
+      promptOptimizer: job.settings.promptOptimizer,
+    })
   }
+
+  /** 这条通道此刻能不能跑（设置页排序后仍要复查一次配置）。 */
+  const usable = (laneId) => (laneId === 'relay' ? relayReady(config?.relay) : Boolean(config?.apiKey))
+
+  // 用户排好序、开着、配好了的通道（不含 local：它需要用户手动挑文件）。
+  // 显式指定后端时不回退 —— 那是用户在**这一个作业**上的一次性决定。
+  const candidates = (job.settings.backend ?? 'auto') === 'auto'
+    ? fallbackCandidates(home, 'video', usable)
+    : []
+
+  // 把本次 resolveBackend 选中的通道放在**最前面**：用户排的顺序是权威，
+  // 而作业设置只是临时覆盖，不该因为全局顺序把它挤到后面才轮到自己。
+  const chain = []
+  if (usable(backend) && !chain.includes(backend)) chain.push(backend)
+  for (const id of candidates) if (!chain.includes(id)) chain.push(id)
+
+  let lastError = null
+  for (let i = 0; i < chain.length; i += 1) {
+    const useBackend = chain[i]
+    try {
+      const taskId = await attempt(useBackend)
+      const usedModel = useBackend === 'relay' ? (config.relay?.model || job.settings.model) : job.settings.model
+      const fresh = getJob(home, id)
+      // backend 必须记**实际用的那条**：pollJobVideo 靠它分派协议，
+      // 中途回退过之后就再也回不去原来的协议了。
+      fresh.video = {
+        ...fresh.video, status: 'running', taskId, remoteStatus: '已提交',
+        backend: useBackend, model: usedModel, updatedAt: Date.now(),
+      }
+      log(fresh, 'info', `视频任务已提交：${taskId}`)
+      if (i > 0) log(fresh, 'info', `（已从其他通道回退到 ${useBackend === 'relay' ? '中转站' : 'MiniMax'}）`)
+      return { taskId, submitId, backend: useBackend, job: writeVideoJob(home, fresh) }
+    } catch (error) {
+      lastError = error
+      // 只有**额度类**失败才回退。参数错误 / 素材不对这类 400 换条通道也
+      // 会同样失败，重投只是白等一轮；用户要改的是作业内容，不是通道。
+      const canRetry = i < chain.length - 1 && (quotaSignal(error) !== null || error?.status === 429 || error?.status === 503)
+      if (!canRetry) break
+      const fresh = getJob(home, id)
+      log(fresh, 'warn', `${useBackend === 'relay' ? '中转站' : 'MiniMax'} 提交失败（${quotaSignal(error) ?? error?.message ?? error}），换下一条通道重试`)
+    }
+  }
+
+  const fresh = getJob(home, id)
+  fresh.video = {
+    status: 'error', submitId, remoteStatus: '提交失败',
+    error: lastError?.message ?? String(lastError), hint: lastError?.hint, updatedAt: Date.now(),
+  }
+  log(fresh, 'error', `视频提交失败：${lastError?.message ?? lastError}`)
+  writeVideoJob(home, fresh)
+  throw lastError
 }
 
 /**
  * 决定这次走哪个后端。
  *
- * `auto` 的优先级：显式配好的中转站 > MiniMax（Key 或订阅）。中转站排在前面
- * 是因为**用户主动配了它**多半就是想用它（比如官方额度用完了）；而 MiniMax
- * 是「发现登录态就自动用」的兜底，不该抢用户的显式选择。
+ * 顺序与开关来自设置页的「视频通道优先级」（`lanes.json`），用户排的顺序
+ * 就是权威 —— 早于本功能时这里是写死的「中转站 > MiniMax」，理由是
+ * 「用户主动配了中转站多半就是想用它」；现在这个理由由界面上的排序承担了，
+ * 底层不再替用户猜。
+ *
+ * 显式选择（relay / minimax / local）仍然压过排序：那是用户在**这一个作业**
+ * 上的一次性决定，不该被全局顺序覆盖。
  */
-export function resolveBackend(job, config) {
+export function resolveBackend(job, config, home) {
   const wanted = job?.settings?.backend ?? 'auto'
-  if (wanted === 'relay') {
-    if (!relayReady(config?.relay)) throw new Error('作业选择的是「中转站」后端，但中转站没配好（设置页 → 视频生成 → 中转站）')
-    return 'relay'
+  if (wanted !== 'auto') {
+    if (wanted === 'relay' && !relayReady(config?.relay)) {
+      throw new Error('作业选择的是「中转站」后端，但中转站没配好（设置页 → 视频生成 → 中转站）')
+    }
+    if (wanted === 'minimax' && !config?.apiKey) {
+      throw new Error('作业选择的是「MiniMax」后端，但没有可用的 Key')
+    }
+    return wanted
   }
-  if (wanted === 'minimax') {
-    if (!config?.apiKey) throw new Error('作业选择的是「MiniMax」后端，但没有可用的 Key')
-    return 'minimax'
+  // auto：按设置页排好的顺序，取第一条「开着 + 配好了 + 不是本地文件」的。
+  // 没有 home（极少数直接调本函数的测试）时退回内置默认序 relay > minimax。
+  const order = home ? laneOrder(home, 'video') : ['relay', 'minimax']
+  for (const id of order) {
+    if (id === 'local') continue // 本地视频不参与自动提交（见下方 hint）
+    if (id === 'relay' && relayReady(config?.relay)) return 'relay'
+    if (id === 'minimax' && config?.apiKey) return 'minimax'
   }
-  if (wanted === 'local') return 'local'
-  if (relayReady(config?.relay)) return 'relay'
-  if (config?.apiKey) return 'minimax'
-  return 'relay' // 都没配 → 交给 relaySubmit 报出「没配好」，比含糊的「没有 Key」有用
+  // 都没配 → 交给 relaySubmit 报出「没配好」，比含糊的「没有 Key」有用
+  return 'relay'
 }
 
 /** 中转站的 size 参数：官方后端用 768P/2K 档位，中转站普遍要 WxH。 */

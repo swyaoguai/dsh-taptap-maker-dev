@@ -18,6 +18,7 @@ import path from 'node:path'
 import { ffmpegPath } from '../src/video-media.mjs'
 import { detectKeyKind, describeKey } from '../src/minimax-video.mjs'
 import { normalizeRelayConfig, pickPath, relayReady, RELAY_PROTOCOLS } from '../src/video-relay.mjs'
+import { writeLanes } from '../src/lanes.mjs'
 import {
   createJob, extractJobFrames, getJob, resolveBackend, saveJob, useLocalVideo,
 } from '../src/video-sequence.mjs'
@@ -71,16 +72,33 @@ console.log('\n[3] 订阅 Key / 按量 Key 识别')
   ok(detectKeyKind('') === 'none', '空 → none')
   ok(/Go 档/.test(describeKey('sk-cp-x')), '订阅 Key 的说明里点明 Go 档限制')
   ok(/余额/.test(describeKey('sk-api-x')), '按量 Key 的说明里说明扣余额')
+
+  // ⚠️ 回归：控制台签发的 Key 是 JWT，不是 sk-cp-。本机用户的 M Plan 订阅
+  // Key 就是这种（payload 里 TokenType=4），曾经被无条件判成按量。
+  const jwt = (payload) => {
+    const b64 = (o) => Buffer.from(JSON.stringify(o), 'utf8').toString('base64url')
+    return `${b64({ alg: 'HS256' })}.${b64(payload)}.sig`
+  }
+  const sub = jwt({ GroupName: '文', TokenType: 4, iss: 'minimax' })
+  ok(detectKeyKind(sub) === 'subscription', 'JWT + TokenType:4 → 订阅（本机真实形态）')
+  ok(/套餐额度/.test(describeKey(sub)), 'JWT 订阅 Key 的说明讲的是套餐额度')
+
+  ok(detectKeyKind(jwt({ TokenType: 1, iss: 'minimax' })) === 'api', 'JWT + 非 4 → 按量')
+  ok(detectKeyKind(jwt({ iss: 'minimax' })) === 'unknown', 'JWT 缺 TokenType → unknown（不瞎猜）')
+  ok(detectKeyKind('eyJhbGciOiJIUzI1NiJ9..notbase64') === 'unknown', 'JWT payload 解不出来 → unknown，不崩')
+  ok(!/sk-cp/.test(describeKey(sub)), '订阅文案不再把「订阅」绑死在 sk-cp- 前缀上')
+  ok(/自检/.test(describeKey(jwt({ iss: 'minimax' }))), '不确定时引导跑自检，而不是断言按量')
 }
 
-console.log('\n[4] 后端选择')
+console.log('\n[4] 后端选择（顺序 + 开关来自 lanes.json）')
 {
   const relayOn = { enabled: true, protocol: 'openai', baseURL: 'https://r', apiKey: 'k', model: 'm' }
   const none = { relay: normalizeRelayConfig({}), apiKey: '' }
   const onlyMmx = { relay: normalizeRelayConfig({}), apiKey: 'sk-api-x' }
   const both = { relay: normalizeRelayConfig(relayOn), apiKey: 'sk-api-x' }
 
-  ok(resolveBackend({ settings: { backend: 'auto' } }, both) === 'relay', 'auto：配了中转站优先于 MiniMax（用户显式配的先用）')
+  // 不传 home → 无 lanes.json，退回默认顺序（relay > minimax），行为同改造前。
+  ok(resolveBackend({ settings: { backend: 'auto' } }, both) === 'relay', '默认顺序：配了中转站优先于 MiniMax')
   ok(resolveBackend({ settings: { backend: 'auto' } }, onlyMmx) === 'minimax', 'auto：只配了 MiniMax → minimax')
   ok(resolveBackend({ settings: { backend: 'auto' } }, none) === 'relay', 'auto：都没配 → 落到 relay 以给出「没配好」的明确报错')
   ok(resolveBackend({ settings: { backend: 'local' } }, none) === 'local', '显式 local 永远可用')
@@ -92,6 +110,19 @@ console.log('\n[4] 后端选择')
   threw = ''
   try { resolveBackend({ settings: { backend: 'minimax' } }, none) } catch (e) { threw = e.message }
   ok(/没有可用的 Key/.test(threw), '显式 minimax 但没有 Key → 明确报错', threw)
+
+  // 用户排序 + 开关真正生效
+  const home = scratch
+  writeLanes(home, { groups: { video: { order: ['minimax', 'relay'] } } })
+  ok(resolveBackend({ settings: { backend: 'auto' } }, both, home) === 'minimax', '用户把 MiniMax 排前面 → auto 走 MiniMax')
+  writeLanes(home, { groups: { video: { enabled: { minimax: false } } } })
+  ok(resolveBackend({ settings: { backend: 'auto' } }, both, home) === 'relay', '关掉 MiniMax → auto 落到中转站')
+  writeLanes(home, { groups: { video: { enabled: { minimax: true, relay: false } } } })
+  ok(resolveBackend({ settings: { backend: 'auto' } }, both, home) === 'minimax', '关掉中转站 → auto 落到 MiniMax')
+
+  // local 永不参与自动提交（否则用户会被拖去手动挑文件）
+  writeLanes(home, { groups: { video: { order: ['local', 'minimax', 'relay'], enabled: { relay: true, minimax: true, local: true } } } })
+  ok(resolveBackend({ settings: { backend: 'auto' } }, both, home) === 'minimax', 'local 排在最前也不会被 auto 选中')
 }
 
 console.log('\n[5] 本地视频（零额度路径）')

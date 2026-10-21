@@ -252,10 +252,11 @@ console.log('\n[9] 作业层：本地图片自动上传后提交')
   const job = createJob(home, '中转站首尾帧')
   saveJob(home, job.id, { prompt: '角色原地走三步', settings: { backend: 'relay', duration: 4, relayRatio: '16:9' } })
   // 直接把两张图塞进 refs（跳过 setReference 的尺寸探测，这里只关心上传链路）
-  const jobFile = path.join(home, 'taptap-maker-dev', 'video-jobs', job.id, 'job.json')
+  const root = job.dir // 作业目录跟随项目，不要在这里写死
+  const jobFile = path.join(root, 'job.json')
   const raw = JSON.parse(fs.readFileSync(jobFile, 'utf8'))
-  fs.copyFileSync(frameA, path.join(home, 'taptap-maker-dev', 'video-jobs', job.id, 'refs', 'firstFrame-a.png'))
-  fs.copyFileSync(frameB, path.join(home, 'taptap-maker-dev', 'video-jobs', job.id, 'refs', 'lastFrame-b.png'))
+  fs.copyFileSync(frameA, path.join(root, 'refs', 'firstFrame-a.png'))
+  fs.copyFileSync(frameB, path.join(root, 'refs', 'lastFrame-b.png'))
   raw.refs = {
     firstFrame: { file: 'refs/firstFrame-a.png', name: 'a.png' },
     lastFrame: { file: 'refs/lastFrame-b.png', name: 'b.png' },

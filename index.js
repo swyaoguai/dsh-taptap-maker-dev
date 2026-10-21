@@ -35,14 +35,38 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, listVideoJobs, readVideoRelayConfigRaw, writeVideoRelayConfigPatch } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
   getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
   setReference as setVideoReference, clearReference as clearVideoReference, submitJobVideo, useLocalVideo,
+  listJobs as listVideoJobs, deleteJob as deleteVideoJob,
 } from './src/video-sequence.mjs'
 import { listModels as listVideoModels, estimateCostCny, detectKeyKind, describeKey } from './src/minimax-video.mjs'
-import { normalizeRelayConfig, relayListModels, RELAY_PROTOCOLS } from './src/video-relay.mjs'
+import { normalizeRelayConfig, relayListModels, relayReady, RELAY_PROTOCOLS } from './src/video-relay.mjs'
+import {
+  GROUPS as LANE_GROUPS_IDS, LANE_GROUPS, lanesConfigPath, quotaSignal,
+  readLanes, writeLanes,
+} from './src/lanes.mjs'
+import { resolveAssetDir as resolveAssetDirForApi } from './src/assets.mjs'
+
+// API 层的短别名：路由函数里反复写 readLanes/writeLanes 太长，且和已有的
+// read*FromApi 风格不一致。
+const readLanesForApi = readLanes
+const writeLanesForApi = writeLanes
+const lanesConfigPathForApi = lanesConfigPath
+const LANE_GROUPS_FOR_API = LANE_GROUPS
+const relayReadyForApi = relayReady
+
+/** 「开着但还没配」时给界面的一句话 —— 要具体，否则用户不知道该去哪儿填。 */
+const LANE_UNREADY_REASON = {
+  gptWeb: '需要先登录 ChatGPT 账号（/taptap-gpt login）',
+  relayImage: '需要在下面「中转站生图」填 baseURL / Key / 模型',
+  relay: '需要在下面「视频中转站」填地址 / Key / 模型',
+  minimax: '需要在下面「MiniMax」填 API Key',
+  local: '',
+  bgmWeb: '需要先登录 MiniMax 账号（/taptap-bgm login）',
+}
 import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
 import os from 'node:os'
@@ -310,12 +334,15 @@ function policyText(config, gptLaneOn = true) {
       '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
       '不要主动向用户宣传或鼓励添加账号，也不要隐瞒该风险。',
       '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
+      '**通道顺序由用户定**：设置页「生成通道」卡里可以拖拽排序、逐条开关、以及打开「额度不足自动换通道」；',
+      '这些设置对三条链路（生图 / 视频 / BGM）统一生效。**不要替用户改顺序或开关**，',
+      '也不要假设「网页一定优先」——先读一下当前顺序再决定走哪条。',
       '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
       '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
       '**超时不要重新生成（很关键，会白烧额度）**：网页出图常要 1~3 分钟，我们等不到时会返回 `pendingUrl`（那个对话的链接）。',
       '这时**先等 1~2 分钟再 `taptap-gpt grab`**（或 `/taptap-gpt grab`）把已经生成好的图抓回来——不要立刻再跑一次 `gen`，',
       '`gen` 自己也会先尝试续抓上一轮未完成的图。只有 grab 明确说"没有图"时才考虑重新生成。',
-      '**图片落点（默认跟随项目）**：在工作目录（Maker 项目根）执行 `gen` 时，图片默认存到 `<项目>/.taptap-images/`，',
+      '**图片落点（默认跟随项目）**：在工作目录（Maker 项目根）执行 `gen` 时，图片默认存到 `<项目>/sucai/images/`，',
       '不再丢到 C 盘；该目录自带 `.gitignore` 防止被 Maker 自动提交。用户可在设置页「ChatGPT 网页生图」卡里自定义',
       '（支持 `{project}` / `{home}` 占位符），也可用 `/taptap-gpt dir --set <路径>`；命令行加 `--dir <目录>` 可单次覆盖。',
       '告诉用户图片存到了哪里（结果里的 `saved` 就是真实路径）。中间产物留在该目录或 `assets/` 之外，',
@@ -727,6 +754,18 @@ export function apply(ctx, config = {}) {
           const value = setPolicyEnabled(parsed?.blockCreditTools !== false)
           return sendJson(res, 200, { ok: true, blockCreditTools: value })
         }
+        if (req.method === 'GET' && sub === 'asset-dirs') {
+          // 素材落点：三类统一收在 <项目>/sucai/<类型>/，不在项目里才退回 $DSH_HOME。
+          // 设置页用它如实显示「东西到底存哪了」—— 猜目录是用户最常问的问题之一。
+          const kinds = { image: 'gpt-images', video: 'video-jobs', bgm: 'bgm-downloads' }
+          const configured = { image: readGptDownloadDir(home), video: '', bgm: '' }
+          const dirs = {}
+          for (const [kind, fallback] of Object.entries(kinds)) {
+            const r = resolveAssetDirForApi(home, kind, { configured: configured[kind], fallback })
+            dirs[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
+          }
+          return sendJson(res, 200, { ok: true, dirs, file: lanesConfigPathForApi(home) })
+        }
         if (req.method === 'GET' && sub === 'image') {
           const raw = readImageConfigRaw(home)
           return sendJson(res, 200, {
@@ -833,6 +872,117 @@ export function apply(ctx, config = {}) {
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }
+        }
+        // ── 通道优先级 + 各通道开关（三条链路共用一套语义）──
+        // GET  /lanes → 顺序 / 开关 / 每条通道「现在能不能用」
+        // POST /lanes → 改顺序、改开关、改自动回退总开关
+        // 这里回 ready 是为了让界面能画「已配置 / 未配置」状态点 —— 别让用户
+        // 排完队才发现第一条其实没配 Key，那才是真的浪费时间。
+        if (req.method === 'GET' && sub === 'lanes') {
+          const mmxKey = (readMinimaxConfigRaw(home).apiKey || (process.env.MINIMAX_API_KEY ?? '')).trim()
+          const relayCfg = normalizeRelayConfig(readVideoRelayConfigRaw(home))
+          const imageCfg = readImageConfigRaw(home)
+          // 顺带把三类素材的真实落点一起返回：设置页一次请求就能画全，
+          // 用户不用去三个地方猜东西存在哪。
+          const dirFallbacks = { image: 'gpt-images', video: 'video-jobs', bgm: 'bgm-downloads' }
+          const dirConfigured = { image: readGptDownloadDir(home), video: '', bgm: '' }
+          const dirs = {}
+          for (const [kind, fallback] of Object.entries(dirFallbacks)) {
+            const r = resolveAssetDirForApi(home, kind, { configured: dirConfigured[kind], fallback })
+            dirs[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
+          }
+          const readiness = {
+            gptWeb: () => readGptLaneEnabled(home),
+            relayImage: () => Boolean(imageCfg.baseURL && imageCfg.apiKey && imageCfg.model),
+            relay: () => relayReadyForApi(relayCfg),
+            minimax: () => Boolean(mmxKey),
+            local: () => true,
+            bgmWeb: () => true,
+          }
+          const cfg = readLanesForApi(home)
+          const groups = {}
+          for (const [group, def] of Object.entries(LANE_GROUPS_FOR_API)) {
+            const saved = cfg.groups[group]
+            groups[group] = {
+              label: def.label,
+              lanes: saved.order.map((id) => {
+                const lane = def.lanes.find((l) => l.id === id)
+                let ready = false
+                try { ready = Boolean(readiness[id]?.()) } catch { ready = false }
+                return {
+                  id,
+                  label: lane?.label ?? id,
+                  kind: lane?.kind ?? 'api',
+                  note: lane?.note ?? '',
+                  zeroCost: lane?.zeroCost === true,
+                  enabled: saved.enabled[id] !== false,
+                  ready,
+                  // 「关着」和「开着但没配」是两件事，界面要能分开说。
+                  reason: !ready ? LANE_UNREADY_REASON[id] ?? '尚未配置' : undefined,
+                }
+              }),
+            }
+          }
+          return sendJson(res, 200, {
+            ok: true,
+            autoFallback: cfg.autoFallback,
+            groups,
+            dirs,
+            file: lanesConfigPathForApi(home),
+          })
+        }
+        if (req.method === 'POST' && sub === 'lanes') {
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          const patch = {}
+          if (typeof parsed.autoFallback === 'boolean') patch.autoFallback = parsed.autoFallback
+          if (parsed.groups && typeof parsed.groups === 'object') patch.groups = parsed.groups
+          // 归一化在 writeLanes 里做：脏 id / 全关 / 重复项都被挡住。
+          const saved = writeLanesForApi(home, patch)
+          // 回**与 GET 同形状**的数据：设置页保存后直接吃这份响应刷新界面，
+          // 不用再发一次 GET（也避免两端形状不一致导致界面显示错乱）。
+          const relayCfg = normalizeRelayConfig(readVideoRelayConfigRaw(home))
+          const imageCfg2 = readImageConfigRaw(home)
+          const mmxKey2 = (readMinimaxConfigRaw(home).apiKey || (process.env.MINIMAX_API_KEY ?? '')).trim()
+          const fb2 = { image: 'gpt-images', video: 'video-jobs', bgm: 'bgm-downloads' }
+          const cf2 = { image: readGptDownloadDir(home), video: '', bgm: '' }
+          const dirs2 = {}
+          for (const [kind, fallback] of Object.entries(fb2)) {
+            const r = resolveAssetDirForApi(home, kind, { configured: cf2[kind], fallback })
+            dirs2[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
+          }
+          const readiness2 = {
+            gptWeb: () => readGptLaneEnabled(home),
+            relayImage: () => Boolean(imageCfg.baseURL && imageCfg.apiKey && imageCfg.model),
+            relay: () => relayReadyForApi(relayCfg),
+            minimax: () => Boolean(mmxKey2),
+            local: () => true,
+            bgmWeb: () => true,
+          }
+          const groupsOut = {}
+          for (const [group, def] of Object.entries(LANE_GROUPS_FOR_API)) {
+            const s2 = saved.groups[group]
+            groupsOut[group] = {
+              label: def.label,
+              lanes: s2.order.map((id) => {
+                const lane = def.lanes.find((l) => l.id === id)
+                let ready = false
+                try { ready = Boolean(readiness2[id]?.()) } catch { ready = false }
+                return {
+                  id,
+                  label: lane?.label ?? id,
+                  kind: lane?.kind ?? 'api',
+                  note: lane?.note ?? '',
+                  zeroCost: lane?.zeroCost === true,
+                  enabled: s2.enabled[id] !== false,
+                  ready,
+                  reason: !ready ? LANE_UNREADY_REASON[id] ?? '尚未配置' : undefined,
+                }
+              }),
+            }
+          }
+          return sendJson(res, 200, { ok: true, autoFallback: saved.autoFallback, groups: groupsOut, dirs: dirs2, file: lanesConfigPathForApi(home) })
         }
         // GET/POST /video-minimax —— 设置页管 MiniMax 共用配置（站点 + 模型 + Key）。
         // Key 只回「有没有」与「是什么类型」，绝不回显明文。
@@ -1657,7 +1807,7 @@ export function apply(ctx, config = {}) {
         if (low === 'dir' || low.startsWith('dir ') || raw === '目录') {          const setArg = (/--set\s+("[^"]+"|'[^']+'|\S+)/.exec(raw) ?? [])[1]
           if (/--reset/.test(raw)) {
             writeGptDownloadDir(home, '')
-            return { kind: 'success', text: '已恢复默认：图片存到当前项目下的 .taptap-images/（不在项目里时存到 $DSH_HOME）。' }
+            return { kind: 'success', text: '已恢复默认：图片存到当前项目下的 sucai/images/（不在项目里时存到 $DSH_HOME）。' }
           }
           if (setArg) {
             const value = setArg.replace(/^["']|["']$/g, '')
@@ -1906,7 +2056,7 @@ export function apply(ctx, config = {}) {
           }
         }
 
-        // Follow the same rule as the web lane: default to <project>/.taptap-images
+        // Follow the same rule as the web lane: default to <project>/sucai/images
         // when the host is running inside a Maker project, else $DSH_HOME/.../gpt-images.
         // (Was previously hardcoded to tmpImageDir, which made the two lanes
         // inconsistent — fixed 2026-10-18.)
@@ -2273,6 +2423,8 @@ const VIDEO_HELP = [
   '  /taptap-video import <Maker工程目录> [--name 文件名] [--fps 12]',
   '  /taptap-video status           看当前作业进度与逐帧抠像报告',
   '  /taptap-video models           列出视频模型、是否支持尾帧、大致单价',
+  '  /taptap-video lanes            查看/调整视频通道顺序与开关',
+  '    /taptap-video lanes --order minimax,relay --off local --fallback on',
   '',
   '计费：只有 `run` / 提交视频那一步花钱（H3 768P 约 ¥0.5/秒，4 秒 ≈ ¥2）。',
   '抽帧 / 抠像 / 合成 / 导入全是本地计算，反复调参数不产生费用。',
@@ -2368,6 +2520,38 @@ async function videoCommand(home, rawInput) {
       return { kind: 'success', text: lines.join('\n') }
     }
 
+    if (sub === 'lanes' || sub === '通道') {
+      // 命令行改顺序/开关 —— 设置页之外的第二条路（比如给同事写文档时）。
+      const cfg = readLanes(home)
+      const flags = parseVideoFlags(raw)
+      if (!flags.order && !flags.off && !flags.on && !('fallback' in flags)) {
+        const labelOf = { relay: '视频中转站', minimax: 'MiniMax 官方', local: '自选本地视频' }
+        const lines = ['视频通道（设置页同样可改）：']
+        for (const id of cfg.groups.video.order) {
+          const on = cfg.groups.video.enabled[id]
+          lines.push(`  ${on ? '✓' : '·'} ${labelOf[id] ?? id}${on ? '' : '（已关闭）'}`)
+        }
+        lines.push(`  额度不足自动换通道：${cfg.autoFallback ? '开' : '关'}`)
+        lines.push('', '改法：/taptap-video lanes --order minimax,relay --on local --off relay --fallback on')
+        return { kind: 'success', text: lines.join('\n') }
+      }
+      const patch = { groups: { video: {} } }
+      if (flags.order) patch.groups.video.order = String(flags.order).split(',').map((s) => s.trim()).filter(Boolean)
+      if (flags.off) patch.groups.video.enabled = { [String(flags.off)]: false }
+      if (flags.on) patch.groups.video.enabled = { ...(patch.groups.video.enabled ?? {}), [String(flags.on)]: true }
+      if ('fallback' in flags) patch.autoFallback = String(flags.fallback) !== 'false' && String(flags.fallback) !== 'off'
+      const saved = writeLanes(home, patch)
+      const v = saved.groups.video
+      const labelOf = { relay: '视频中转站', minimax: 'MiniMax 官方', local: '自选本地视频' }
+      return {
+        kind: 'success',
+        text: [
+          `已更新视频通道：${v.order.filter((id) => v.enabled[id]).map((id) => labelOf[id] ?? id).join(' → ') || '（没有启用的通道）'}`,
+          `额度不足自动换通道：${saved.autoFallback ? '开' : '关'}`,
+        ].join('\n'),
+      }
+    }
+
     if (sub === 'doctor' || sub === '自检') {
       const d = await videoDoctor(home, config)
       const lines = ['视频动作帧 · 自检结果：', '']
@@ -2376,6 +2560,16 @@ async function videoCommand(home, rawInput) {
       lines.push(`    ${d.backends.relay ? '✓' : '·'} 中转站${d.relay.configured ? `（${d.relay.protocol} · ${d.relay.model}）` : '（未配置）'}`)
       lines.push(`    ${d.backends.minimax ? '✓' : '·'} MiniMax ${d.baseURL}${d.hasKey ? `（${describeKey(config.apiKey)}）` : '（无 Key）'}`)
       lines.push('    ✓ 自选本地视频（零额度，随便用）')
+      // 按设置页里排的顺序报一次「实际会走哪条」，别让用户自己推。
+      const laneCfg = readLanes(home)
+      const labelOf = { relay: '中转站', minimax: 'MiniMax', local: '自选本地视频' }
+      const active = laneCfg.groups.video.order.filter((id) => laneCfg.groups.video.enabled[id])
+      if (active.length) {
+        const usable = active.filter((id) => (id === 'relay' ? d.backends.relay : id === 'minimax' ? d.backends.minimax : true))
+        lines.push('', `  通道顺序（设置页）：${active.map((id) => labelOf[id] ?? id).join(' → ')}`)
+        lines.push(`  auto 会走：${usable.length ? (labelOf[usable[0]] ?? usable[0]) : '（没有可提交的通道）'}`)
+        lines.push(`  额度不足自动换通道：${laneCfg.autoFallback ? '开' : '关（只在设置页改）'}`)
+      }
       lines.push('', `  当前默认模型：${d.model}`)
       if (d.estimate !== null) lines.push(`  参考单价：H3 768P 4 秒约 ¥${d.estimate}`)
       if (d.probe) {
@@ -2383,6 +2577,7 @@ async function videoCommand(home, rawInput) {
         lines.push(`    鉴权：${d.probe.auth}`)
         lines.push(`    Key 类型：${d.probe.keyKindText ?? d.probe.keyKind}`)
         lines.push(`    套餐：${d.probe.planMessage || d.probe.plan}`)
+        if (d.probe.planQuota) lines.push(`    剩余额度：${d.probe.planQuota}`)
         for (const note of d.probe.notes ?? []) lines.push(`    · ${note}`)
         if (d.probe.hint) lines.push('', `  ⚠ ${d.probe.hint}`)
       }

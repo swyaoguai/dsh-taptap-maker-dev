@@ -42,8 +42,9 @@ const home = scratch // dataDir(home) 会建在这个临时目录下
 console.log(`临时目录：${scratch}`)
 
 const import_path = await import('node:path')
-const jobRoot = (id) => path.join(scratch, 'taptap-maker-dev', 'video-jobs', id)
-const imported_path = (job) => path.join(jobRoot(job.id), job.sheet.file)
+// 作业目录跟随项目，路径记在 job.json 的 `dir` 上 —— 别在这里写死。
+const jobRoot = (job) => (typeof job?.dir === 'string' ? job.dir : getJob(scratch, job.id)?.dir)
+const imported_path = (job) => path.join(jobRoot(job), job.sheet.file)
 
 /** 独立解一遍 PNG（只用 zlib），数不透明像素 —— 不依赖被测代码自己的编码器。 */
 function countOpaquePixels(file) {
@@ -110,10 +111,12 @@ async function main() {
     settings: { frameCount: 8, arrange: 'uniform', longEdge: 384, cellWidth: 128, cellHeight: 128, bgTolerance: 40 },
   })
   // 直接落进 videos/ 并把状态标成 ready（跳过付费的提交步骤）
-  copyFileSync(video, path.join(jobRoot(job.id), 'videos', 'output.mp4'))
+  // 目录从作业对象上读，不要在这里写死路径 —— 作业目录现在是跟随项目的。
+  const root = job.dir
+  copyFileSync(video, path.join(root, 'videos', 'output.mp4'))
   const j2 = getJob(home, job.id)
   j2.video = { status: 'ready', file: 'videos/output.mp4', model: 'MiniMax-H3' }
-  writeFileSync(path.join(jobRoot(job.id), 'job.json'), JSON.stringify(j2))
+  writeFileSync(path.join(root, 'job.json'), JSON.stringify(j2))
   ok(getJob(home, job.id).video.status === 'ready', '作业已标记为视频就绪')
 
   console.log('\n[3] 抽帧（uniform 8 帧）')
@@ -127,7 +130,7 @@ async function main() {
   const sorted = times.every((t, i) => i === 0 || t > times[i - 1])
   ok(sorted, '采样时间单调递增')
   for (const f of afterFrames.frames.files) {
-    ok(existsSync(path.join(jobRoot(job.id), 'frames', f)), `帧文件存在 ${f}`)
+    ok(existsSync(path.join(jobRoot(job), 'frames', f)), `帧文件存在 ${f}`)
   }
 
   console.log('\n[4] 三种时间排法')

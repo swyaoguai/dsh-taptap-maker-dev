@@ -122,7 +122,82 @@ console.log('\n[3] 视频中转站路由')
   ok(off.json.backends.relay === false, '关掉后 relay 绿点变灰')
 }
 
-console.log('\n[4] 未知路由仍然 404（没有把用户页面挂死）')
+console.log('\n[4] 通道优先级 / 开关路由')
+{
+  const g0 = await req('GET', 'lanes')
+  ok(g0.status === 200, 'GET /lanes 正常')
+  ok(g0.json.autoFallback === false, '自动回退默认关')
+  const v = g0.json.groups?.video
+  ok(v && Array.isArray(v.lanes) && v.lanes.length === 3, '视频返回 3 条通道')
+  ok(v.lanes[0].id === 'relay', '默认第一条是中转站（与改造前行为一致）', v.lanes[0].id)
+  // 没有配任何东西时，只有 local 是天然就绪的 —— 绿点必须如实反映。
+  ok(v.lanes.every((l) => l.enabled === true), '默认全部启用')
+  ok(v.lanes.find((l) => l.id === 'minimax').ready === false, '没配 Key 时 minimax 状态点为「未配置」')
+  ok(/填 API Key/.test(v.lanes.find((l) => l.id === 'minimax').reason || ''), '未配置时给出「该做什么」的提示')
+  ok(v.lanes.find((l) => l.id === 'local').ready === true, '本地视频永远就绪')
+
+  const o = await req('POST', 'lanes', { groups: { video: { order: ['minimax', 'relay', 'local'] } } })
+  ok(o.status === 200 && o.json.groups.video.lanes[0].id === 'minimax', '重排生效（POST 回与 GET 同形状）')
+  const g1 = await req('GET', 'lanes')
+  ok(g1.json.groups.video.lanes[0].id === 'minimax', '重排已持久化')
+
+  const d = await req('POST', 'lanes', { groups: { video: { enabled: { minimax: false } } } })
+  ok(d.json.groups.video.lanes.find((l) => l.id === 'minimax').enabled === false, '开关生效')
+  const g2 = await req('GET', 'lanes')
+  ok(g2.json.groups.video.lanes.find((l) => l.id === 'minimax').enabled === false, '开关已持久化')
+  ok(g2.json.groups.video.lanes[0].id === 'minimax', '关掉后仍留在列表里（只是不参与）')
+
+  const f = await req('POST', 'lanes', { autoFallback: true })
+  ok(f.json.autoFallback === true, '自动回退总开关生效')
+  ok((await req('GET', 'lanes')).json.autoFallback === true, '总开关已持久化')
+
+  // 脏数据：全关 / 未知通道 / 非布尔
+  const junk = await req('POST', 'lanes', {
+    autoFallback: 'yes', // 非布尔 → 该字段保持原值（true），不被这个脏值打开
+    groups: {
+      video: { order: ['不存在的', 'relay'], enabled: { relay: false, minimax: false, local: false } },
+      image: null,
+    },
+  })
+  ok(junk.json.autoFallback === true, '非布尔值不会误开/误关总开关（保持原值）')
+  // 直接写坏文件，验证读取端对非布尔的处理
+  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'),
+    JSON.stringify({ autoFallback: 'yes', groups: {} }), 'utf8')
+  ok((await req('GET', 'lanes')).json.autoFallback === false, '磁盘上的非布尔值按「关」处理')
+
+  const junk2 = await req('POST', 'lanes', {
+    groups: {
+      video: { order: ['不存在的', 'relay'], enabled: { relay: false, minimax: false, local: false } },
+      image: null,
+    },
+  })
+  const jv = junk2.json.groups.video.lanes.map((l) => l.id)
+  ok(!jv.includes('不存在的'), '未知通道被丢弃', jv.join(','))
+  ok(jv.length === 3, '缺失通道被补回', jv.join(','))
+  ok(junk2.json.groups.video.lanes.some((l) => l.enabled), '不会全关（保留一条，避免锁死）')
+  ok(Array.isArray(junk2.json.groups.image.lanes) && junk2.json.groups.image.lanes.length === 2, 'image 组为 null 时回落到默认')
+}
+
+console.log('\n[5] 素材落点随项目（GET /lanes 与 /asset-dirs 都返回真实路径）')
+{
+  const g = await req('GET', 'lanes')
+  ok(g.json.dirs && g.json.dirs.image && g.json.dirs.video && g.json.dirs.bgm, 'GET /lanes 带回三类素材目录')
+  ok(typeof g.json.dirs.image.dir === 'string' && g.json.dirs.image.dir.length > 0, '图片目录非空', g.json.dirs.image.dir)
+  // 这个测试不在 Maker 工程里跑，所以三类都该退回 $DSH_HOME。
+  ok(g.json.dirs.image.source === 'default', '不在项目里 → source=default', g.json.dirs.image.source)
+  ok(g.json.dirs.image.dir.startsWith(path.join(home, 'taptap-maker-dev')), '图片目录在 $DSH_HOME 下', g.json.dirs.image.dir)
+  ok(g.json.dirs.video.dir.includes('video-jobs'), '视频目录退回 video-jobs', g.json.dirs.video.dir)
+  ok(g.json.dirs.bgm.dir.includes('bgm-downloads'), 'BGM 目录退回 bgm-downloads', g.json.dirs.bgm.dir)
+
+  const a = await req('GET', 'asset-dirs')
+  ok(a.status === 200 && Boolean(a.json.dirs?.video?.dir), 'GET /asset-dirs 正常')
+  ok(a.json.dirs.image.dir === g.json.dirs.image.dir, '两个接口给的图片目录一致')
+
+  const p = await req('POST', 'lanes', { autoFallback: false })
+  ok(Boolean(p.json.dirs?.video?.dir), 'POST /lanes 也回目录（界面保存后不用再拉一次）')
+}
+
+console.log('\n[6] 未知路由仍然 404（没有把用户页面挂死）')
 {
   const n = await req('GET', 'nope')
   ok(n.status === 404, `未知子路径返回 404（实际 ${n.status}）`)

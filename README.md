@@ -58,8 +58,9 @@
   标记不可信是**正确结论**，不是 bug；真素材主体一般占 15%~50%。
 - **对齐用同一包围盒**：所有帧共用一个 alpha 包围盒、贴底放在同一基线，上下起伏不会飘。
   包围盒必须在**抠完的帧**上算 —— 在原帧上算等于没裁，主体会被缩成一点。
-- **只把成品写进 `assets/`**：中间的视频与原始帧留在 `$DSH_HOME/taptap-maker-dev/video-jobs/`，
-  因为 Maker 运行时会给 `assets/` 下任何新文件补 `.meta` 并打进构建。
+- **只把成品写进 `assets/`**：中间的视频与原始帧留在作业目录
+  （`<项目>/sucai/video/<作业名>-<id>/`），因为 Maker 运行时会给 `assets/` 下任何新文件
+  补 `.meta` 并打进构建 —— `sucai/` 整棵是自忽略的，放中间产物正合适。
 
 ### 三个后端（与生图中转站同一套思路）
 
@@ -69,8 +70,11 @@
 | **视频中转站** | 设置页填 Base URL / Key / 模型；三种协议（OpenAI 兼容 / MiniMax 协议 / 自定义路径映射） | 你的中转站 | 官方额度用完、或中转站更便宜 |
 | **自选本地视频** | `/taptap-video use <mp4>` | **零额度** | MiniMax Code 签到积分生成的、录屏、别人的素材 |
 
-`auto` 的优先级是 **中转站 > MiniMax > 报错** —— 你主动配了中转站，多半就是想用它。
-也可以按作业显式指定：`/taptap-video backend relay|minimax|local`。
+`auto` 按**设置页里排的顺序**选第一条「开着 + 配好了 + 不是本地文件」的通道（默认顺序即上表顺序）。
+你可以在设置页「生成通道优先级」里拖拽调序、逐条开关，并决定**额度不足时要不要自动换下一条**
+（默认关；打开后可能在你不知情的情况下动用付费通道）。也可以按作业显式指定：
+`/taptap-video backend relay|minimax|local`（显式指定时不回退）。命令行改顺序：
+`/taptap-video lanes --order minimax,relay --off local --fallback on`。
 
 中转站的「OpenAI 兼容」协议只实现**公共约定**，不绑定任何一家：
 
@@ -102,8 +106,18 @@
 | 积分包（¥7 / 1000 积分） | ✅ 支持 H3，套餐额度先用、超出扣积分 |
 | 按量计费 Key（`sk-api-…`） | ✅ H3 768P ≈ ¥0.5/秒、2K ≈ ¥0.8/秒，4 秒 ≈ ¥2 |
 
-设置页会**自动识别 Key 类型**（`sk-cp-` = 订阅、`sk-api-` = 按量）并说清额度从哪扣，
-不用你自己判断该填哪一种 —— 两种 Key 打的是同一批接口，区别只在计费来源。
+设置页会**自动识别 Key 类型**并说清额度从哪扣，不用你自己判断该填哪一种 ——
+两种 Key 打的是同一批接口，区别只在计费来源。
+
+> ⚠️ **别只看前缀判断订阅**（2026-10-21 修）。MiniMax 的 Key 至少有三种形态：
+> `sk-cp-…`（订阅）、`sk-api-…`（按量）、以及**控制台签发的 JWT**（`eyJ…`，payload 里带
+> `TokenType`，4 = 订阅）。本机用户的 M Plan 订阅 Key 就是最后这种，之前被插件无条件
+> 判成「按量 Key，不走 M Plan 套餐额度」—— 明明有订阅额度却提示得像是没有。
+>
+> 现在 JWT 会解出 payload 看 `TokenType` 判定；解不出来就说「不确定」并引导跑自检，
+> **不会**再断言「你不是订阅」（猜错的代价是让用户白充值一次）。
+> 最终以 `/taptap-video doctor` 的实测为准 —— 它打的是 `token_plan/remains`，
+> 返回 `status_code: 0` 就是有套餐额度，并会报出「本周剩 85% · 本周期剩 94%」这类数字。
 
 ⚠️ **MiniMax Code 每日签到积分 ≠ 开放平台积分包**：签到积分只用于 MiniMax Code 应用内
 的多模态创作（30 天有效），不能拿来让本插件通过 API 出片。想白嫖就在 MiniMax Code 里
@@ -133,14 +147,48 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 > ⚠️ 本插件必须装在 **Maker 工作区之外**。所有持久化（含 API Key）写在 `$DSH_HOME/taptap-maker-dev/` 下。
 > 原因：TapTap Maker 运行时会**自动把整个工作区提交并推送**，明文 Key 一旦落进工作区就会泄露。
 
+## 素材存到哪里（`sucai/`）
+
+在 **Maker 项目目录里**执行生图 / 视频 / BGM 命令时，三类素材统一收在项目下：
+
+```
+<项目>/sucai/images/          生图（网页生图与中转站生图都落这里）
+<项目>/sucai/video/<作业名>-<id>/   一个视频作业一整个目录
+                                 refs/ 参考图 · videos/ 成片 · frames/ 抽帧
+                                 keyed/ 抠像结果 · out/ 拼好的序列帧
+<项目>/sucai/bgm/            背景音乐
+```
+
+- **自动忽略提交**：每个目录自带 `.gitignore`（`*` + `!.gitignore`），Maker 自动
+  commit 整个工程时不会把它们推上去。只写自己的目录，**不碰你的根 `.gitignore`**。
+- **不在项目里就退回 `$DSH_HOME`**：命令可能在任意目录执行；不做这个判断就会在
+  盘符根目录凭空造一个 `sucai/`。
+- **目录实时可见**：设置页「生成通道优先级」卡顶部会如实显示三类素材此刻的真实路径。
+- **视频作业目录带作业名**（如 `奔跑-v7k2p`），资源管理器里一眼认得出。改名**不会**
+  搬目录 —— 已生成的帧和视频都靠相对路径关联，搬了会全部失联。
+- **换项目 / 换目录也找得到**：作业位置记在 `$DSH_HOME/taptap-maker-dev/video-index.json`，
+  不依赖当前工作目录。
+- **老作业自动搬迁**：改造前建在 `$DSH_HOME/…/video-jobs/<id>/` 的作业，在首次
+  访问时自动搬到项目下的 `sucai/video/`，已生成的视频和帧不会失联。
+
 ## 配置
 
 设置 → **TapTap Maker** 页，直接填并保存（存到 `$DSH_HOME/taptap-maker-dev/`，不进任何 Maker 工作区）：
 
 - **额度红线** — 开关，关之前会弹确认
+- **生成通道优先级** — 三条链路（生图 / 视频 / 背景音乐）**共用**一张排序表：
+  拖拽或用 ↑↓ 调顺序、每条通道一个启用开关、一个「额度不足时自动换下一条通道」总开关。
+  每行同时显示**开关**（要不要用它）、**顺序**（第几顺位）、**就绪状态点**（配好没有）——
+  「关着」和「开着但没配」分开显示，因为这两件事的下一步完全不同。
+  存到 `$DSH_HOME/taptap-maker-dev/lanes.json`，即时生效。
+  - 默认顺序与改造前一致（视频：中转站 → MiniMax → 本地视频；生图：网页 → 中转站），升级后行为不突变。
+  - **自动切换默认关闭**：打开后可能在你不知情的情况下动用付费通道。
+  - 只有**额度 / 配额 / 限流**类失败才换通道；参数写错这类问题换了也一样错，不会白跑一轮。
+  - 「自选本地视频」参与排序但**不会**被自动回退选中 —— 它需要你手动挑文件，不该被悄悄代入。
+  - 所有通道被全关时系统会自动保留一条，避免把自己锁死。
 - **ChatGPT 生图（首选）** — **总开关**（关掉后整条通道停用，模型改走中转站）+ 账号列表（主账号常驻，
   退出后可再登；「+ 添加账号」一步完成"建条目 + 打开登录"）+ 多账号轮询开关
-  + **图片下载目录**（默认跟随项目 `<项目>/.taptap-images`，可自定义，支持 `{project}` / `{home}`）
+  + **图片下载目录**（默认跟随项目 `<项目>/sucai/images`，可自定义，支持 `{project}` / `{home}`）
 - **中转站（回退）** — Base URL / Key / Model（「获取模型」按钮自动拉取）/ 缺省尺寸
 - **完整 BGM** — 填风格描述 → 生成提示词 → 一键打开网页 → 下载后自动导入
 - **BGM 账号** — 账号列表（主账号常驻，退出后可再登）+ 「+ 添加账号」一步添加并登录
@@ -152,6 +200,10 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 ## 命令行
 
 ```sh
+# 视频通道：查看 / 调整顺序、开关、额度不足是否自动换
+/taptap-video lanes
+/taptap-video lanes --order minimax,relay --off local --fallback on
+
 # 生图首选：ChatGPT 网页（首次登录一次）
 node <plugin-dir>/src/taptap-gpt.mjs login
 node <plugin-dir>/src/taptap-gpt.mjs gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
@@ -165,7 +217,7 @@ node <plugin-dir>/src/taptap-gpt.mjs grab --url https://chatgpt.com/c/xxxx
 node <plugin-dir>/src/taptap-gpt.mjs lane status
 node <plugin-dir>/src/taptap-gpt.mjs lane off
 
-# 图片存放位置：默认跟随当前项目（<项目>/.taptap-images），也可自定义
+# 图片存放位置：默认跟随当前项目（<项目>/sucai/images），也可自定义
 node <plugin-dir>/src/taptap-gpt.mjs dir                 # 看当前解析结果
 node <plugin-dir>/src/taptap-gpt.mjs dir --set "D:\my-images"
 node <plugin-dir>/src/taptap-gpt.mjs dir --set "{project}/imgs"
@@ -255,8 +307,9 @@ node <plugin-dir>/src/taptap-skills-update.mjs
 ## 隐私
 
 - API Key 只写进 `$DSH_HOME/taptap-maker-dev/{image,music,minimax}.json`，**绝不进入会自动提交的 Maker 工作区**。
-- 视频作业（整段视频、原始帧、抠像中间产物）全部落在 `$DSH_HOME/taptap-maker-dev/video-jobs/`，
-  只有最后合成的那一张整图会被复制进项目 `assets/image/`。
+- 素材落在 `<项目>/sucai/`（图片 / 视频 / BGM 三类分开），每个目录自带 `.gitignore`
+  自我忽略，所以即使 Maker 自动提交整个工程也不会把它们推上去。只有最后合成的那一张
+  整图会被复制进项目 `assets/image/`。
 - 本插件不联网上报任何遥测；联网只发生在你主动下载素材或调用你自己的生图 / 音乐 / 视频端点时。
 - 发布前可运行 `node scripts/sanitize-for-release.mjs` 清掉本机路径与密钥残留。
 

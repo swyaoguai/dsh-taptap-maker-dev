@@ -110,36 +110,85 @@ export const MODEL_CAPABILITIES = {
 export const DEFAULT_MODEL = 'MiniMax-H3'
 
 /**
- * Key 的种类 —— 决定额度从哪扣，**这是最容易搞混的一件事**：
+ * Key 的种类 —— 决定额度从哪扣。
  *
- *   - `subscription`（前缀 `sk-cp-`）：M Plan 订阅 Key，扣套餐额度 + 积分包。
+ *   - `subscription`：M Plan 订阅 Key，扣套餐额度 + 积分包。
  *     视频能否用取决于**档位**：Go 档不含视频模型，Explore/Build 才有。
- *   - `api`（前缀 `sk-api-`，以及大多数旧格式 JWT）：按量计费 Key，扣账户余额。
- *     任何档位都能出视频，只是要充值。
- *   - `unknown`：无法从前缀判断，交给远端报错。
+ *   - `api`：按量计费 Key，扣账户余额。任何档位都能出视频，只是要充值。
+ *   - `unknown`：无法判断。
  *
- * 两种 Key 打的是**同一批接口**，区别只在计费来源。所以插件不需要用户
- * 「选订阅还是按量」—— 填哪个就用哪个，下面 detectKeyKind 只用来决定
- * 界面上该提示什么。
+ * ⚠️ 前缀**不是**可靠的判据（2026-10-21 实测）。MiniMax 至少存在三种 Key 形态：
+ *
+ *   - `sk-cp-…`   经典订阅 Key
+ *   - `sk-api-…`  按量 Key
+ *   - `eyJ…`（JWT）**官网 / 控制台签发的登录态 Key，payload 里带 TokenType**。
+ *     本机用户的 M Plan 订阅 Key 就是这种，之前被这里无条件判成 `api`，
+ *     导致界面明明有订阅额度却提示「按量计费 Key，不走 M Plan 套餐额度」。
+ *
+ * 所以现在只做两件事：认得出 `sk-` 系列的按前缀判；JWT 解出 payload 看
+ * `TokenType`（4 = 订阅，见下），解不出就交回 `unknown` —— **宁可说
+ * 「不确定」，也不要武断地说「你不是订阅」**，因为这个提示会直接误导用户
+ * 去充值。
+ *
+ * 最终判定仍然以远端 `/v1/token_plan/remains` 为准（见 testMiniMax）：
+ * 那是唯一权威信号，本函数只负责给出界面上的**初步**说法。
  */
 export function detectKeyKind(apiKey) {
   const key = String(apiKey ?? '').trim()
   if (key === '') return 'none'
   if (key.startsWith('sk-cp-')) return 'subscription'
   if (key.startsWith('sk-api-')) return 'api'
-  if (/^ey[A-Za-z0-9_-]+\./.test(key)) return 'api' // 老式 JWT（按量）
+  if (/^ey[A-Za-z0-9_-]+\./.test(key)) return jwtKeyKind(key)
   return 'unknown'
+}
+
+/**
+ * JWT Key 的类型判断。
+ *
+ * payload 是 base64url，解出来是一段 JSON。实测 MiniMax 控制台签发的 Key：
+ *   { "GroupName":…, "TokenType":4, "iss":"minimax", … }
+ * `TokenType: 4` = 订阅态。只看得到 TokenType 判定；看不到（被裁剪 / 格式变了）
+ * 就返回 unknown，而不是默认按量。
+ */
+function jwtKeyKind(key) {
+  const payload = decodeJwtPayload(key)
+  if (!payload) return 'unknown'
+  const t = Number(payload.TokenType ?? payload.token_type)
+  // 4 = 订阅；1/2/3 这类按量形态不硬编码含义（没见过就当 unknown 更安全）。
+  if (t === 4) return 'subscription'
+  if (Number.isFinite(t) && t !== 4) return 'api'
+  return 'unknown'
+}
+
+/** 解 JWT 的 payload 段；解不出来返回 undefined（不抛）。 */
+function decodeJwtPayload(jwt) {
+  try {
+    const seg = String(jwt).split('.')[1]
+    if (!seg) return undefined
+    let b64 = seg.replace(/-/g, '+').replace(/_/g, '/')
+    while (b64.length % 4) b64 += '='
+    const json = Buffer.from(b64, 'base64').toString('utf8')
+    const out = JSON.parse(json)
+    return out && typeof out === 'object' ? out : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** 给界面 / 对话用的一句话，说明这个 Key 走什么额度。 */
 export function describeKey(apiKey) {
   switch (detectKeyKind(apiKey)) {
     case 'subscription':
-      return 'M Plan 订阅 Key（sk-cp-）：扣套餐额度。视频模型只有 Explore/Build 档才有，Go 档会收到额度不足。'
+      // 注意：这类 Key 有 sk-cp- 和 JWT（TokenType=4）两种形态，别在文案里
+      // 把「订阅」和某个前缀绑死 —— 之前就因为文案写死 sk-cp-，让用 JWT 的
+      // 订阅用户以为自己填错了。
+      return 'M Plan 订阅 Key：扣套餐额度。视频模型只有 Explore/Build 档才有，Go 档会收到额度不足。'
     case 'api':
       return '按量计费 Key：扣账户余额，任何档位都能出视频（H3 768P 约 ¥0.5/秒）。'
     case 'unknown':
-      return '无法从前缀判断 Key 类型，交给远端校验。'
+      // 说「不确定」而不是断言「按量」：这是本文件修掉的那个 bug 的教训 ——
+      // 猜错的代价是让用户以为自己没订阅而去重复充值。
+      return '无法从 Key 本身判断类型（控制台签发的 Key 都是这种形态）。跑一次自检就能确认走的是套餐额度还是账户余额。'
     default:
       return '未填 Key：插件会用环境变量 MINIMAX_API_KEY 或本机 mmx 登录态。'
   }
@@ -266,8 +315,9 @@ function hintFor(status, message) {
       + '或换普通按量计费 API Key（视频按秒计费，H3 768P 约 ¥0.5/秒）。'
   }
   if (status === 401 || /1004|2049|invalid api key|authorized_error/i.test(text)) {
-    return '鉴权失败：核对 Key 与站点是否匹配（国内站 api.minimaxi.com ↔ 国内订阅/按量 Key，'
-      + '国际站 api.minimax.io ↔ 国际 Key）。订阅 Key 前缀是 sk-cp-，按量 Key 前缀是 sk-api-。'
+    return '鉴权失败：核对 Key 与站点是否匹配（国内站 api.minimaxi.com ↔ 国内 Key，'
+      + '国际站 api.minimax.io ↔ 国际 Key）。订阅与按量 Key 都可能长得像 JWT，'
+      + '光看字符串分不出来 —— 确认 Key 是在对应站点的控制台里复制的即可。'
   }
   if (status === 429 || /1002|rate limit/i.test(text)) {
     return '触发限流，等约 1 分钟再试（M Plan 档位的 RPM 限制比按量付费更紧）。'
@@ -500,6 +550,7 @@ export async function testMiniMax(input) {
     auth: 'unknown',
     plan: 'unknown',
     planMessage: '',
+    planQuota: undefined, // 「本周剩 85% · 本周期剩 95%」这类给人看的数字
     videoQuota: 'unknown',
     notes: [],
   }
@@ -525,16 +576,12 @@ export async function testMiniMax(input) {
     }
   }
 
-  // 2) M Plan 套餐状态（免费）。只有国内站有 www.minimax.cn 这个入口。
-  //    按量 Key 查这个接口没有意义（它本来就不走套餐），所以只对订阅 Key 查，
-  //    避免把「按量 Key 没有 M Plan」误读成「没有额度」。
-  if (kind !== 'subscription') {
-    result.plan = 'n/a'
-    result.planMessage = kind === 'api' || kind === 'unknown'
-      ? '按量计费 Key，不走 M Plan 套餐额度（直接扣账户余额）'
-      : '未填 Key'
-    result.notes.push('已跳过套餐查询：这类 Key 不适用 M Plan 额度。')
-  } else if (/minimaxi?\.com|minimaxi?\.cn/i.test(root)) {
+  // 2) M Plan 套餐状态（免费，且是**唯一权威**的判据）。
+  //    这里不再按 detectKeyKind 的结果跳过 —— 那个判断只认 sk-cp- 前缀，
+  //    而控制台签发的 JWT 订阅 Key（TokenType=4）会被误判成按量而被跳过，
+  //    于是明明有订阅额度却报「不走 M Plan」。查询本身免费，
+  //    2062 之类的「没有订阅」也正是我们要区分的正常结果。
+  if (/minimaxi?\.com|minimaxi?\.cn/i.test(root)) {
     try {
       const response = await fetch('https://www.minimax.cn/v1/token_plan/remains', {
         headers: { Authorization: `Bearer ${input.apiKey}` },
@@ -548,8 +595,27 @@ export async function testMiniMax(input) {
         result.planMessage = 'M Plan 套餐在用'
         const remains = Array.isArray(payload?.model_remains) ? payload.model_remains : []
         const video = remains.find((m) => /video|h3|hailuo/i.test(String(m?.model_name ?? '')))
-        result.videoQuota = video ? 'listed' : 'not_listed'
-        result.notes.push(`M Plan 额度条目 ${remains.length} 个${video ? '，含视频模型' : '，未见视频模型'}`)
+        // `general` 是套餐额度条目，不是模型名 —— 实测控制台签发的订阅 Key
+        // 只返回一个 general 条目。之前按「有没有叫 video/h3 的条目」判断，
+        // 会把这种正常订阅报成「未见视频模型」，属于把好消息说成坏消息。
+        const general = remains.find((m) => /general/i.test(String(m?.model_name ?? '')))
+        const quotaOf = (m) => {
+          const wk = Number(m?.current_weekly_remaining_percent)
+          const iv = Number(m?.current_interval_remaining_percent)
+          if (Number.isFinite(wk) && Number.isFinite(iv)) return `本周剩 ${wk}% · 本周期剩 ${iv}%`
+          if (Number.isFinite(wk)) return `本周剩 ${wk}%`
+          return undefined
+        }
+        result.planQuota = general ? quotaOf(general) : undefined
+        // 只有在**确实存在条目但都不含视频模型**时才叫 not_listed；
+        // general 额度是通用的，不要据此断言「没有视频额度」。
+        result.videoQuota = video ? 'listed' : (general ? 'general' : 'not_listed')
+        result.notes.push(
+          `M Plan 额度条目 ${remains.length} 个`
+          + (video ? '，含视频模型条目' : '')
+          + (general ? `（通用额度${result.planQuota ? '：' + result.planQuota : ''}）` : '')
+          + (video || general ? '' : '，未见视频模型')
+        )
       } else if (code === 2062) {
         result.plan = 'none'
         result.planMessage = '这个 Key 上没有有效的 M Plan 订阅'
@@ -571,6 +637,11 @@ export async function testMiniMax(input) {
     result.videoQuota = 'none'
     result.hint = '鉴权通过，但 Key 上没有 M Plan 额度 —— M Plan Go 档不含视频模型。'
       + '升级到 Explore/Build 档、补积分包，或换普通按量计费 API Key 后才能出片。'
+  } else if (result.ok && result.plan === 'active') {
+    // 远端说有订阅 → 以远端为准，把 keyKind 纠正过来。JWT 订阅 Key 的
+    // 前缀判断本来只是猜测，这里用权威结果覆盖，界面才不会继续说「按量」。
+    result.keyKind = 'subscription'
+    result.keyKindText = 'M Plan 订阅 Key：套餐额度在用（按远端查询确认）。'
   }
   return result
 }

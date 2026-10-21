@@ -46,7 +46,9 @@ import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending } from './paths.js'
-import { downscaleFile } from './taptap-image.mjs'
+import { downscaleFile, generateImage as relayGenerate } from './taptap-image.mjs'
+import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
+import { resolveAssetDir } from './assets.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
 
@@ -72,65 +74,29 @@ export function imageDownloadDir(dshHome) {
   return path.join(dataDir(dshHome), 'gpt-images')
 }
 
-/** Does `dir` look like a TapTap Maker project root? (has assets/) */
-function isMakerProject(dir) {
-  try {
-    return fs.existsSync(path.join(dir, 'assets'))
-  } catch {
-    return false
-  }
-}
-
-/**
- * Ensure a generated-image folder exists AND cannot be committed by accident.
- * The Maker runtime auto-commits the whole workspace, so anything we drop
- * inside a project must be git-ignored — a self-ignoring .gitignore does that
- * without touching the user's root .gitignore.
- */
-function ensureImageDir(dir, { insideProject }) {
-  fs.mkdirSync(dir, { recursive: true })
-  if (insideProject) {
-    const gi = path.join(dir, '.gitignore')
-    try {
-      if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n!.gitignore\n', 'utf8')
-    } catch { /* best effort */ }
-  }
-  return dir
-}
-
 /**
  * Resolve WHERE generated images go. Precedence:
  *   1. explicit `--dir` (this call only)
  *   2. configured `downloadDir` in imageLane.json (supports {project} / {home},
  *      relative paths resolve against the project dir)
- *   3. auto: inside a Maker project → <project>/.taptap-images
+ *   3. auto: inside a Maker project → <project>/sucai/images
  *            otherwise          → $DSH_HOME/taptap-maker-dev/gpt-images
  *
  * "Follow the project" is the DEFAULT because dumping game assets into C:\ by
  * surprise is exactly what the user objected to (2026-10-17).
+ *
+ * 目录解析本身搬到 src/assets.mjs：视频和 BGM 用的是同一套规则，放在一处才
+ * 不会出现「图片跟项目、视频不跟」这种不一致。
  */
 export function resolveDownloadDir(dshHome, { explicit, projectDir } = {}) {
   const cwd = path.resolve(projectDir ?? process.cwd())
-  const home = path.join(dataDir(dshHome))
-  const expand = (raw) => String(raw)
-    .replace(/\{project\}/gi, cwd)
-    .replace(/\{home\}/gi, home)
-    .trim()
-  const configured = (typeof explicit === 'string' && explicit.trim().length > 0)
-    ? explicit
-    : readGptDownloadDir(dshHome)
-  if (configured.length > 0) {
-    let dir = expand(configured)
-    if (!path.isAbsolute(dir)) dir = path.resolve(cwd, dir)
-    // Only treat it as "inside a project" when it really sits under one.
-    const insideProject = isMakerProject(cwd) && path.resolve(dir).toLowerCase().startsWith(path.resolve(cwd).toLowerCase())
-    return { dir: ensureImageDir(dir, { insideProject }), source: explicit ? 'flag' : 'config', projectDir: cwd }
-  }
-  if (isMakerProject(cwd)) {
-    const dir = path.join(cwd, '.taptap-images')
-    return { dir: ensureImageDir(dir, { insideProject: true }), source: 'project', projectDir: cwd }
-  }
-  return { dir: ensureImageDir(imageDownloadDir(dshHome), { insideProject: false }), source: 'default', projectDir: cwd }
+  const r = resolveAssetDir(dshHome, 'image', {
+    explicit,
+    configured: readGptDownloadDir(dshHome),
+    projectDir: cwd,
+    fallback: 'gpt-images',
+  })
+  return { dir: r.dir, source: r.source, projectDir: r.projectDir }
 }
 
 /** Escape a string into a python single-quoted literal. */
@@ -1115,6 +1081,65 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
 }
 
 /**
+ * 生图的统一入口：按设置页排好的通道顺序 + 开关决定走哪条，额度不足时按开关
+ * 决定要不要换下一条。
+ *
+ * 为什么不让调用方自己挑：`taptap-gpt gen`（网页）和 `taptap-image`（中转站）
+ * 过去是两个独立命令，用户要自己判断该用哪个。现在「网页优先、中转站兜底」
+ * 这条策略变成了**可排序、可关掉的显式配置**，由这一个函数统一执行。
+ *
+ * 返回值形状与各通道自己的返回值一致（都带 ok/error/hint），额外加 `lane`
+ * 说明最终是谁出的图 —— 界面与对话里都要如实告诉用户。
+ *
+ * @param {object} relayOpts 传给中转站通道的参数（baseURL/apiKey/prompt/…）
+ */
+export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts = {}, relayReady: relayOk = () => false } = {}) {
+  const enabled = laneOrder(dshHome, 'image')
+  const ready = {
+    gptWeb: () => readGptLaneEnabled(dshHome),
+    relayImage: () => (typeof relayOk === 'function' ? Boolean(relayOk()) : false),
+  }
+  const usable = enabled.filter((id) => {
+    try { return ready[id]?.() } catch { return false }
+  })
+  if (usable.length === 0) {
+    return {
+      ok: false,
+      error: 'no_lane_enabled',
+      hint: '生图通道都被关掉了：设置页 → 生成通道 → 生图，把至少一条打开。',
+    }
+  }
+
+  // 只有开了「额度不足自动换通道」才回退；否则就用第一条可用的。
+  const chain = readLanes(dshHome).autoFallback ? usable : usable.slice(0, 1)
+  const runLane = async (laneId) => {
+    if (laneId === 'gptWeb') {
+      const r = await generateWithRotation(dshHome, prompt, gptOpts)
+      // 把「额度用光」翻译成统一信号，好让下一条通道知道自己该接手了。
+      if (!r.ok && typeof r.error === 'string' && r.error.startsWith('quota:')) {
+        const e = new Error(`quota:${r.error.slice(6)}`)
+        e.laneError = r
+        throw e
+      }
+      return r
+    }
+    return relayGenerate(relayOpts)
+  }
+
+  const result = await runWithFallback(chain, runLane, (err) => err?.message ?? String(err))
+  if (result.ok) return { ...result.value, lane: result.lane, rotatedLanes: result.attempts.length > 0 }
+
+  const summary = result.attempts.map((a) => `  ${a.lane}：${a.reason}`).join('\n')
+  return {
+    ok: false,
+    error: 'all_lanes_failed',
+    lane: null,
+    hint: `所有生图通道都没成功：\n${summary}\n（可在设置页调整「生图通道优先级」与各通道开关）`,
+    attempts: result.attempts,
+  }
+}
+
+/**
  * `grab`: download the finished image from a conversation we ALREADY started,
  * without generating anything new. This is the recovery path when a generation
  * outlives our wait window — the image usually lands seconds later, and
@@ -1325,6 +1350,17 @@ async function main() {
     if (typeof prompt !== 'string' || prompt.length === 0) {
       process.stderr.write('usage: taptap-gpt gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>] [--no-resume]\n')
       process.exitCode = 2
+      return
+    }
+    // 设置页里「生图通道」把网页这条关掉后，gen 必须真的拒绝 —— 界面开关
+    // 不算数的话，用户关了还会照样弹浏览器、照样烧配额。
+    if (!isLaneEnabled(home, 'image', 'gptWeb')) {
+      process.stdout.write(`${JSON.stringify({
+        ok: false,
+        error: 'lane_disabled',
+        hint: '「ChatGPT 网页生图」通道已在设置页关闭。打开它，或改用中转站：/taptap-image <描述>。',
+      }, null, 2)}\n`)
+      process.exitCode = 1
       return
     }
     const r = await generateWithRotation(home, prompt, {

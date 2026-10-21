@@ -102,7 +102,7 @@ export function writePolicyBlock(dshHome, enabled) {
  * - gptWebEnabled: master switch for the ChatGPT web lane (default true).
  * - downloadDir:   where generated images land. Empty means "auto": the
  *                  project directory when the caller is inside a Maker project
- *                  (…<project>/.taptap-images), otherwise $DSH_HOME/…/gpt-images.
+ *                  (…<project>/sucai/images), otherwise $DSH_HOME/…/gpt-images.
  *                  Supports {project} and {home} placeholders.
  *
  * Writing MERGES: flipping one setting must never wipe the other.
@@ -763,12 +763,13 @@ export function discoverMinimaxKey(dshHome) {
   }
   out.found = true
   out.source = fileKey ? 'mmx-cli' : 'env'
-  out.keyPrefix = key.startsWith('sk-cp-') ? 'sk-cp-(M Plan 订阅 Key)'
-    : key.startsWith('sk-api-') ? 'sk-api-(按量计费 Key)'
-      : `${key.slice(0, 5)}…`
+  out.keyPrefix = key.startsWith('sk-cp-') ? 'sk-cp-'
+    : key.startsWith('sk-api-') ? 'sk-api-'
+      : /^ey[A-Za-z0-9_-]+\./.test(key) ? 'eyJ…（控制台 Key，订阅/按量形状一样）'
+        : `${key.slice(0, 5)}…`
   out.baseURL = fileBase || (out.region === 'global' ? 'https://api.minimax.io' : 'https://api.minimaxi.com')
   out.note = fileKey
-    ? '来自 MiniMax CLI（mmx）的登录态。订阅 Key 走 M Plan 额度；Go 档不含视频模型。'
+    ? '来自 MiniMax CLI（mmx）的登录态。跑一次 /taptap-video doctor 可确认走的是 M Plan 套餐额度还是账户余额。'
     : '来自环境变量 MINIMAX_API_KEY。'
   return out
 }

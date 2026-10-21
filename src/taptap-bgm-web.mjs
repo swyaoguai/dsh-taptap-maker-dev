@@ -33,6 +33,8 @@ import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount } from './paths.js'
+import { resolveAssetDir } from './assets.mjs'
+import { laneEnabled } from './lanes.mjs'
 
 /**
  * Two sites, chosen by network reachability — the international site forces
@@ -79,8 +81,15 @@ export function profileDir(dshHome, accountId) {
   return path.join(dataDir(dshHome), `browser-profile-bgm-${id}`)
 }
 
-export function downloadDir(dshHome) {
-  return path.join(dataDir(dshHome), 'bgm-downloads')
+/**
+ * BGM 下载目录。
+ *
+ * 在 Maker 项目里跑 → `<项目>/sucai/bgm/`；否则退回
+ * `$DSH_HOME/taptap-maker-dev/bgm-downloads/`。与图片 / 视频同一套解析规则
+ * （见 src/assets.mjs），三类素材因此收在同一处。
+ */
+export function downloadDir(dshHome, { projectDir } = {}) {
+  return resolveAssetDir(dshHome, 'bgm', { projectDir, fallback: 'bgm-downloads' }).dir
 }
 
 function parseArgs(argv) {
@@ -956,6 +965,18 @@ return result`
  * risk; we never auto-retry a banned account and never hide the trade-off.
  */
 export async function generateWithRotation(dshHome, prompt, { out, waitMs = 300000, site, instrumental, count, accountId, maxAccounts = 4, ignoreInstrumental = false } = {}) {
+  // 设置页里的「BGM 通道」总开关：关掉后这条通道整个不参与（界面开关必须
+  // 真的算数，否则用户关了还会照样烧积分）。
+  if (!laneEnabled(dshHome, 'audio', 'bgmWeb')) {
+    return {
+      ok: false,
+      error: 'lane_disabled',
+      rotated: false,
+      tried: [],
+      failures: [],
+      hint: 'BGM 通道已在设置页关闭；打开它，或改用本地 CC0 曲库（/taptap-audio）。',
+    }
+  }
   const pool = readBgmPool(dshHome)
   if (pool.accounts.length === 0) {
     const r = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: undefined, ignoreInstrumental })

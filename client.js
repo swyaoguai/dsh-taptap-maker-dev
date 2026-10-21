@@ -1221,7 +1221,7 @@ window.__ModuleLoader__.load({
             h('input', {
               style: S.input,
               value: dirInput === null ? (info.downloadDirConfigured || '') : dirInput,
-              placeholder: '留空 = <当前项目>/.taptap-images',
+              placeholder: '留空 = <当前项目>/sucai/images',
               spellCheck: false, autoComplete: 'off',
               onChange: (e) => setDirInput(e.target.value),
               onKeyDown: (e) => {
@@ -1528,6 +1528,179 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 通道优先级 + 各通道开关。
+     *
+     * 这是「走哪条 / 额度不够时换不换」的唯一权威界面：底层三条链路
+     * （生图 / 视频 / BGM）都读这一份排序。
+     *
+     * 交互刻意做成**拖拽 + 上移/下移**两套：拖拽给鼠标用户，上移下移给触屏和
+     * 键盘用户 —— 只做拖拽会让后者完全无法调序，那不是「少个功能」而是「用不了」。
+     *
+     * 每行同时显示三个独立状态：开关（我要不要用它）、顺序（第几顺位）、
+     * 就绪（配好没有）。把「关着」和「开着但没配」分开显示是关键 —— 这两件事
+     * 的下一步动作完全不同（前者不用管，后者要去填 Key）。
+     */
+    function LanePriorityCard() {
+      const [data, setData] = useState(null)
+      const [saving, setSaving] = useState('')
+      const [dragId, setDragId] = useState(null)
+      const [overId, setOverId] = useState(null)
+
+      const load = useCallback(() => {
+        fetch(`${API_BASE}/lanes`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then(setData)
+          .catch(() => setData({ error: true, groups: {}, autoFallback: false }))
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const save = useCallback((patch, tag) => {
+        setSaving(tag)
+        fetch(`${API_BASE}/lanes`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch),
+        })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => { setData((prev) => (prev ? { ...prev, ...j } : j)); setSaving(''); try { setTimeout(() => setSaving(''), 1500) } catch (_e) { /* no-op */ } })
+          .catch(() => setSaving('error'))
+      }, [])
+
+      /** 移动一条通道。idx 传 -1 表示插到最前。 */
+      const move = useCallback((group, id, to) => {
+        setData((prev) => {
+          if (!prev || !prev.groups[group]) return prev
+          const cur = prev.groups[group].lanes.map((l) => l.id)
+          const from = cur.indexOf(id)
+          if (from < 0) return prev
+          const clamped = Math.max(0, Math.min(cur.length - 1, to))
+          if (from === clamped) return prev
+          cur.splice(clamped, 0, ...cur.splice(from, 1))
+          save({ groups: { [group]: { order: cur } } }, group)
+          return { ...prev, groups: { ...prev.groups, [group]: { ...prev.groups[group], lanes: prev.groups[group].lanes } } }
+        })
+      }, [save])
+
+      const toggleLane = useCallback((group, id) => {
+        setData((prev) => {
+          if (!prev || !prev.groups[group]) return prev
+          const lanes = prev.groups[group].lanes
+          const target = lanes.find((l) => l.id === id)
+          if (!target) return prev
+          const onCount = lanes.filter((l) => l.enabled).length
+          if (target.enabled && onCount <= 1) return prev // 后端也会挡，这里先给反馈
+          save({ groups: { [group]: { enabled: { [id]: !target.enabled } } } }, group)
+          return prev
+        })
+      }, [save])
+
+      if (!data) return h('div', { style: S.card }, h('h2', { style: S.cardTitle }, '生成通道优先级'), h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
+
+      if (data.error) {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, '生成通道优先级'),
+          h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, '宿主 web 服务未就绪，暂时读不到通道配置。'))
+      }
+
+      const groups = Object.entries(data.groups || {})
+      const readyCount = (g) => g.lanes.filter((l) => l.enabled && l.ready).length
+      const dirLabel = { image: '图片', video: '视频', bgm: '背景音乐' }
+      const dirSourceText = { project: '跟随当前项目', flag: '本次指定', config: '设置页指定', default: '当前不在项目里，已退回 $DSH_HOME' }
+
+      return h('div', { style: S.card },
+        h('h2', { style: S.cardTitle }, '生成通道优先级'),
+        h('p', { style: { ...S.sub, marginTop: 0 } },
+          '从上到下就是使用顺序：额度或配额不够时会往下换。每一行左侧的开关决定这条通道要不要参与，右侧圆点表示它现在配好了没有。'),
+
+        // 素材落点：三类统一收在 sucai/ 下，如实显示真实路径。
+        data.dirs
+          ? h('div', { style: { marginTop: 12, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))' } },
+            h('div', { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, '素材存到哪里'),
+            h('div', { style: { fontSize: 12, opacity: 0.75, marginBottom: 6 } },
+              '在 Maker 项目目录里执行时，三类素材统一收在 ', h('span', { style: S.codeInline }, '<项目>/sucai/'), ' 下，并自动忽略提交。'),
+            ...Object.entries(data.dirs).map(([kind, d]) => h('div', {
+              key: kind, style: { display: 'flex', gap: 6, alignItems: 'baseline', fontSize: 12, marginTop: 2 },
+            },
+              h('span', { style: { minWidth: 56, opacity: 0.7 } }, dirLabel[kind] ?? kind),
+              h('span', { style: { ...S.codeInline, fontSize: 11 } }, d.dir),
+              h('span', { style: { opacity: 0.55 } }, dirSourceText[d.source] ?? d.source))))
+          : null,
+
+        h('div', { style: { ...S.rowBetween, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--dsh-border, rgba(128,128,128,0.25))' } },
+          h('div', null,
+            h('div', { style: { fontWeight: 600 } }, '额度不足时自动换下一条通道'),
+            h('p', { style: { ...S.hint, margin: '2px 0 0' } },
+              '默认关闭 —— 打开后可能在你不知情的情况下动用付费通道（如中转站）。只有「额度/配额」类失败才换，参数写错这类问题换了也一样错，不会浪费一轮。')),
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
+            h('span', { style: data.autoFallback ? S.pill : S.offPill }, data.autoFallback ? '自动切换开' : '自动切换关'),
+            h(Toggle, {
+              on: data.autoFallback, disabled: saving !== '',
+              onClick: () => save({ autoFallback: !data.autoFallback }, 'fb'),
+            }))),
+
+        ...groups.map(([group, g]) => h('div', { key: group, style: { marginTop: 16 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } },
+            h('span', { style: { fontWeight: 600, fontSize: 13 } }, g.label),
+            h('span', { style: S.pill }, `可用 ${readyCount(g)} / 共 ${g.lanes.length}`)),
+
+          h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            ...g.lanes.map((lane, i) => {
+              const isOver = overId === lane.id && dragId !== lane.id
+              const dim = !lane.enabled
+              return h('div', {
+                key: lane.id,
+                draggable: !dim,
+                onDragStart: (e) => { setDragId(lane.id); try { e.dataTransfer.effectAllowed = 'move' } catch (_e) { /* no-op */ } },
+                onDragOver: (e) => { e.preventDefault(); setOverId(lane.id) },
+                onDragLeave: () => setOverId((v) => (v === lane.id ? null : v)),
+                onDrop: (e) => {
+                  e.preventDefault()
+                  if (dragId && dragId !== lane.id) move(group, dragId, i)
+                  setDragId(null); setOverId(null)
+                },
+                onDragEnd: () => { setDragId(null); setOverId(null) },
+                style: {
+                  display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
+                  borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
+                  background: isOver ? 'var(--dsh-accent-soft, rgba(80,160,255,0.12))' : 'transparent',
+                  opacity: dim ? 0.55 : 1,
+                  borderLeft: i === 0 && !dim ? '3px solid var(--dsh-accent, #4a9eff)' : '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
+                  cursor: dim ? 'default' : 'grab',
+                },
+              },
+                h('span', { style: { fontSize: 13, opacity: 0.6, minWidth: 16, textAlign: 'center' } }, dim ? '—' : i + 1),
+                h('div', { style: { flex: 1, minWidth: 0 } },
+                  h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                    h('span', { style: { fontWeight: 500, fontSize: 13 } }, lane.label),
+                    lane.zeroCost ? h('span', { style: S.offPill }, '零额度') : null),
+                  h('p', { style: { ...S.hint, margin: '1px 0 0', fontSize: 12 } },
+                    lane.note + (lane.reason ? ` — ${lane.reason}` : ''))),
+                h(StatusChip, {
+                  on: lane.ready,
+                  label: lane.ready ? '已就绪' : '未配置',
+                  title: lane.ready ? '现在就能用' : (lane.reason || '尚未配置'),
+                }),
+                // 触屏 / 键盘可达：拖拽之外的第二条排序路径
+                h('button', {
+                  type: 'button', title: '上移', disabled: dim || i === 0, 'aria-label': `${lane.label} 上移`,
+                  style: { ...S.ghostBtn, padding: '2px 8px', opacity: dim || i === 0 ? 0.35 : 1 },
+                  onClick: () => move(group, lane.id, i - 1),
+                }, '↑'),
+                h('button', {
+                  type: 'button', title: '下移', disabled: dim || i === g.lanes.length - 1, 'aria-label': `${lane.label} 下移`,
+                  style: { ...S.ghostBtn, padding: '2px 8px', opacity: dim || i === g.lanes.length - 1 ? 0.35 : 1 },
+                  onClick: () => move(group, lane.id, i + 1),
+                }, '↓'),
+                h(Toggle, { on: lane.enabled, disabled: saving === group, onClick: () => toggleLane(group, lane.id) }),
+              )
+            })),
+        )),
+
+        saving === 'error' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, '保存失败，请重试') : null,
+        h('p', { style: { ...S.hint, marginTop: 12, fontSize: 12 } },
+          '保存于 ', h('span', { style: S.codeInline }, data.file || 'lanes.json'), '，即时生效、无需重启。所有通道都被关掉时系统会自动保留一条，避免把自己锁死。'),
+      )
+    }
+
+    /**
      * 视频生成配置。
      *
      * 三段式，对应三种真正的使用场景（不是一个设置表单拆零碎）：
@@ -1623,14 +1796,22 @@ window.__ModuleLoader__.load({
         h('div', { style: S.card },
           h('h2', { style: S.cardTitle }, 'MiniMax（订阅 Key 与按量 Key 都填这里）'),
           h('p', { style: { ...S.sub, marginTop: 0 } },
-            '两种 Key 打的是同一批接口，只有额度来源不同：',
-            h('span', { style: S.codeInline }, 'sk-cp-…'), ' 是 M Plan 订阅 Key（扣套餐额度，Go 档不含视频模型）；',
-            h('span', { style: S.codeInline }, 'sk-api-…'), ' 是按量 Key（扣账户余额，任何档位都能出片）。'),
+            '两种 Key 打的是同一批接口，只有额度来源不同。M Plan 订阅扣套餐额度',
+            '（视频模型要 Explore/Build 档），按量扣账户余额（任何档位都能出片）。',
+            h('br'),
+            'Key 形态不止 ',
+            h('span', { style: S.codeInline }, 'sk-cp-…'),
+            ' / ',
+            h('span', { style: S.codeInline }, 'sk-api-…'),
+            '：控制台签发的都是 JWT 长得一样，光看字符串分不出订阅还是按量——',
+            '以 ',
+            h('span', { style: S.codeInline }, '/taptap-video doctor'),
+            ' 的实测结果为准。'),
           keyKindText ? h('p', { style: S.hint }, keyKindText) : null,
           h(LabeledInput, {
             label: 'API Key（留空 = 不修改；当前状态见下方提示）',
             value: mmx.apiKey, onChange: (v) => setM('apiKey', v), secret: true,
-            placeholder: backends.minimax ? '已配置（留空保持不变）' : 'sk-cp-… 或 sk-api-…',
+            placeholder: backends.minimax ? '已配置（留空保持不变）' : '订阅 / 按量 Key 都行，直接粘贴',
             hint: '仅保存在本机 minimax.json。留空时会自动用环境变量 MINIMAX_API_KEY 或本机 mmx 登录态。',
           }),
           h('div', { style: S.row },
@@ -1754,7 +1935,7 @@ window.__ModuleLoader__.load({
     function TaptapMakerSettings() {
       const [group, setGroup] = useState('render')
       const groups = [
-        { id: 'render', icon: '🎨', label: '生成通道', desc: '生图与视频的 Key / 中转站', count: 4 },
+        { id: 'render', icon: '🎨', label: '生成通道', desc: '优先级 / 开关与各通道 Key', count: 5 },
         { id: 'audio', icon: '🔊', label: '音频素材', desc: '音效库与 BGM 账号', count: 2 },
         { id: 'govern', icon: '🛡️', label: '治理与工具', desc: '额度红线、skills', count: 2 },
         { id: 'help', icon: '📖', label: '怎么用', desc: '日常全部在对话里完成', count: 0 },
@@ -1773,7 +1954,8 @@ window.__ModuleLoader__.load({
         // ── 生成通道：生图（网页→中转站）+ 视频（三后端） ──
         h(PanelGroup, { active: group === 'render' },
           h('p', { style: S.sectionIntro },
-            '生图：优先 ChatGPT 网页（免费），不可用时回退中转站。视频：MiniMax / 中转站 / 自选本地视频三选一。'),
+            '先在下面这张「通道优先级」里定好顺序和开关，再填各通道的 Key。视频：MiniMax / 中转站 / 自选本地视频。'),
+          h(LanePriorityCard),
           h(GptAccount),
           h(ImageConfig),
           h(VideoConfig),
