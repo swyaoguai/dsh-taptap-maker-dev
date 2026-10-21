@@ -26,6 +26,7 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveDshHome, defaultCacheDir } from './paths.js'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './audio-library.mjs'
+import { ffmpegPath } from './video-media.mjs'
 import { SOURCES } from './audio-sources.mjs'
 
 function parseArgs(argv) {
@@ -59,7 +60,9 @@ export function installFile(srcAbs, project, kind, outName) {
   fs.copyFileSync(srcAbs, target)
   const meta = path.join(dir, `${name}.meta`)
   if (!fs.existsSync(meta)) {
-    fs.writeFileSync(meta, `${JSON.stringify({ uuid: newAssetUuid() }, null, 2)}\n`)
+    // 原子写：Maker 监听 assets/ 并在构建时解析 .meta，半截 JSON 会报「meta 损坏」。
+    fs.writeFileSync(`${meta}.partial`, `${JSON.stringify({ uuid: newAssetUuid() }, null, 2)}\n`)
+    fs.renameSync(`${meta}.partial`, meta)
   }
   return { target, meta, uuid: JSON.parse(fs.readFileSync(meta, 'utf8')).uuid, bytes: fs.statSync(target).size }
 }
@@ -93,13 +96,18 @@ function importLocalFiles(sources, project, kind, opts = {}) {
         tmpDir,
         `${path.basename(src, path.extname(src))}.${opts.convertTo}`,
       )
-      const r = spawnSync('ffmpeg', ['-y', '-hide_banner', '-loglevel', 'error', '-i', src,
+      // ⚠️ 必须用 ffmpegPath() 解析，不能写裸 'ffmpeg'。
+      // 视频那条链路早就处理过这个问题：ffmpeg 可能装在 FFMPEG_PATH、注册表
+      // 或 winget 目录里而**不在 PATH 上**，裸名字会直接 ENOENT，用户看到的是
+      // 「转换失败」这种毫无线索的报错。这里复用同一套解析。
+      const ffmpeg = ffmpegPath()
+      const r = spawnSync(ffmpeg, ['-y', '-hide_banner', '-loglevel', 'error', '-i', src,
         ...(opts.convertTo === 'wav' ? ['-c:a', 'pcm_s16le'] : []),
         ...(opts.convertTo === 'mp3' ? ['-c:a', 'libmp3lame', '-b:a', String(opts.bitrate ?? '192k')] : []),
         ...(opts.convertTo === 'ogg' ? ['-c:a', 'libvorbis', '-q:a', '4'] : []),
         ...(opts.mono ? ['-ac', '1'] : []),
         ...(opts.rate ? ['-ar', String(opts.rate)] : []),
-        tmpOut], { encoding: 'utf8' })
+        tmpOut], { encoding: 'utf8', timeout: 300_000 }) // 转换大文件可能很久，但不许无限挂起
       if (r.status !== 0 || !fs.existsSync(tmpOut)) {
         // Clean up our own temp dir on this path too (a leaked imp-* dir keeps
         // the whole converted file alive in %TEMP% forever).

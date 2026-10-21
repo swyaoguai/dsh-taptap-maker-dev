@@ -1282,7 +1282,11 @@ export async function importToMaker(home, id, { projectDir, assetName, fps } = {
   writeFileSync(tmpPath, bytes)
   renameSync(tmpPath, finalPath)
   const uuid = makerUuid(bytes)
-  writeFileSync(`${finalPath}.meta`, `${JSON.stringify({ uuid }, null, 2)}\n`, 'utf8')
+  // .meta 也走「先写临时名再改名」：Maker 会监听 assets/ 并在构建时读 .meta，
+  // 非原子写留下的半截 JSON 会让构建报「meta 损坏」。PNG 已经就位了，
+  // 这个窗口正好是最容易被监听到的时机。
+  writeFileSync(`${finalPath}.meta.partial`, `${JSON.stringify({ uuid }, null, 2)}\n`, 'utf8')
+  renameSync(`${finalPath}.meta.partial`, `${finalPath}.meta`)
 
   const sheet = job.sheet
   const manifest = {
@@ -1304,7 +1308,10 @@ export async function importToMaker(home, id, { projectDir, assetName, fps } = {
     createdAt: Date.now(),
   }
   const maniDir = path.join(project, 'assets', 'image')
-  writeFileSync(path.join(maniDir, `${finalName.replace(/\.png$/, '')}.seq.json`), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  const maniPath = path.join(maniDir, `${finalName.replace(/\.png$/, '')}.seq.json`)
+  // 同样原子写：这是 Maker 侧的动画描述文件，构建时会读。
+  writeFileSync(`${maniPath}.partial`, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  renameSync(`${maniPath}.partial`, maniPath)
 
   const fresh = getJob(home, id)
   fresh.import = { projectDir: project, asset: `assets/image/${finalName}`, manifest: `assets/image/${finalName.replace(/\.png$/, '')}.seq.json`, uuid, fps: manifest.animation.fps, at: Date.now() }

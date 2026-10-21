@@ -347,7 +347,10 @@ export async function installRemoteMatch(match, project, kind, outName) {
   if (!result.ok) return { ok: false, error: result.error }
   const meta = `${target}.meta`
   if (!fs.existsSync(meta)) {
-    fs.writeFileSync(meta, `${JSON.stringify({ uuid: newAssetUuid() }, null, 2)}\n`)
+    // 原子写：Maker 会监听 assets/ 并在构建时解析 .meta，
+    // 直接 writeFileSync 留下的半截 JSON 会让构建报「meta 损坏」。
+    fs.writeFileSync(`${meta}.partial`, `${JSON.stringify({ uuid: newAssetUuid() }, null, 2)}\n`)
+    fs.renameSync(`${meta}.partial`, meta)
   }
   return { ok: true, target, meta, uuid: JSON.parse(fs.readFileSync(meta, 'utf8')).uuid, license: match.license }
 }
