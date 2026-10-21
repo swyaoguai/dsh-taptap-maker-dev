@@ -35,7 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
   getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
@@ -344,6 +344,12 @@ function policyText(config, gptLaneOn = true) {
       '也**只能停下来把情况和可选方案讲清楚，然后问用户**，由用户自己下指令换。',
       '严禁：不问就换、把「推荐模型」当成「已获授权」、因为提交报错就自动重试另一个模型、',
       '或在没告知的情况下改作业的 model 字段。插件层面也已加硬约束：模型缺失或不兼容会**直接报错**，不会替你选。',
+      '**🚫 提交报「结果未知 / fetch failed / 超时」时，绝不可以自动重跑**：',
+      '这类错误说明请求**已经发出**、但没收到服务端回应 —— 服务端很可能已经收下并在生成、',
+      '额度也可能已经扣了。再跑一次就是**多花一份钱**（这正是「白烧额度」最常见的来源）。',
+      '正确做法：先 `/taptap-video status` 看提交台账、`/taptap-video poll` 继续查；',
+      '确认服务端确实没有该任务之后，才用 `--yes` 重新提交。插件会拦：不带 `--yes` 不放行。',
+      '同理，`poll` 查询失败**不是**任务失败，不要因此重新提交。',
       '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
       '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
       '**超时不要重新生成（很关键，会白烧额度）**：网页出图常要 1~3 分钟，我们等不到时会返回 `pendingUrl`（那个对话的链接）。',
@@ -2498,10 +2504,33 @@ const VIDEO_HELP = [
 ].join('\n')
 
 /** 把一个作业渲染成一段人话（状态 + 逐帧报告）。 */
-function renderVideoJob(job) {
+function renderVideoJob(job, home) {
   const lines = [`作业 ${job.id} · ${job.name}`]
-  lines.push(`  视频：${job.video?.status ?? 'empty'}${job.video?.remoteStatus ? `（${job.video.remoteStatus}）` : ''}${job.video?.error ? ` — ${job.video.error}` : ''}`)
+  const vs = job.video?.status ?? 'empty'
+  // 「结果未知」用醒目的说法：它是唯一一种**不能再跑一次**的状态。
+  lines.push(vs === 'uncertain'
+    ? `  视频：⚠ 提交结果未知（${job.video.remoteStatus ?? ''}）— 可能已扣费，别重复提交`
+    : `  视频：${vs}${job.video?.remoteStatus ? `（${job.video.remoteStatus}）` : ''}${job.video?.error ? ` — ${job.video.error}` : ''}`)
   if (job.video?.hint) lines.push(`  ↳ ${job.video.hint}`)
+
+  // 提交台账：让「上次到底提交了没有」有一处可查的地方，
+  // 而不是只能靠猜（这正是白烧额度的根源）。
+  const ledger = readSubmitLedger(home)
+  if (ledger) {
+    const when = ledger.at ? new Date(ledger.at).toLocaleString('zh-CN') : '未知时间'
+    const stateText = {
+      inflight: '⚠ 结果未知（服务端可能已收下，额度可能已扣）',
+      confirmed: '已确认提交成功',
+      failed: '服务端明确拒收（未扣费）',
+    }[ledger.state] ?? ledger.state
+    lines.push(`  台账：${stateText}`)
+    lines.push(`    提交号 ${ledger.submitId}${ledger.backend ? ` · ${ledger.backend === 'relay' ? '中转站' : 'MiniMax'}` : ''}${ledger.model ? ` · ${ledger.model}` : ''}`)
+    lines.push(`    时间 ${when}${ledger.taskId ? ` · task ${ledger.taskId}` : ''}`)
+    if (ledger.error) lines.push(`    错误 ${ledger.error}`)
+    if (ledger.state === 'inflight') {
+      lines.push('    → 先 /taptap-video poll 查进度；确认服务端确实没有该任务后，再用 --yes 重提。')
+    }
+  }
   if (job.frames?.status === 'ready') {
     lines.push(`  帧：${job.frames.count} 张 · ${job.frames.width}×${job.frames.height} · ${job.frames.duration?.toFixed(2)}s · ${job.frames.arrange}`)
     const report = job.frames.report ?? []
@@ -2712,14 +2741,14 @@ async function videoCommand(home, rawInput) {
     if (sub === 'status' || sub === '状态') {
       const job = pickVideoJob(home, raw)
       if (!job) return { kind: 'success', text: `还没有作业。开始：/taptap-video new\n\n${VIDEO_HELP}` }
-      return { kind: 'success', text: renderVideoJob(job) }
+      return { kind: 'success', text: renderVideoJob(job, home) }
     }
 
     if (sub === 'poll' || sub === '查') {
       const job = pickVideoJob(home, raw)
       if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
       const updated = await pollJobVideo(home, job.id, config)
-      return { kind: 'success', text: renderVideoJob(updated) }
+      return { kind: 'success', text: renderVideoJob(updated, home) }
     }
 
     if (sub === 'use' || sub === '用') {
@@ -2775,7 +2804,7 @@ async function videoCommand(home, rawInput) {
       if (flags.arrange) overrides.arrange = flags.arrange
       if (flags.edge) overrides.longEdge = Number(flags.edge)
       const updated = await extractJobFrames(home, job.id, overrides)
-      return { kind: 'success', text: renderVideoJob(updated) }
+      return { kind: 'success', text: renderVideoJob(updated, home) }
     }
 
     if (sub === 'key' || sub === '抠图') {
@@ -2789,7 +2818,7 @@ async function videoCommand(home, rawInput) {
       if (flags.high) overrides.keyHigh = Number(flags.high)
       if (flags.despill) overrides.despill = Number(flags.despill)
       const updated = await keyJobFrames(home, job.id, overrides)
-      return { kind: 'success', text: renderVideoJob(updated) }
+      return { kind: 'success', text: renderVideoJob(updated, home) }
     }
 
     if (sub === 'sheet' || sub === '合成') {
@@ -2804,7 +2833,7 @@ async function videoCommand(home, rawInput) {
       if (flags.layout) overrides.layout = flags.layout
       if (flags.columns) overrides.columns = Number(flags.columns)
       const updated = await composeJobSheet(home, job.id, overrides)
-      return { kind: 'success', text: renderVideoJob(updated) }
+      return { kind: 'success', text: renderVideoJob(updated, home) }
     }
 
     if (sub === 'import' || sub === '导入') {
@@ -2872,7 +2901,7 @@ async function videoCommand(home, rawInput) {
         }
       }
       const cost = estimateCostCny(config.model)
-      const submitted = await submitJobVideo(home, job.id, config)
+      const submitted = await submitJobVideo(home, job.id, config, { rawInput: raw })
       return {
         kind: 'success',
         text: [

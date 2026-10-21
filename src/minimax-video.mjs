@@ -35,6 +35,7 @@
  *
  * @module src/minimax-video.mjs
  */
+import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
 export class MiniMaxError extends Error {
@@ -434,9 +435,17 @@ export async function submitVideo(input) {
   const isV2 = protocolOf(input.model) === 'v2'
   const url = isV2 ? `${root}/v2/video_generation` : `${root}/v1/video_generation`
   const body = isV2 ? buildV2Body(input) : buildV1Body(input)
+  // 幂等键：**同一次提交的所有重试必须复用同一个值**。视频按秒计费，
+  // 如果「请求其实成功了、只是响应丢了」之后又重投一次，没有幂等键就会
+  // 生成两段视频、扣两次钱。有键则服务端会去重。
+  const idem = input.idempotencyKey || randomUUID()
   const payload = await requestJson(
     url,
-    { method: 'POST', headers: headers(input.apiKey), body: JSON.stringify(body) },
+    {
+      method: 'POST',
+      headers: { ...headers(input.apiKey), 'Idempotency-Key': idem },
+      body: JSON.stringify(body),
+    },
     input.timeoutMs,
     '提交视频任务',
   )

@@ -773,36 +773,61 @@ export function discoverMinimaxKey(dshHome) {
     : '来自环境变量 MINIMAX_API_KEY。'
   return out
 }
-/** Path to the in-flight MiniMax video task record (crash/timeout recovery). */
-export function minimaxPendingPath(dshHome) {
-  return path.join(dataDir(dshHome), 'video-pending.json')
+/**
+ * 视频**提交台账**：在发出请求**之前**就落盘，用来回答一个问题 ——
+ * 「这次提交到底有没有被服务端收下？」
+ *
+ * 为什么必须提前写：视频按秒计费。如果提交请求发出后本地网络异常（fetch failed /
+ * 超时 / 进程被杀），服务端**很可能已经收下并在跑了**，只是我们没拿到 task_id。
+ * 这种情况下最危险的动作就是「再跑一次」—— 那是白花一份钱。所以这里在发请求前
+ * 先写一条 {submitId, 状态: uncertain}；拿到 task_id 后改成 confirmed。
+ *
+ * 状态含义：
+ *   - `inflight`  请求已发出、还没拿到 task_id（**结果未知，可能已扣费**）
+ *   - `confirmed` 拿到 task_id，任务在服务端跑着
+ *   - `failed`    服务端明确拒绝（4xx 且带业务错误码），确定没扣费
+ */
+export function videoSubmitLedgerPath(dshHome) {
+  return path.join(dataDir(dshHome), 'video-submit-ledger.json')
 }
 
-/** Read the pending video task record, or undefined when there is none. */
-export function readMinimaxPending(dshHome) {
-  const data = readJson(minimaxPendingPath(dshHome))
-  if (typeof data?.taskId !== 'string' || data.taskId.length === 0) return undefined
+/** 读台账（没有则返回 undefined）。 */
+export function readSubmitLedger(dshHome) {
+  const data = readJson(videoSubmitLedgerPath(dshHome))
+  if (!data || typeof data !== 'object' || typeof data.submitId !== 'string') return undefined
   return {
-    taskId: data.taskId,
+    submitId: data.submitId,
+    state: ['inflight', 'confirmed', 'failed'].includes(data.state) ? data.state : 'inflight',
+    jobId: typeof data.jobId === 'string' ? data.jobId : '',
+    backend: typeof data.backend === 'string' ? data.backend : '',
     model: typeof data.model === 'string' ? data.model : '',
-    prompt: typeof data.prompt === 'string' ? data.prompt : '',
-    mode: typeof data.mode === 'string' ? data.mode : '',
-    seconds: typeof data.seconds === 'number' ? data.seconds : 0,
-    resolution: typeof data.resolution === 'string' ? data.resolution : '',
+    taskId: typeof data.taskId === 'string' ? data.taskId : '',
+    idempotencyKey: typeof data.idempotencyKey === 'string' ? data.idempotencyKey : '',
+    error: typeof data.error === 'string' ? data.error : '',
     at: typeof data.at === 'number' ? data.at : 0,
   }
 }
 
-/** Persist the pending video task record (merge). */
-export function writeMinimaxPending(dshHome, patch = {}) {
-  const merged = { ...(readJson(minimaxPendingPath(dshHome)) ?? {}), ...patch }
-  writeJson(minimaxPendingPath(dshHome), merged)
-  return merged
+/** 写台账（整体替换，不是 merge —— 台账只关心「最近一次提交」）。 */
+export function writeSubmitLedger(dshHome, record) {
+  const payload = {
+    submitId: String(record?.submitId ?? ''),
+    state: record?.state ?? 'inflight',
+    jobId: String(record?.jobId ?? ''),
+    backend: String(record?.backend ?? ''),
+    model: String(record?.model ?? ''),
+    taskId: String(record?.taskId ?? ''),
+    idempotencyKey: String(record?.idempotencyKey ?? ''),
+    error: String(record?.error ?? '').slice(0, 500),
+    at: Date.now(),
+  }
+  writeJson(videoSubmitLedgerPath(dshHome), payload)
+  return payload
 }
 
-/** Forget the pending video task record. */
-export function clearMinimaxPending(dshHome) {
-  try { fs.rmSync(minimaxPendingPath(dshHome), { force: true }) } catch { /* ignore */ }
+/** 清掉台账（确认拿到结果之后）。 */
+export function clearSubmitLedger(dshHome) {
+  try { fs.rmSync(videoSubmitLedgerPath(dshHome), { force: true }) } catch { /* ignore */ }
 }
 
 /* ------------------------------------------------------------------------- *

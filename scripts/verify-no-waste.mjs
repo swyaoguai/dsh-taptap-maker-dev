@@ -1,0 +1,120 @@
+/**
+ * 「不白烧额度」保护的离线自测（不联网、不花任何额度）。
+ *
+ * 背景：视频按秒计费。真实的坑是「提交请求其实成功了，但本地网络异常 /
+ * 进程被打断，没拿到 task_id」—— 此时服务端已经在跑、额度可能已扣。看到
+ * "提交失败" 就再跑一次，等于多花一份钱。这套测试守住这条线。
+ *
+ * 覆盖：
+ *   1. 失败分类：传输层故障 = 结果未知；有 HTTP 状态码 = 服务端明确拒收
+ *   2. 台账在**发请求前**就落盘（inflight），拿到 task_id 后 confirmed
+ *   3. 结果未知时作业状态是 uncertain（**不是 error**），且再提交被拦
+ *   4. 幂等键在同一轮重试里固定不变
+ *   5. 轮询限流只提示退避，不改任务状态、不额外扣费
+ *
+ * 用法：node scripts/verify-no-waste.mjs
+ */
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { execFileSync } from 'node:child_process'
+
+import { readSubmitLedger } from '../src/paths.js'
+import { createJob, getJob, saveJob, setReference, submitJobVideo } from '../src/video-sequence.mjs'
+import { ffmpegPath } from '../src/video-media.mjs'
+
+let passed = 0
+let failed = 0
+const ok = (cond, label, extra = '') => {
+  if (cond) { passed += 1; console.log(`  ✓ ${label}`) }
+  else { failed += 1; console.log(`  ✗ ${label}${extra ? ` — ${extra}` : ''}`) }
+}
+
+const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-no-waste-'))
+console.log(`临时目录：${scratch}\n`)
+
+const src = fs.readFileSync(new URL('../src/video-sequence.mjs', import.meta.url), 'utf8')
+const mmx = fs.readFileSync(new URL('../src/minimax-video.mjs', import.meta.url), 'utf8')
+
+console.log('\n[1] 失败分类：区分「未知」与「明确拒收」')
+{
+  // isUncertainSubmit 是模块内私有函数，这里按源码断言它的判据。
+  const body = /function isUncertainSubmit\(error\) \{[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
+  ok(body.length > 0, '能找到 isUncertainSubmit')
+  ok(/status >= 400 && status < 600/.test(body), '有 HTTP 状态码 → 不算「未知」（服务端已明确答复）')
+  for (const sig of ['fetch failed', 'ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'socket hang up']) {
+    ok(body.includes(sig), `认得传输层故障：${sig}`)
+  }
+  // 传输层故障必须排在「有状态码」判断之后，否则 400 也会被当成未知。
+  const iStatus = body.indexOf('status >= 400')
+  const iFetch = body.indexOf('fetch failed')
+  ok(iStatus >= 0 && iFetch > iStatus, '传输层判据在状态码判据之后（400 不会被误判为未知）')
+}
+
+console.log('\n[2] 台账 + 幂等键在代码里就位')
+{
+  const ledgerCalls = (src.match(/writeSubmitLedger\(/g) ?? []).length
+  ok(ledgerCalls >= 2, `提交前 inflight + 失败时 failed 都记账（实测 ${ledgerCalls} 处）`)
+  const wIdx = src.indexOf("state: 'inflight', jobId: id")
+  const aIdx = src.indexOf('const taskId = await attempt(useBackend, idemKey)')
+  ok(wIdx > 0 && aIdx > 0 && wIdx < aIdx, '台账在**发请求之前**写入（断网/进程被杀也留痕）')
+  ok(/const idemKey = randomUUID\(\)/.test(src), '幂等键在重试链外生成一次')
+  ok(/attempt\(useBackend, idemKey\)/.test(src), '同一次提交的所有重试复用同一个幂等键')
+  ok(!/attempt\(useBackend\)/.test(src), '不存在「每次重试都换新键」的写法（那会重复扣费）')
+  ok(/idempotencyKey: idemKey/.test(src), '幂等键传给了中转站')
+  ok(/Idempotency-Key/.test(mmx), 'MiniMax 提交也带幂等键（以前没有）')
+}
+
+console.log('\n[3] 端到端：网络失败 → uncertain + 台账 inflight，且再提交被拦')
+{
+  const home = path.join(scratch, 'h1')
+  const job = createJob(home, '网络异常', { model: 'MiniMax-H3' })
+  const img = path.join(scratch, 'ref.png')
+  execFileSync(ffmpegPath(), ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=green:s=512x512:d=1', '-frames:v', '1', img])
+  await setReference(home, job.id, 'firstFrame', img)
+  saveJob(home, job.id, { prompt: '角色跑' })
+
+  // baseURL 指向一个没人监听的端口 → 传输层失败（fetch failed）
+  try {
+    await submitJobVideo(home, job.id, { apiKey: 'sk-api-x', baseURL: 'http://127.0.0.1:9' }, { rawInput: 'run' })
+    ok(false, '应该抛错')
+  } catch { /* 预期 */ }
+
+  const after = getJob(home, job.id)
+  ok(after.video.status === 'uncertain', '作业状态是 uncertain，不是 error', after.video.status)
+  ok(after.video.status !== 'error', '**绝不是 error**（error 会诱导用户再跑一次）')
+  ok(/不要直接再跑一次 run/.test(after.video.hint ?? ''), '提示里明确劝阻重复提交')
+  ok(/poll/.test(after.video.hint ?? ''), '提示里给出下一步（poll 而不是重跑）')
+
+  const led = readSubmitLedger(home)
+  ok(led?.state === 'inflight', '台账记为 inflight（结果未知）', led?.state)
+  ok(typeof led?.idempotencyKey === 'string' && led.idempotencyKey.length > 10, '台账里存了幂等键')
+  ok(led?.jobId === job.id, '台账关联到了这个作业')
+
+  // 再提交必须被拦（不带 --yes）
+  let msg = ''
+  try {
+    await submitJobVideo(home, job.id, { apiKey: 'sk-api-x', baseURL: 'http://127.0.0.1:9' }, { rawInput: 'run' })
+  } catch (e) { msg = e?.message ?? '' }
+  ok(/再提交一次/.test(msg), '结果未知时再提交被拦下', msg.slice(0, 60))
+  ok(/--yes/.test(msg), '拦下时告诉用户怎么显式授权')
+  ok(getJob(home, job.id).video.status === 'uncertain', '拦下后状态不变（没有偷偷重试）')
+}
+
+console.log('\n[4] nextStepOf 对 uncertain 的说法')
+{
+  ok(/结果未知/.test(src), 'nextStepOf 里对 uncertain 有专门文案')
+  ok(/--yes/.test(src), '文案里提示需要 --yes 才能重提')
+}
+
+console.log('\n[5] 轮询限流：只提示退避，不改状态、不额外扣费')
+{
+  ok(/查询被限流/.test(src), '限流时给出退避提示')
+  ok(/pollHint/.test(src), '限流提示写进作业（status 字段旁边）')
+  ok(/if \(job\.video\?\.status !== 'running'\) return job/.test(src), '轮询失败保持 running（不会误判成失败而诱发重提）')
+  ok(/单次查询失败 ≠ 任务失败/.test(src), '代码里有「查询失败 ≠ 任务失败」的注释说明')
+}
+
+fs.rmSync(scratch, { recursive: true, force: true })
+console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
+process.exit(failed === 0 ? 0 : 1)

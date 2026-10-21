@@ -30,7 +30,7 @@ import path from 'node:path'
 import { resolveAssetDir, ensureAssetDir } from './assets.mjs'
 
 import {
-  clearMinimaxPending, dataDir,
+  dataDir, readSubmitLedger, writeSubmitLedger, clearSubmitLedger,
 } from './paths.js'
 import {
   MiniMaxError, capabilityOf, detectKeyKind, downloadVideo, estimateCostCny,
@@ -39,6 +39,7 @@ import {
 } from './minimax-video.mjs'
 import { relayDownload, relayQuery, relaySubmit, relayReady, normalizeRatio } from './video-relay.mjs'
 import { fallbackCandidates, laneOrder, quotaSignal } from './lanes.mjs'
+import { requireApproval } from './guards.mjs'
 import {
   MediaError, checkFfmpeg, encodePng, extractFramesAt, mimeOf,
   planSampleTimes, probeDuration, probeFps, probeSize, runFfmpeg, toJpegDataUri,
@@ -498,11 +499,27 @@ export function clearReference(home, id, kind) {
  * 把同一个 taskId 当新任务再轮询一遍 —— 那不会重复扣费，但会让人以为
  * 「又提交了一次」，也不知道哪次是活的。
  */
-export async function submitJobVideo(home, id, config) {
+export async function submitJobVideo(home, id, config, { rawInput } = {}) {
   const job = getJob(home, id)
   if (!job) throw new Error(`视频作业不存在：${id}`)
   if (job.video?.status === 'running') {
     throw new Error(`视频任务已在跑（${job.video.taskId ?? '提交中'}），等它跑完再提交，避免重复扣费`)
+  }
+  // 🚫 上一次提交「结果未知」时**不许再提交**。
+  //    这是白烧额度最典型的路径：网络抖一下 → 作业标成失败 → 用户（尤其 AI）
+  //    很自然地再跑一次 → 服务端其实早就收下了 → 两次都扣钱。
+  //    只有用户明确确认「服务端确实没有这个任务」才放行。
+  if (job.video?.status === 'uncertain') {
+    const gate = requireApproval({
+      rawInput,
+      action: '在「上一次提交结果未知」的情况下**再提交一次**',
+      consequence: `上一次提交（${job.video.submitId ?? '未知'}）没有收到服务端回应，`
+        + '但服务端很可能已经收下并在生成、额度也可能已经扣了。再提交就是**多花一份钱**。',
+      undo: '没有撤销 —— 钱已经花出去了。先用 /taptap-video status 与 /taptap-video poll 确认。',
+    })
+    if (!gate.ok) {
+      throw new Error(`${gate.text}\n\n${UNCERTAIN_HINT}`)
+    }
   }
   const prompt = `${job.prompt.trim()}${job.suffix.trim() ? `\n${job.suffix.trim()}` : ''}`
   if (prompt.trim() === '') throw new Error('提示词为空：先写一句「角色在做什么」')
@@ -571,8 +588,12 @@ export async function submitJobVideo(home, id, config) {
   /**
    * 试一条通道提交。抽出来是因为回退要**整体重试**：帧编码、首帧校验这些
    * 准备工作与后端无关，在所有重试之间复用，不重复上传素材。
+   *
+   * `idemKey` 在**整个重试链里固定不变** —— 这样即使某次请求其实成功、
+   * 只是响应丢了（我们判成「可能已提交」并停下），用户之后用同一个 key
+   * 重试也不会生成第二段视频、不会扣两次钱。
    */
-  const attempt = async (useBackend) => {
+  const attempt = async (useBackend, idemKey) => {
     if (useBackend === 'relay') {
       const submitted = await relaySubmit(config.relay, {
         prompt,
@@ -580,8 +601,6 @@ export async function submitJobVideo(home, id, config) {
         lastFrameImage,
         seconds: job.settings.duration,
         size: relaySizeFor(job.settings),
-        // 中转站协议要求素材是公网 url：把本地文件路径一并给它，
-        // 由 relay 自己上传换 url（不缓存，各家过期时间不同）。
         assetFiles: {
           firstFrame: job.refs.firstFrame
             ? { path: absPath(home, id, job.refs.firstFrame.file), mime: mimeOf(job.refs.firstFrame.file) }
@@ -591,6 +610,7 @@ export async function submitJobVideo(home, id, config) {
             : undefined,
         },
         ratio: job.settings.relayRatio,
+        idempotencyKey: idemKey,
       })
       return submitted.taskId
     }
@@ -605,44 +625,59 @@ export async function submitJobVideo(home, id, config) {
       duration: job.settings.duration,
       resolution: job.settings.resolution,
       promptOptimizer: job.settings.promptOptimizer,
+      idempotencyKey: idemKey,
     })
   }
 
   /** 这条通道此刻能不能跑（设置页排序后仍要复查一次配置）。 */
   const usable = (laneId) => (laneId === 'relay' ? relayReady(config?.relay) : Boolean(config?.apiKey))
 
-  // 用户排好序、开着、配好了的通道（不含 local：它需要用户手动挑文件）。
-  // 显式指定后端时不回退 —— 那是用户在**这一个作业**上的一次性决定。
   const candidates = (job.settings.backend ?? 'auto') === 'auto'
     ? fallbackCandidates(home, 'video', usable)
     : []
 
-  // 把本次 resolveBackend 选中的通道放在**最前面**：用户排的顺序是权威，
-  // 而作业设置只是临时覆盖，不该因为全局顺序把它挤到后面才轮到自己。
   const chain = []
   if (usable(backend) && !chain.includes(backend)) chain.push(backend)
   for (const id of candidates) if (!chain.includes(id)) chain.push(id)
 
+  // 同一次提交共用一个幂等键（跨通道重试也不换）。
+  const idemKey = randomUUID()
   let lastError = null
+  let uncertain = null // 「可能已提交、结果未知」的失败
   for (let i = 0; i < chain.length; i += 1) {
     const useBackend = chain[i]
+    // ⚠️ 在**发请求之前**落盘台账：万一请求发出后本地断网 / 进程被杀，
+    //    下次进来能知道「上次可能已经扣费了」，而不是傻乎乎再提交一次。
+    writeSubmitLedger(home, {
+      submitId, state: 'inflight', jobId: id, backend: useBackend,
+      model: job.settings.model, idempotencyKey: idemKey,
+    })
     try {
-      const taskId = await attempt(useBackend)
+      const taskId = await attempt(useBackend, idemKey)
       const usedModel = useBackend === 'relay' ? (config.relay?.model || job.settings.model) : job.settings.model
       const fresh = getJob(home, id)
-      // backend 必须记**实际用的那条**：pollJobVideo 靠它分派协议，
-      // 中途回退过之后就再也回不去原来的协议了。
       fresh.video = {
         ...fresh.video, status: 'running', taskId, remoteStatus: '已提交',
-        backend: useBackend, model: usedModel, updatedAt: Date.now(),
+        backend: useBackend, model: usedModel, submitId, updatedAt: Date.now(),
       }
       log(fresh, 'info', `视频任务已提交：${taskId}`)
       if (i > 0) log(fresh, 'info', `（已从其他通道回退到 ${useBackend === 'relay' ? '中转站' : 'MiniMax'}）`)
       return { taskId, submitId, backend: useBackend, job: writeVideoJob(home, fresh) }
     } catch (error) {
       lastError = error
-      // 只有**额度类**失败才回退。参数错误 / 素材不对这类 400 换条通道也
-      // 会同样失败，重投只是白等一轮；用户要改的是作业内容，不是通道。
+      // ★ 关键分类：这次失败是「服务端明确拒收」（没扣费，可换通道重试）
+      //   还是「请求发出去了但结果未知」（**很可能已扣费，绝不能重投**）。
+      //   网络异常（fetch failed / 超时 / ECONNRESET）属于后者 ——
+      //   这正是「白烧额度」最常见的来源：看到报错就再跑一次。
+      if (isUncertainSubmit(error)) {
+        uncertain = error
+        break // 立刻停：换通道重试 = 再花一份钱
+      }
+      writeSubmitLedger(home, {
+        submitId, state: 'failed', jobId: id, backend: useBackend,
+        model: job.settings.model, idempotencyKey: idemKey,
+        error: error?.message ?? String(error),
+      })
       const canRetry = i < chain.length - 1 && (quotaSignal(error) !== null || error?.status === 429 || error?.status === 503)
       if (!canRetry) break
       const fresh = getJob(home, id)
@@ -651,13 +686,52 @@ export async function submitJobVideo(home, id, config) {
   }
 
   const fresh = getJob(home, id)
-  fresh.video = {
-    status: 'error', submitId, remoteStatus: '提交失败',
-    error: lastError?.message ?? String(lastError), hint: lastError?.hint, updatedAt: Date.now(),
-  }
-  log(fresh, 'error', `视频提交失败：${lastError?.message ?? lastError}`)
+  // 「可能已提交」用**独立的 status**，绝不能标成 error ——
+  // error 会让用户/AI 以为失败了就再来一次，那才是真正烧钱的地方。
+  fresh.video = uncertain
+    ? {
+      status: 'uncertain', submitId, remoteStatus: '提交结果未知',
+      error: uncertain?.message ?? String(uncertain),
+      hint: UNCERTAIN_HINT,
+      uncertainSince: Date.now(), updatedAt: Date.now(),
+    }
+    : {
+      status: 'error', submitId, remoteStatus: '提交失败',
+      error: lastError?.message ?? String(lastError), hint: lastError?.hint, updatedAt: Date.now(),
+    }
+  log(fresh, uncertain ? 'warn' : 'error', uncertain
+    ? `提交结果未知（可能已扣费，已阻止自动重试）：${uncertain?.message ?? uncertain}`
+    : `视频提交失败：${lastError?.message ?? lastError}`)
   writeVideoJob(home, fresh)
-  throw lastError
+  throw uncertain ?? lastError
+}
+
+/** 提交「结果未知」时给用户的话 —— 核心是劝阻重投。 */
+const UNCERTAIN_HINT = [
+  '提交请求已经发出，但**没有收到服务端的回应**（网络中断 / 超时 / 进程被打断）。',
+  '这不代表失败：服务端很可能**已经收下并在生成**，额度也可能已经扣了。',
+  '',
+  '🚫 请不要直接再跑一次 run —— 那会再提交一个新任务，等于多花一份钱。',
+  '先做这两件事：',
+  '  1) /taptap-video status  看这个作业的台账记录',
+  '  2) /taptap-video poll    继续查（如果 task_id 已记下，就能把片子拿回来）',
+  '确认服务端那边**确实没有**这个任务之后，再重新提交。',
+].join('\n')
+
+/**
+ * 判断一次提交失败是否属于「结果未知（可能已扣费）」。
+ *
+ * 只认**传输层**故障：这些错误发生在「请求已经发出去」之后，服务端是否收到
+ * 我们无从得知。业务层错误（4xx + 错误码、明确的 402/1008）属于服务端明确
+ * 拒收，没有扣费，可以放心换通道。
+ */
+function isUncertainSubmit(error) {
+  if (!error) return false
+  // 有明确 HTTP 状态码 = 服务端给了答复 = 不是未知。
+  const status = Number(error.status ?? 0)
+  if (status >= 400 && status < 600) return false
+  const text = String(error?.message ?? error?.raw ?? '')
+  return /fetch failed|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|EPIPE|socket hang up|network|网络|超时|timeout|aborted/i.test(text)
 }
 
 /**
@@ -728,15 +802,24 @@ export async function pollJobVideo(home, id, config) {
       : await queryVideo({ baseUrl: config.baseURL, apiKey: config.apiKey, model, taskId, timeoutMs: 60_000 })
   } catch (error) {
     // 单次查询失败 ≠ 任务失败，保留 running 让下一轮重试。
+    // ⚠️ 轮询本身**不会**再花钱（只是查状态），所以这里可以放心重试；
+    //    但要提醒别查太密：限流（RPM）下高频轮询容易把自己搞得更慢。
     const fresh = getJob(home, id)
-    fresh.video = { ...fresh.video, remoteStatus: `查询异常：${error?.message ?? error}`, updatedAt: Date.now() }
+    const status = Number(error?.status ?? 0)
+    const rateLimited = status === 429 || /1002|rate limit|too many requests/i.test(String(error?.message ?? ''))
+    fresh.video = {
+      ...fresh.video,
+      remoteStatus: rateLimited ? '查询被限流，等一会儿再查（不会额外扣费）' : `查询异常：${error?.message ?? error}`,
+      pollHint: rateLimited ? 'M Plan 档的 RPM 限制比按量付费紧。建议隔 30~60 秒再 poll 一次。' : undefined,
+      updatedAt: Date.now(),
+    }
     return writeVideoJob(home, fresh)
   }
   const fresh = getJob(home, id)
   if (query.status === 'failed') {
     fresh.video = { ...fresh.video, status: 'error', remoteStatus: query.remoteStatus || 'failed', error: query.error || '平台报告任务失败', updatedAt: Date.now() }
     log(fresh, 'error', `视频生成失败：${fresh.video.error}`)
-    clearMinimaxPending(home)
+    clearSubmitLedger(home)
     return writeVideoJob(home, fresh)
   }
   if (query.status !== 'succeeded') {
@@ -765,7 +848,7 @@ export async function pollJobVideo(home, id, config) {
   fresh.frames = { status: 'empty', count: 0, files: [], keyed: [], report: [] }
   fresh.sheet = { status: 'empty' }
   log(fresh, 'info', `视频已下载（${(bytes.length / 1024 / 1024).toFixed(1)} MB，后端 ${backend}）`)
-  clearMinimaxPending(home)
+  clearSubmitLedger(home)
   return writeVideoJob(home, fresh)
 }
 
@@ -1143,9 +1226,16 @@ function luaSnippet(fileName, manifest) {
 
 /** 作业级别的「下一步该做什么」，给 /taptap-video 与聊天用。 */
 export function nextStepOf(job) {
+  if (job.video?.status === 'uncertain') {
+    return '②⚠ 上次提交**结果未知**（可能已扣费）：先 /taptap-video status 看台账、/taptap-video poll 继续查；'
+      + '确认服务端确实没有该任务后，才用 --yes 重新提交'
+  }
   if (job.video?.status === 'empty') return '① 设置首帧（/taptap-video first <图片>）并写提示词（/taptap-video prompt <文字>）'
   if (job.video?.status === 'running') return '② 视频生成中，等它跑完（/taptap-video poll）'
   if (job.video?.status === 'error') return `② 视频失败：${job.video.error}${job.video.hint ? `（${job.video.hint}）` : ''}`
+  if (job.video?.status === 'error' || job.video?.status === 'uncertain') {
+    return `② 视频未成功：${job.video.error ?? ''}`
+  }
   if (job.frames?.status === 'empty') return '③ 抽帧：/taptap-video frames'
   if (job.frames?.status === 'error') return `③ 抽帧失败：${job.frames.error}`
   if ((job.frames?.keyed ?? []).length === 0) return '④ 抠像：/taptap-video key'
