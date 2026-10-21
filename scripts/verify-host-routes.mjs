@@ -76,6 +76,38 @@ console.log('\n[1] 既有路由没被改坏')
   ok(i.status === 200 && typeof i.json.baseURL === 'string', 'GET /image 正常')
 }
 
+console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默清空的老 bug）')
+{
+  const a = await req('POST', 'image', {
+    baseURL: 'https://api.example.com/v1', apiKey: 'sk-precious-key', model: 'gpt-image', size: '1024x1024',
+  })
+  ok(a.status === 200 && a.json.hasApiKey === true, '先写入一份含 Key 的配置')
+  ok(!JSON.stringify(a.json).includes('sk-precious-key'), 'GET/POST 都不回显 Key 明文')
+
+  // 设置页 GET 不回显 Key → 表单里 apiKey 恒为 '' → 用户只改 model 就保存
+  const b = await req('POST', 'image', {
+    baseURL: 'https://api.example.com/v1', apiKey: '', model: 'gpt-image-2.5', size: '1024x1024',
+  })
+  ok(b.json.hasApiKey === true, '只改 model 时 Key 仍在（修复前会被清空）')
+  ok(b.json.model === 'gpt-image-2.5', 'model 已更新')
+
+  const raw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'image.json'), 'utf8'))
+  ok(raw.apiKey === 'sk-precious-key', '磁盘上的 Key 没被空串覆盖')
+  ok(raw.baseURL === 'https://api.example.com/v1', 'baseURL 未受影响')
+
+  // 中转站同样受保护
+  const c = await req('POST', 'video-relay', {
+    enabled: true, protocol: 'openai', baseURL: 'https://relay.example.com/v1',
+    apiKey: 'sk-relay-keep', model: 'vid-1',
+  })
+  ok(c.status === 200, '先写入中转站配置')
+  const d = await req('POST', 'video-relay', { apiKey: '', model: 'vid-2' })
+  const relayRaw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'video-relay.json'), 'utf8'))
+  ok(relayRaw.apiKey === 'sk-relay-keep', '只改 model 时中转站 Key 没被清空', relayRaw.apiKey)
+  ok(relayRaw.model === 'vid-2', '中转站 model 已更新')
+  ok(d.status === 200, '保存返回 200')
+}
+
 console.log('\n[2] POST /video-minimax（设置页 MiniMax 配置卡）')
 {
   const a = await req('POST', 'video-minimax', { apiKey: 'sk-cp-demo', baseURL: 'https://api.minimax.io', model: 'MiniMax-H3-Max' })

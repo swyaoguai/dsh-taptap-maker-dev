@@ -115,6 +115,21 @@ console.log('\n[5] 轮询限流：只提示退避，不改状态、不额外扣�
   ok(/单次查询失败 ≠ 任务失败/.test(src), '代码里有「查询失败 ≠ 任务失败」的注释说明')
 }
 
+console.log('\n[6] 生图链路同样不许在「结果未知」时重试')
+{
+  const img = fs.readFileSync(new URL('../src/taptap-image.mjs', import.meta.url), 'utf8')
+  const catchBody = /} catch \(error\) \{[\s\S]{0,600}?\n {4}\}/.exec(img)?.[0] ?? ''
+  ok(catchBody.length > 0, '能找到生图的 fetch catch 分支')
+  ok(/重试有重复扣费的风险|重复扣费/.test(catchBody), '生图也写明了「重试可能重复扣费」')
+  ok(/不要连续重发/.test(catchBody), '劝阻连续重发')
+  // 关键：catch 里不能是 continue（那等于网络一抖就自动重发）
+  ok(!/^\s*continue;?\s*$/m.test(catchBody), '传输层失败不再 continue 重试（修复前是 7 次重试）')
+  ok(!/sleep\(5000 \+ attempt/.test(img), '移除了网络失败后的退避重试循环')
+  // 业务层重试仍保留：content_policy / size / background 是服务端明确答复
+  ok(/content_policy/i.test(img), '保留 content_policy 的退避重试（服务端明确答复，可安全重试）')
+  ok(/snapSize\(size\)/.test(img), '保留尺寸纠正后重试一次')
+}
+
 fs.rmSync(scratch, { recursive: true, force: true })
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

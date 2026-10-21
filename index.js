@@ -813,7 +813,7 @@ export function apply(ctx, config = {}) {
         }
         // ── 视频中转站（与上面「中转站生图」同一套心智，只是视频是异步任务）──
         // GET  /video-relay   → 当前配置 + Key 类型 + 三个后端可用性
-        // POST /video-relay   → 保存（允许把字段写成空字符串：清空 Key 必须真生效）
+        // POST /video-relay   → 保存（空串=不修改；要真清空得传 clear:true）
         // POST /video-relay/models → 用中转站自己的 /models 列模型（免费自检）
         if (req.method === 'GET' && sub === 'video-relay') {
           const cfg = normalizeRelayConfig(readVideoRelayConfigRaw(home))
@@ -847,6 +847,7 @@ export function apply(ctx, config = {}) {
             if (typeof parsed[key] === 'string') patch[key] = parsed[key]
           }
           if (typeof parsed.enabled === 'boolean') patch.enabled = parsed.enabled
+          if (parsed.clear === true) patch.clear = true
           if (typeof parsed.idInBody === 'boolean') patch.idInBody = parsed.idInBody
           if (typeof parsed.seconds === 'number') patch.seconds = parsed.seconds
           for (const key of ['doneValues', 'failedValues', 'pendingValues']) {

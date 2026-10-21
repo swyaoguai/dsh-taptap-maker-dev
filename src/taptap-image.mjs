@@ -140,9 +140,15 @@ export async function generateImage(options) {
         signal: AbortSignal.timeout(Number(options.timeoutMs || 180000)),
       })
     } catch (error) {
-      lastError = error
-      await sleep(5000 + attempt * 3000)
-      continue
+      // 🚫 传输层失败**不重试**。请求已经发出去了，我们不知道服务端收没收到 ——
+      //    盲目重试很可能生成多张图、扣多次费（和视频那边的「结果未知」同源）。
+      //    这里如实报错，让用户确认端点状态后再决定要不要重来。
+      const detail = error?.message ?? String(error)
+      throw new Error(
+        `连接 ${url} 失败：${detail}\n`
+        + '请求可能已经发出、服务端也可能已经在生成 —— 重试有重复扣费的风险。\n'
+        + '请先确认端点可用再重试（不要连续重发）。',
+      )
     }
     const text = await response.text()
 

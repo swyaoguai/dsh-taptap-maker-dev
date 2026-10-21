@@ -35,12 +35,24 @@ export function readImageConfigRaw(dshHome) {
   return readJson(imageConfigPath(dshHome)) ?? {}
 }
 
-/** Merge a {baseURL,apiKey,model,size,credentialsFile} patch into image.json. */
+/**
+ * Merge a {baseURL,apiKey,model,size,credentialsFile} patch into image.json.
+ *
+ * ⚠️ **空字符串 = 不修改**（不是「清空」）。设置页因为不回显明文 Key，
+ * 表单里的 apiKey 永远是空的；以前这里把空串直接写进去，于是用户**只改了个
+ * model** 点保存，Key 就被静默抹掉了，生图通道当场失效。MiniMax 那张卡早就
+ * 用了这个约定，这里补齐。
+ *
+ * 真要清空请显式传 `clear: true`（或用设置页的「清除」入口）。
+ */
 export function writeImageConfigPatch(dshHome, patch = {}) {
   const file = imageConfigPath(dshHome)
   const merged = { ...(readJson(file) ?? {}) }
+  const clearing = patch.clear === true
   for (const key of ['baseURL', 'apiKey', 'model', 'size', 'credentialsFile']) {
-    if (typeof patch[key] === 'string') merged[key] = patch[key]
+    if (typeof patch[key] !== 'string') continue
+    if (patch[key].trim() === '' && !clearing) continue // 空 = 不改
+    merged[key] = clearing ? '' : patch[key]
   }
   if (typeof merged._comment !== 'string') {
     merged._comment = '自定义生图（OpenAI 兼容 /images/generations）。此文件在 $DSH_HOME 下，不在任何 Maker 工作区内。'
@@ -432,19 +444,50 @@ export function touchGptAccount(dshHome, id, patch = {}) {
   return readGptPool(dshHome)
 }
 
-/** Read a JSON file, returning undefined when absent or invalid. */
+/**
+ * 读一个 JSON 文件；不存在或损坏时返回 undefined。
+ *
+ * 损坏时会把原文件**另存为 .corrupt-<时间戳>**再返回 —— 以前是静默吞掉，
+ * 于是「配置文件写坏了」会表现成「配置莫名其妙全丢了」，用户根本无从查起。
+ * 留一份现场才能事后找回。
+ */
 export function readJson(file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'))
-  } catch {
+  } catch (error) {
+    if (error?.code === 'ENOENT') return undefined
+    // 读得到但解析失败 = 文件坏了，值得留证据。
+    try {
+      if (fs.existsSync(file)) {
+        const raw = fs.readFileSync(file, 'utf8')
+        fs.writeFileSync(`${file}.corrupt-${Date.now().toString(36)}`, raw, 'utf8')
+      }
+    } catch { /* 留证据失败也不能让读取本身抛错 */ }
     return undefined
   }
 }
 
-/** Write a JSON file (pretty), creating parent dirs. */
+/**
+ * 写一个 JSON 文件（原子替换）。
+ *
+ * ⚠️ 必须是原子的：所有配置（API Key、通道顺序、提交台账…）都走这里，而插件
+ * 会被对话里的命令**并发**调用。先写临时文件再 rename 的好处：
+ *   - 进程在写到一半被杀 → 旧文件完好无损，不会留下半截 JSON；
+ *   - 另一个进程同时读 → 永远读到完整的旧版或完整的新版，不会读到半个文件。
+ * 直接 writeFileSync 的话，崩溃或并发都可能导致配置彻底读不出来。
+ */
 export function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  const dir = path.dirname(file)
+  fs.mkdirSync(dir, { recursive: true })
+  const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    // 清理临时文件，别把垃圾留在配置目录里。
+    try { fs.rmSync(tmp, { force: true }) } catch { /* ignore */ }
+    throw error
+  }
 }
 
 /**
@@ -858,8 +901,13 @@ export function writeVideoRelayConfigPatch(dshHome, patch = {}) {
     'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader',
     'authPrefix', 'extraQuery', 'extraBody',
   ]
+  // 空串 = 不修改。设置页不回显 apiKey，表单里那项永远是空的；
+  // 不做这个保护的话，用户只改个 model 点保存，Key / 路径就被静默抹掉了。
+  // 真要清空请用 `clear: true`（与 minimax.json 的约定一致）。
   for (const key of stringKeys) {
-    if (typeof patch[key] === 'string') merged[key] = patch[key]
+    if (typeof patch[key] !== 'string') continue
+    if (patch[key].trim() === '' && patch.clear !== true) continue
+    merged[key] = patch.clear === true ? '' : patch[key]
   }
   if (typeof patch.enabled === 'boolean') merged.enabled = patch.enabled
   if (typeof patch.idInBody === 'boolean') merged.idInBody = patch.idInBody
