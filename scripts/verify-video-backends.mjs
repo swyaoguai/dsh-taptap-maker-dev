@@ -21,6 +21,7 @@ import { normalizeRelayConfig, pickPath, relayReady, RELAY_PROTOCOLS } from '../
 import { writeLanes } from '../src/lanes.mjs'
 import {
   createJob, extractJobFrames, getJob, resolveBackend, saveJob, useLocalVideo,
+  setReference, submitJobVideo,
 } from '../src/video-sequence.mjs'
 
 let passed = 0
@@ -110,6 +111,45 @@ console.log('\n[3b] 鉴权探针：400/2013 = Key 有效，不是「不确定」
   ok(i400 >= 0, 'catch 体里有 400 分支')
   ok(i401 < i400, '401 判定排在 400 规则之前（否则 invalid api key 会被误判为 Key 有效）')
   ok(/return result/.test(catchBody.slice(i401, i400)), '401 分支直接 return，不会落到后面的 400 规则')
+}
+
+// 🚫 核心红线：视频模型绝不允许被自动替换（视频按秒计费 = 替用户决定花多少钱）。
+console.log('\n[3c] 禁止私自更换视频模型')
+{
+  const home = path.join(scratch, 'model-guard')
+  // 1) 新建作业必须继承用户设置页选的模型
+  const picked = createJob(home, '继承测试', { model: 'MiniMax-Hailuo-2.3-Fast' })
+  ok(picked.settings.model === 'MiniMax-Hailuo-2.3-Fast', '新建作业继承用户选的模型（不再退回内置 H3）', picked.settings.model)
+
+  const dflt = createJob(home, '未指定')
+  ok(dflt.settings.model === 'MiniMax-H3', '只有用户没选过时才用内置默认值')
+
+  // 2) 模型与尾帧冲突时**直接报错**，且不动用户的 model
+  const conflict = createJob(home, '尾帧冲突', { model: 'MiniMax-Hailuo-2.3' })
+  const img = path.join(scratch, 'ref.png')
+  execFileSync(ffmpegPath(), ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'color=c=green:s=512x512:d=1', '-frames:v', '1', img])
+  await setReference(home, conflict.id, 'firstFrame', img)
+  await setReference(home, conflict.id, 'lastFrame', img)
+  saveJob(home, conflict.id, { prompt: '角色跑' })
+  let msg = ''
+  try {
+    await submitJobVideo(home, conflict.id, { apiKey: 'sk-api-x', baseURL: 'https://api.minimaxi.com', model: conflict.settings.model })
+  } catch (e) { msg = e?.message ?? '' }
+  ok(/不支持尾帧/.test(msg), '不支持尾帧时拒绝提交，而不是换个模型', msg)
+  ok(/不会自动替你换模型/.test(msg), '报错里明确声明不会自动换模型')
+  ok(/set --model/.test(msg), '报错给出用户可执行的换模型命令')
+  ok(/--clear/.test(msg), '报错也给出清掉尾帧的替代方案')
+  ok(getJob(home, conflict.id).settings.model === 'MiniMax-Hailuo-2.3', '拒绝后作业的 model 未被改动')
+
+  // 3) 模型为空也必须报错，绝不「顺手挑一个」
+  const empty = createJob(home, '无模型', { model: 'MiniMax-H3' })
+  await setReference(home, empty.id, 'firstFrame', img)
+  saveJob(home, empty.id, { prompt: '角色跑', settings: { model: ' ' } })
+  msg = ''
+  try {
+    await submitJobVideo(home, empty.id, { apiKey: 'sk-api-x', baseURL: 'https://api.minimaxi.com', model: ' ' })
+  } catch (e) { msg = e?.message ?? '' }
+  ok(/没有指定模型/.test(msg), 'model 为空白时拒绝提交（不会替用户挑一个默认模型）', msg)
 }
 
 console.log('\n[4] 后端选择（顺序 + 开关来自 lanes.json）')

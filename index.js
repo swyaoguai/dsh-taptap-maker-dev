@@ -337,6 +337,12 @@ function policyText(config, gptLaneOn = true) {
       '**通道顺序由用户定**：设置页「生成通道」卡里可以拖拽排序、逐条开关、以及打开「额度不足自动换通道」；',
       '这些设置对三条链路（生图 / 视频 / BGM）统一生效。**不要替用户改顺序或开关**，',
       '也不要假设「网页一定优先」——先读一下当前顺序再决定走哪条。',
+      '**🚫 绝对禁止私自更换视频模型（视频按秒计费 = 替用户决定花多少钱）**：',
+      '用户在设置页「MiniMax」里选了哪个模型，`/taptap-video` 就必须用哪个，一个字都不能改。',
+      '即使你觉得「H3-Hailuo-02 更适合首尾帧」「这个模型不支持尾帧」「换成 Max 更便宜」，',
+      '也**只能停下来把情况和可选方案讲清楚，然后问用户**，由用户自己下指令换。',
+      '严禁：不问就换、把「推荐模型」当成「已获授权」、因为提交报错就自动重试另一个模型、',
+      '或在没告知的情况下改作业的 model 字段。插件层面也已加硬约束：模型缺失或不兼容会**直接报错**，不会替你选。',
       '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
       '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
       '**超时不要重新生成（很关键，会白烧额度）**：网页出图常要 1~3 分钟，我们等不到时会返回 `pendingUrl`（那个对话的链接）。',
@@ -2517,6 +2523,9 @@ async function videoCommand(home, rawInput) {
       }
       lines.push('', '中转站：/taptap-video models --relay（列出你中转站的模型）')
       lines.push('自选本地视频：/taptap-video use <mp4 路径>（零额度）')
+      lines.push('')
+      lines.push('🚫 换模型必须由用户决定：视频按秒计费，插件不会自动替换模型。')
+      lines.push('   要换请让用户明确说，再用：/taptap-video set --model <模型名>')
       return { kind: 'success', text: lines.join('\n') }
     }
 
@@ -2593,7 +2602,9 @@ async function videoCommand(home, rawInput) {
     }
 
     if (sub === 'new' || sub === '新建') {
-      const job = createVideoJob(home, rest || undefined)
+      // 模型继承设置页里用户选的那个 —— 不传的话 createJob 会退回内置默认
+      // （MiniMax-H3），等于静默替用户换模型，而视频是按秒计费的。
+      const job = createVideoJob(home, rest || undefined, { model: config.model })
       return {
         kind: 'success',
         text: [

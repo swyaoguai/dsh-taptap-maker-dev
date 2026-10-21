@@ -96,11 +96,16 @@ function ensureJobDirs(home, id, name) {
   return root
 }
 
-export function createJob(home, name) {
+export function createJob(home, name, { model } = {}) {
   const id = newJobId()
   const jobName = String(name ?? '').trim().slice(0, 80) || '未命名视频作业'
   ensureJobDirs(home, id, jobName)
   const now = Date.now()
+  // ⚠️ 模型必须**继承用户在设置页里选的那个**，不能退回内置默认值。
+  //    以前这里硬写 `...DEFAULT_SETTINGS`（model: 'MiniMax-H3'），于是用户在
+  //    设置里选了 Hailuo-2.3-Fast、新建作业却照样用 H3 —— 视频按秒计费，
+  //    静默换模型等于替用户改了要买的东西。调用方负责把设置里的模型传进来。
+  const chosen = typeof model === 'string' && model.trim() ? model.trim() : DEFAULT_SETTINGS.model
   const job = {
     id,
     name: jobName,
@@ -110,7 +115,7 @@ export function createJob(home, name) {
     prompt: '',
     suffix: '',
     refs: { firstFrame: null, lastFrame: null },
-    settings: { ...DEFAULT_SETTINGS },
+    settings: { ...DEFAULT_SETTINGS, model: chosen },
     video: { status: 'empty' },
     frames: { status: 'empty', count: 0, files: [], keyed: [], report: [] },
     sheet: { status: 'empty' },
@@ -183,7 +188,7 @@ export function saveJob(home, id, patch = {}) {
   if (typeof patch.suffix === 'string') job.suffix = patch.suffix
   if (patch.mode === 'frames' || patch.mode === 'reference') job.mode = patch.mode
   if (patch.settings && typeof patch.settings === 'object') {
-    job.settings = normalizeSettings({ ...job.settings, ...patch.settings }, job.settings.model)
+    job.settings = normalizeSettings({ ...job.settings, ...patch.settings })
   }
   // 提示词 / 首尾帧 / 视频设置变了 → 已有的视频与帧都过期，但**不删**，
   // 只是打上 stale，让人能对比「改之前的效果」。
@@ -194,14 +199,18 @@ export function saveJob(home, id, patch = {}) {
   return writeVideoJob(home, job)
 }
 
-function normalizeSettings(raw, fallbackModel) {
+function normalizeSettings(raw) {
   const s = { ...DEFAULT_SETTINGS }
   const num = (v, d) => {
     const n = typeof v === 'number' ? v : Number.parseFloat(String(v ?? ''))
     return Number.isFinite(n) ? n : d
   }
   const clamp = (v, d, lo, hi) => Math.min(hi, Math.max(lo, Math.round(num(v, d))))
-  const model = typeof raw.model === 'string' && raw.model.trim() ? raw.model.trim() : (fallbackModel ?? s.model)
+  // 模型**原样保留**。以前这里在 model 为空/空白时会退回内置默认
+  // （`fallbackModel ?? DEFAULT_SETTINGS.model`），等于把用户清空的模型
+  // 悄悄换成一个默认模型 —— 视频按秒计费，静默换模型就是替用户决定花多少钱。
+  // 现在空就留空，由 submitJobVideo 明确报错要求用户指定。
+  const model = typeof raw.model === 'string' ? raw.model.trim() : ''
   s.backend = ['auto', 'minimax', 'relay', 'local'].includes(raw.backend) ? raw.backend : 'auto'
   s.model = model
   s.resolution = normalizeResolution(model, raw.resolution ?? s.resolution)
@@ -506,15 +515,29 @@ export async function submitJobVideo(home, id, config) {
   }
   // 模型能力只在官方 MiniMax 后端下有意义：中转站的模型名由中转站自己定义。
   if (backend === 'minimax') {
-    const cap = capabilityOf(job.settings.model)
+    // ⚠️ 模型不允许被自动替换。这里**只报错、绝不换模型**：视频按秒计费，
+    //    静默换一个「差不多」的模型等于替用户改了要买的东西。
+    //    需要换必须用户自己下指令（/taptap-video set --model … 或设置页）。
+    const wanted = String(job.settings.model ?? '').trim()
+    if (wanted === '') {
+      throw new Error('作业没有指定模型：先 /taptap-video set --model <模型名>，或在设置页「MiniMax」里选一个。'
+        + '（插件不会替你猜模型）')
+    }
+    const cap = capabilityOf(wanted)
     if (job.refs.lastFrame && !cap.supportsLastFrame) {
-      throw new Error(`${job.settings.model} 不支持尾帧，请换 ${modelsSupportingLastFrame().join(' / ')} 或清掉尾帧`)
+      throw new Error(`${wanted} 不支持尾帧。`
+        + `可选：换成 ${modelsSupportingLastFrame().join(' / ')}（/taptap-video set --model <模型名>），或用 /taptap-video last --clear 清掉尾帧。`
+        + '（插件不会自动替你换模型）')
     }
   }
   // 不在中转站提交前做型号校验：每家中转站可以有自己的能力表，
   // 写死一家反而误导其他家。超时 / 超画幅 / 不支持尾帧 → 平台 400 时如实回显。
 
-  const effectiveModel = backend === 'relay' ? (config.relay?.model || job.settings.model) : job.settings.model
+  // 中转站的模型名来自它自己的配置；这里只用它**覆盖提交参数**，
+  // 并把实际用的名字记进 job.video.model，界面上如实显示「到底用的哪个」。
+  const effectiveModel = backend === 'relay'
+    ? (config.relay?.model || job.settings.model)
+    : job.settings.model
   const submitId = `s${Date.now().toString(36)}`
   job.video = {
     status: 'running', submitId, remoteStatus: '提交中', taskId: undefined,
@@ -789,7 +812,7 @@ export async function extractJobFrames(home, id, overrides = {}) {
   if (!job) throw new Error(`视频作业不存在：${id}`)
   if (job.video?.status !== 'ready' || !job.video.file) throw new Error('还没有可用视频，先提交并等它生成完')
   const settings = overrides.frameCount || overrides.arrange
-    ? normalizeSettings({ ...job.settings, ...overrides }, job.settings.model)
+    ? normalizeSettings({ ...job.settings, ...overrides })
     : job.settings
   const video = absPath(home, id, job.video.file)
   const duration = await probeDuration(video)
@@ -860,7 +883,7 @@ export async function keyJobFrames(home, id, overrides = {}) {
   const job = getJob(home, id)
   if (!job) throw new Error(`视频作业不存在：${id}`)
   if (job.frames?.status !== 'ready' || job.frames.files.length === 0) throw new Error('还没有抽帧，先抽帧再抠')
-  const settings = normalizeSettings({ ...job.settings, ...overrides }, job.settings.model)
+  const settings = normalizeSettings({ ...job.settings, ...overrides })
   const { width, height } = job.frames
   const keyedDir = path.join(jobRoot(home, id), 'keyed')
   mkdirSync(keyedDir, { recursive: true })
@@ -917,7 +940,7 @@ export async function composeJobSheet(home, id, overrides = {}) {
   if (!job) throw new Error(`视频作业不存在：${id}`)
   const keyed = job.frames?.keyed ?? []
   if (keyed.length === 0) throw new Error('还没有抠好的帧：先抠像再合成')
-  const settings = normalizeSettings({ ...job.settings, ...overrides }, job.settings.model)
+  const settings = normalizeSettings({ ...job.settings, ...overrides })
   const { width, height } = job.frames
   const frames = []
   for (const name of keyed) frames.push(await decodePngToRgba(absPath(home, id, `keyed/${name}`), width, height))
