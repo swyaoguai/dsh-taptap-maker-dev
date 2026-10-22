@@ -757,7 +757,6 @@ window.__ModuleLoader__.load({
       const [credits, setCredits] = useState(null)
       const [cfg, setCfg] = useState(null) // { instrumental, count }
       const [newId, setNewId] = useState('')
-      const [showAdd, setShowAdd] = useState(false)
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
@@ -849,7 +848,7 @@ window.__ModuleLoader__.load({
           .then(({ ok, j }) => {
             if (!ok || !j.ok) { setErr(j.error || '添加失败'); setBusy(''); return }
             setInfo(j)
-            setNewId(''); setShowAdd(false)
+            setNewId('')
             doLogin(id)
           })
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
@@ -886,23 +885,27 @@ window.__ModuleLoader__.load({
       }
       const logged = info.hasCookies === true
       const pool = info.pool ?? { accounts: [], total: 0, loggedIn: 0, autoRotate: true, cooling: 0, banned: 0 }
-      const anyLogged = logged || pool.loggedIn > 0
-      // 账号列表：主账号常驻（退出后可再登）+ 附加账号（轮询）
-      const rows = [
-        { id: null, key: '__main__', name: '主账号', isMain: true, loggedIn: logged, status: 'ok' },
-        ...pool.accounts.map((a) => ({
-          id: a.id, key: a.id, isMain: false, status: a.status,
-          name: a.label !== a.id ? `${a.id}（${a.label}）` : a.id,
-          loggedIn: a.hasCookies === true,
-        })),
-      ]
+      // 同样去掉「主账号」那一行：它和「+ 添加账号」职责不同却并排摆着，
+      // 用户点主账号那行的「登录」并不会新建账号（2026-10-23 反馈）。
+      const rows = pool.accounts.map((a) => ({
+        id: a.id, key: a.id, isMain: false, status: a.status,
+        name: a.label !== a.id ? `${a.id}（${a.label}）` : a.id,
+        loggedIn: a.hasCookies === true,
+      }))
+      const loggedCount = rows.filter((r) => r.loggedIn).length
+      const anyLogged = loggedCount > 0
+      const headerText = rows.length === 0
+        ? '还没有账号。在下面填一个短名，点「添加并登录」，浏览器会直接打开让你登录。'
+        : (anyLogged ? `${loggedCount} / ${rows.length} 个账号已登录。` : '所有账号都未登录。')
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
             h('h2', { style: S.cardTitle }, 'BGM 账号'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
-              '生成完整 BGM 用的 MiniMax 账号。可登录、查额度、换号；多个账号可在额度用完时自动轮换。')),
-          h('span', { style: anyLogged ? S.pill : S.offPill }, anyLogged ? '已登录' : '未登录'),
+              '生成完整 BGM 用的 MiniMax 账号。可登录、查额度、换号；多个账号可在额度用完时自动轮换。'),
+            h('p', { style: { ...S.hint, marginTop: 2 } }, headerText),
+            h('span', { style: anyLogged ? S.pill : S.offPill }, anyLogged ? '已登录' : '未登录'),
+          ),
         ),
         info.site
           ? h('p', { style: S.hint }, '站点：', h('span', { style: S.codeInline }, info.site.label))
@@ -921,44 +924,40 @@ window.__ModuleLoader__.load({
             h('div', { style: { display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' } },
               h('button', {
                 style: S.ghostBtn, disabled: busy !== '',
-                onClick: () => doLogin(r.isMain ? undefined : r.id),
-              }, busy === (r.isMain ? 'login' : `login:${r.id}`) ? '登录中…' : (r.loggedIn ? '重登' : '登录')),
+                onClick: () => doLogin(r.id),
+              }, busy === `login:${r.id}` ? '登录中…' : (r.loggedIn ? '重登' : '登录')),
               r.loggedIn
                 ? h('button', {
                   style: S.ghostBtn, disabled: busy !== '',
-                  onClick: () => post('bgm-logout', r.isMain ? {} : { account: r.id }, r.isMain ? 'logout' : `logout:${r.id}`),
+                  onClick: () => post('bgm-logout', { account: r.id }),
                 }, '退出')
                 : null,
               r.loggedIn
                 ? h('button', {
                   style: S.ghostBtn, disabled: busy !== '',
-                  onClick: () => post('bgm-credits', r.isMain ? {} : { account: r.id }, r.isMain ? 'credits' : `credits:${r.id}`),
-                }, busy === (r.isMain ? 'credits' : `credits:${r.id}`) ? '查询中…' : '查额度')
+                  onClick: () => post('bgm-credits', { account: r.id }),
+                }, busy === `credits:${r.id}` ? '查询中…' : '查额度')
                 : null,
-              r.isMain
-                ? null
-                : h('button', {
-                  style: S.ghostBtn, disabled: busy !== '',
-                  onClick: () => poolAction(r.status === 'banned' || r.status === 'cooling' ? 'unban' : 'ban', r.id),
-                }, r.status === 'banned' || r.status === 'cooling' ? '恢复' : '封禁'),
-              r.isMain
-                ? null
-                : h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => poolAction('remove', r.id) }, '移除'),
+              h('button', {
+                style: S.ghostBtn, disabled: busy !== '',
+                onClick: () => poolAction(r.status === 'banned' || r.status === 'cooling' ? 'unban' : 'ban', r.id),
+              }, r.status === 'banned' || r.status === 'cooling' ? '恢复' : '封禁'),
+              h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => poolAction('remove', r.id) }, '移除'),
             )),
           )),
 
-        h('div', { style: S.bar },
-          showAdd
-            ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-              h('input', {
-                style: { ...S.search, flex: '0 0 auto', width: 170 }, value: newId,
-                placeholder: '账号短名，如 b2', spellCheck: false, autoComplete: 'off',
-                onChange: (e) => setNewId(e.target.value),
-                onKeyDown: (e) => { if (e.key === 'Enter') addAndLogin() },
-              }),
-              h('button', { style: S.btn, disabled: busy !== '' || !(newId || '').trim(), onClick: addAndLogin }, '添加并登录'),
-              h('button', { style: S.ghostBtn, onClick: () => { setShowAdd(false); setNewId('') } }, '取消'))
-            : h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: () => setShowAdd(true) }, '+ 添加账号'),
+        // 添加账号：**唯一的新增入口**（主账号行已移除），常驻输入框 + 醒目主按钮。
+        h('div', { style: { ...S.bar, flexWrap: 'wrap' } },
+          h('input', {
+            style: { ...S.search, flex: '0 0 auto', width: 170 }, value: newId,
+            placeholder: '新账号短名，如 b2', spellCheck: false, autoComplete: 'off',
+            onChange: (e) => setNewId(e.target.value),
+            onKeyDown: (e) => { if (e.key === 'Enter') addAndLogin() },
+          }),
+          h('button', { style: S.btn, disabled: busy !== '' || !(newId || '').trim(), onClick: addAndLogin }, '添加并登录'),
+          newId
+            ? h('button', { style: S.ghostBtn, onClick: () => setNewId('') }, '清空')
+            : null,
           err ? h('span', { style: S.warn }, err) : null,
         ),
 
@@ -997,7 +996,7 @@ window.__ModuleLoader__.load({
           }),
         ),
         h('p', { style: { ...S.hint, marginTop: 6 } },
-          '「退出」会清除该账号的本机登录态；主账号那一行常驻，退出后可随时再登回来。'),
+          '「退出」会清除该账号的本机登录态；之后可用同一短名点「添加并登录」重新登录。'),
       )
     }
 
@@ -1010,7 +1009,6 @@ window.__ModuleLoader__.load({
       const [busy, setBusy] = useState('')
       const [err, setErr] = useState('')
       const [newId, setNewId] = useState('')
-      const [showAdd, setShowAdd] = useState(false)
       // null = 用 info 里的自定义值；用户一编辑就用自己的输入
       const [dirInput, setDirInput] = useState(null)
 
@@ -1109,7 +1107,7 @@ window.__ModuleLoader__.load({
             if (!ok || !j.ok) { setErr(j.error || '添加失败'); setBusy(''); return }
             if (j.warn) setErr(j.warn)
             setInfo(j)
-            setNewId(''); setShowAdd(false)
+            setNewId('')
             // 登录窗口由服务端启动，这里只负责轮询到「已登录」为止。
             waitForLogin(id)
           })
@@ -1131,16 +1129,21 @@ window.__ModuleLoader__.load({
       // Master switch: when OFF the lane is disabled end-to-end (CLI refuses,
       // the injected agent policy switches to the relay lane).
       const laneOn = info.laneEnabled !== false
-      const logged = info.loggedIn === true || pool.loggedIn > 0
       const dim = { display: 'flex', flexDirection: 'column', gap: 10, opacity: laneOn ? 1 : 0.45 }
-      // 账号列表永远是「主账号 + 附加账号」。主账号那一行常驻 —— 退出登录后
-      // 行还在，可以直接再登回去。之前的版本把「+ 账号」删了，结果用户点
-      // 「退出/换号」后就再也没有入口，等于把换号变成单向操作（2026-10-17 反馈）。
-      const rows = [
-        { id: null, key: '__main__', name: '主账号', isMain: true, loggedIn: info.loggedIn === true, status: 'ok' },
-        ...pool.accounts.map((a) => ({ ...a, key: a.id, name: a.label !== a.id ? `${a.id}（${a.label}）` : a.id, isMain: false })),
-      ]
-      const busyKey = (r) => (r.isMain ? '' : r.id)
+      // 账号列表 = 账号池里的每个账号，**不再有「主账号」那一行**。
+      // 以前常驻一行「主账号」，和「+ 添加账号」并排放，于是两个入口摆在一起：
+      // 用户点主账号那行的「登录」只登默认 profile，并不会新建账号 ——
+      // 看着像「添加」，实际不是，最容易误解（2026-10-23 反馈）。
+      // 现在唯一的新增入口是下面的「添加并登录」，职责单一、不会认错。
+      const rows = pool.accounts.map((a) => ({ ...a, key: a.id, name: a.label !== a.id ? `${a.id}（${a.label}）` : a.id, isMain: false }))
+      // 头部状态要说清楚是「几个账号」，而不是笼统的「已登录」：只要池子里有任一
+      // 账号登录，顶层就显示「已登录」，但下面那一行可能写着「未登录」——
+      // 两处自相矛盾，用户会以为状态坏了。
+      const loggedCount = rows.filter((r) => r.loggedIn).length
+      const logged = info.loggedIn === true || loggedCount > 0
+      const headerText = rows.length === 0
+        ? (info.loggedIn === true ? '默认账号已登录，可生成图片。' : '还没有账号。')
+        : (logged ? `${loggedCount} / ${rows.length} 个账号已登录，可生成图片。` : '所有账号都未登录。')
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
           h('div', null,
@@ -1168,11 +1171,15 @@ window.__ModuleLoader__.load({
             h('div', null,
               h('span', { style: { fontSize: 13, fontWeight: 600 } }, '账号'),
               h('p', { style: { ...S.hint, marginTop: 2 } },
-                logged ? '已登录，可生成图片。' : '未登录：点账号那一行的「登录」，或「+ 添加账号」')),
+                headerText),
             h('span', { style: logged ? S.pill : S.offPill }, logged ? '已登录' : '未登录'),
           ),
 
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            rows.length === 0
+              ? h('p', { style: { ...S.hint, margin: 0, padding: '10px 8px', border: '1px dashed var(--dsh-border, rgba(128,128,128,0.3))', borderRadius: 6 } },
+                '还没有账号。在下面填一个短名，点「添加并登录」，浏览器会直接打开让你登录。')
+              : null,
             rows.map((r) => h('div', {
               key: r.key,
               style: { ...S.rowBetween, padding: '6px 8px', border: '1px solid var(--dsh-border, rgba(128,128,128,0.2))', borderRadius: 6 },
@@ -1185,40 +1192,38 @@ window.__ModuleLoader__.load({
               h('div', { style: { display: 'flex', gap: 6, flexShrink: 0, flexWrap: 'wrap' } },
                 h('button', {
                   style: S.ghostBtn, disabled: busy !== '' || !laneOn,
-                  onClick: () => doLogin(busyKey(r) || undefined),
-                }, busy === (r.isMain ? 'login' : `login:${r.id}`) ? '登录中…' : (r.loggedIn ? '重登' : '登录')),
+                  onClick: () => doLogin(r.id),
+                }, busy === `login:${r.id}` ? '登录中…' : (r.loggedIn ? '重登' : '登录')),
                 r.loggedIn
                   ? h('button', {
                     style: S.ghostBtn, disabled: busy !== '' || !laneOn,
-                    onClick: () => doLogout(busyKey(r) || undefined),
-                  }, busy === (r.isMain ? 'logout' : `logout:${r.id}`) ? '退出中…' : '退出')
+                    onClick: () => doLogout(r.id),
+                  }, busy === `logout:${r.id}` ? '退出中…' : '退出')
                   : null,
-                r.isMain
-                  ? null
-                  : h('button', {
-                    style: S.ghostBtn, disabled: busy !== '' || !laneOn,
-                    onClick: () => post('gpt-pool', { action: r.status === 'banned' || r.status === 'cooling' ? 'unban' : 'ban', id: r.id }),
-                  }, r.status === 'banned' || r.status === 'cooling' ? '恢复' : '封禁'),
-                r.isMain
-                  ? null
-                  : h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'remove', id: r.id }) }, '移除'),
+                h('button', {
+                  style: S.ghostBtn, disabled: busy !== '' || !laneOn,
+                  onClick: () => post('gpt-pool', { action: r.status === 'banned' || r.status === 'cooling' ? 'unban' : 'ban', id: r.id }),
+                }, r.status === 'banned' || r.status === 'cooling' ? '恢复' : '封禁'),
+                h('button', { style: S.ghostBtn, disabled: busy !== '' || !laneOn, onClick: () => post('gpt-pool', { action: 'remove', id: r.id }) }, '移除'),
               )),
             )),
-          // 添加账号：一步完成「建条目 + 打开登录」。不再是空点一下的按钮，
-          // 加完立刻进入登录，登完就能用（之前那次删掉就是漏了这层价值）。
-          h('div', { style: S.bar },
-            showAdd
-              ? h('div', { style: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' } },
-                h('input', {
-                  style: { ...S.search, flex: '0 0 auto', width: 170 }, value: newId,
-                  placeholder: '账号短名，如 a2', spellCheck: false, autoComplete: 'off',
-                  onChange: (e) => setNewId(e.target.value),
-                  onKeyDown: (e) => { if (e.key === 'Enter') addAndLogin() },
-                }),
-                h('button', { style: S.btn, disabled: busy !== '' || !laneOn || !(newId || '').trim(), onClick: addAndLogin },
-                  '添加并登录'),
-                h('button', { style: S.ghostBtn, onClick: () => { setShowAdd(false); setNewId('') } }, '取消'))
-              : h('button', { style: S.ghostBtn, disabled: !laneOn || busy !== '', onClick: () => setShowAdd(true) }, '+ 添加账号'),
+          ),
+          // 添加账号：**唯一的新增入口**，一步完成「建条目 + 打开登录」。
+          // 之前它和「主账号」那一行的「登录」并排摆着，两个入口职责不同却长得
+          // 像，用户会点错（2026-10-23 反馈）。现在主账号行已移除，这里也改成
+          // 常驻输入框 + 醒目的主按钮，不再需要先点「+ 添加账号」展开。
+          h('div', { style: { ...S.bar, flexWrap: 'wrap' } },
+            h('input', {
+              style: { ...S.search, flex: '0 0 auto', width: 170 }, value: newId,
+              placeholder: '新账号短名，如 a2', spellCheck: false, autoComplete: 'off',
+              onChange: (e) => setNewId(e.target.value),
+              onKeyDown: (e) => { if (e.key === 'Enter') addAndLogin() },
+            }),
+            h('button', { style: S.btn, disabled: busy !== '' || !laneOn || !(newId || '').trim(), onClick: addAndLogin },
+              '添加并登录'),
+            newId
+              ? h('button', { style: S.ghostBtn, onClick: () => setNewId('') }, '清空')
+              : null,
             err ? h('span', { style: S.warn }, err) : null,
           ),
           h('p', { style: S.hint }, '登录会打开真实浏览器，用 Google / Apple / 手机号 / 邮箱登录一次即可。'),
