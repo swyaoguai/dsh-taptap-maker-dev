@@ -24,6 +24,7 @@ import crypto from 'node:crypto'
 import os from 'node:os'
 import { spawnSync } from 'node:child_process'
 import { ensureSourceIndex, searchSourceIndex, downloadSourceFile, SOURCES } from './audio-sources.mjs'
+import { psSingleQuote } from './win-proc.mjs'
 
 /** Kenney packs, all CC0. Verified reachable + zip-resolvable. */
 export const PACKS = [
@@ -74,8 +75,9 @@ async function downloadAndExtract(url, destDir, { timeoutMs = 120000 } = {}) {
     await new Promise((resolve, reject) => {
       const r = spawnSync('powershell', [
         '-NoProfile', '-Command',
-        `Expand-Archive -LiteralPath '${tmpZip}' -DestinationPath '${destDir}' -Force`,
-      ], { stdio: 'ignore' })
+        // ⚠️ 路径必须转义：`-LiteralPath '${tmpZip}'` 遇单引号会提前闭合字符串。
+        `Expand-Archive -LiteralPath ${psSingleQuote(tmpZip)} -DestinationPath ${psSingleQuote(destDir)} -Force`,
+      ], { stdio: 'ignore', timeout: timeoutMs })
       if (r.status === 0) resolve()
       else reject(new Error('Expand-Archive failed'))
     })

@@ -178,6 +178,29 @@ AI）看到的是「提交失败」—— 于是很自然地再跑一次，**两
   Maker 会监听 `assets/` 并在构建时解析这些文件，非原子写留下的半截 JSON
   会让构建报「meta 损坏」——而且 PNG 已经就位，那个窗口正好最容易被监听到。
 
+### 🔒 Windows 子进程调用已做命令注入防护
+
+网页生图与 BGM 要在超时后按 profile 路径清理残留的 Chromium，音效库要解压 zip、
+读 cookie。原先这些都是把路径**直接拼进 PowerShell 的单引号字符串**：
+
+```powershell
+Where-Object { $_.CommandLine -like '*C:\Users\…\browser-profile*' }
+Copy-Item -LiteralPath 'C:\…\Cookies' -Destination '…' -Force
+```
+
+PowerShell 里单引号**必须写成两个**才表示一个。所以路径里只要出现一个 `'`
+（用户名 `O'Brien`、把 `DSH_HOME` 指到带引号的目录等），字符串就提前闭合，
+后面的内容被当成命令执行。已实测可注入：
+
+```
+Write-Output '*C:\x' ; Set-Content -Path '<marker>' -Value 'INJECTED' ; #*'
+标记文件被创建了吗: True   内容: INJECTED
+```
+
+现在统一走 `src/win-proc.mjs`：路径先转义（`'` → `''`），`-like` 模式里的
+`*` `?` 转成 `[*]` `[?]`，并且六处调用不再各自拼字符串。测试里有真实
+PowerShell 的往返一致性断言（含 `O'Brien`、`x'; Write-Output 'INJECTED' ; '`）。
+
 中转站的「OpenAI 兼容」协议只实现**公共约定**，不绑定任何一家：
 
 | 项 | 实现 |

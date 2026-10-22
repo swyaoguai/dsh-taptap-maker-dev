@@ -49,6 +49,7 @@ import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, re
 import { downscaleFile, generateImage as relayGenerate } from './taptap-image.mjs'
 import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
 import { resolveAssetDir } from './assets.mjs'
+import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
 
@@ -118,13 +119,11 @@ function findPython() {
 /** Kill leftover Chromium holding our GPT profile and clear stale locks. */
 export function releaseProfile(prof) {
   for (let pass = 0; pass < 3; pass += 1) {
-    try {
-      spawnSync('powershell', ['-NoProfile', '-Command',
-        `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-        `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
-        `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
-      ], { stdio: 'ignore', timeout: 20000 })
-    } catch { /* best effort */ }
+    // ⚠️ 原来这里把路径直接拼进 PowerShell 的单引号字符串：`-like '*${prof}*'`。
+    //    PowerShell 里单引号要写两个才表示一个，所以路径里只要有一个单引号
+    //    （用户名 O'Brien、把 DSH_HOME 指到带引号的目录…）字符串就提前闭合，
+    //    后面的内容被当命令执行 —— 已实测可注入。现在统一走 win-proc 的转义实现。
+    killProcessesContaining(prof)
     for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile',
       path.join('Default', 'LOCK')]) {
       try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
@@ -132,14 +131,7 @@ export function releaseProfile(prof) {
     try {
       spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},400)'], { stdio: 'ignore', timeout: 3000 })
     } catch { /* ignore */ }
-    let remaining = 0
-    try {
-      const probe = spawnSync('powershell', ['-NoProfile', '-Command',
-        `@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-        `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' }).Count`,
-      ], { encoding: 'utf8', timeout: 15000 })
-      remaining = Number.parseInt((probe.stdout ?? '0').trim(), 10) || 0
-    } catch { remaining = 0 }
+    const remaining = countProcessesContaining(prof)
     if (remaining === 0) return true
   }
   return false
@@ -207,12 +199,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       // Killing python alone leaves the Chromium tree alive and holding the
       // profile lock; kill the whole tree, then release the profile.
       try { ch.kill('SIGKILL') } catch { /* ignore */ }
-      try {
-        spawnSync('powershell', ['-NoProfile', '-Command',
-          `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
-          `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
-        ], { stdio: 'ignore', timeout: 20000 })
-      } catch { /* best effort */ }
+      killProcessesContaining(prof)
       releaseProfile(prof)
       fs.rmSync(tmp, { force: true })
       const convUrl = readSidecar()

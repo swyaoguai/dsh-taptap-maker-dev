@@ -35,6 +35,7 @@ import { pathToFileURL } from 'node:url'
 import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount } from './paths.js'
 import { resolveAssetDir } from './assets.mjs'
 import { laneEnabled } from './lanes.mjs'
+import { countProcessesContaining, killProcessesContaining, psSingleQuote } from './win-proc.mjs'
 
 /**
  * Two sites, chosen by network reachability — the international site forces
@@ -137,13 +138,9 @@ export function releaseProfile(prof) {
   // parent, and a still-exiting tree makes the next launch fail with
   // exitCode=21. Two passes with a pause is enough in practice.
   for (let pass = 0; pass < 3; pass += 1) {
-    try {
-      spawnSync('powershell', ['-NoProfile', '-Command',
-        `Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-        `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
-        `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
-      ], { stdio: 'ignore', timeout: 20000 })
-    } catch { /* best effort */ }
+    // ⚠️ 原来同样是把路径拼进 PowerShell 单引号字符串（`'*${prof}*'`），
+    //    路径含单引号时会提前闭合 → 命令注入。统一走 win-proc 的转义实现。
+    killProcessesContaining(prof)
     for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile',
       path.join('Default', 'LOCK')]) {
       try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
@@ -152,14 +149,7 @@ export function releaseProfile(prof) {
     try {
       spawnSync(process.execPath, ['-e', 'setTimeout(()=>{},400)'], { stdio: 'ignore', timeout: 3000 })
     } catch { /* ignore */ }
-    let remaining = 0
-    try {
-      const probe = spawnSync('powershell', ['-NoProfile', '-Command',
-        `@(Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" | ` +
-        `Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' }).Count`,
-      ], { encoding: 'utf8', timeout: 15000 })
-      remaining = Number.parseInt((probe.stdout ?? '0').trim(), 10) || 0
-    } catch { remaining = 0 }
+    const remaining = countProcessesContaining(prof)
     if (remaining === 0) return true
   }
   return false
@@ -217,12 +207,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       // profile lock forever (that was the "卡住" the user hit). Kill the tree,
       // then release the profile so the next run can start.
       try { child.kill('SIGKILL') } catch { /* ignore */ }
-      try {
-        spawnSync('powershell', ['-NoProfile', '-Command',
-          `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
-          `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
-        ], { stdio: 'ignore', timeout: 20000 })
-      } catch { /* best effort */ }
+      killProcessesContaining(prof)
       releaseProfile(prof)
       fs.rmSync(tmp, { force: true })
       resolve({ ok: false, err: `timed out after ${Math.round(timeoutMs / 1000)}s` })
@@ -543,7 +528,9 @@ function findAuthCookie(cookieFile) {
     if (!copied) {
       try {
         const r = spawnSync('powershell', ['-NoProfile', '-Command',
-          `Copy-Item -LiteralPath '${cookieFile}' -Destination '${tmp}' -Force -ErrorAction Stop`,
+          // ⚠️ 路径必须转义：`-LiteralPath '${cookieFile}'` 里若含单引号
+          //    （用户目录名带引号等）会提前闭合字符串，后面的内容被当命令执行。
+          `Copy-Item -LiteralPath ${psSingleQuote(cookieFile)} -Destination ${psSingleQuote(tmp)} -Force -ErrorAction Stop`,
         ], { encoding: 'utf8', timeout: 15000 })
         copied = r.status === 0 && fs.existsSync(tmp)
       } catch { copied = false }
