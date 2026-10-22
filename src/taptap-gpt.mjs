@@ -50,6 +50,7 @@ import { downscaleFile, generateImage as relayGenerate } from './taptap-image.mj
 import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
 import { resolveAssetDir } from './assets.mjs'
 import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
+import { focusBrowserWindow } from './win-focus.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
 
@@ -163,6 +164,15 @@ function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000, ac
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
   fs.mkdirSync(prof, { recursive: true })
   releaseProfile(prof)
+  // 浏览器起来后**主动把它拉到前台**。否则窗口会开在 DSH 后面：用户点完「登录」
+  // 什么都没发生，以为按钮坏了，于是反复点或以为功能坏了（实测正是如此：
+  // 进程在跑、标题正确，但前台窗口始终是 DSH）。登录要人操作，窗口必须看得见。
+  // 只在 headed 时做（headless 本来就没有窗口），失败也不影响主流程。
+  const focusTimer = headless
+    ? null
+    : setTimeout(() => {
+      focusBrowserWindow(prof, { timeoutMs: 45000 }).catch(() => { /* 只是提升可见性 */ })
+    }, 1500)
   const script = `import json
 from playwright.sync_api import sync_playwright
 result = {"ok": False, "log": [], "error": None}
@@ -196,6 +206,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
+      clearTimeout(focusTimer)
       // Killing python alone leaves the Chromium tree alive and holding the
       // profile lock; kill the whole tree, then release the profile.
       try { ch.kill('SIGKILL') } catch { /* ignore */ }
@@ -212,6 +223,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(focusTimer)
       fs.rmSync(tmp, { force: true })
       resolve({ ok: false, err: error?.message ?? String(error) })
     })
@@ -219,6 +231,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(focusTimer)
       fs.rmSync(tmp, { force: true })
       const marker = out.indexOf('__RESULT__')
       if (marker < 0) {

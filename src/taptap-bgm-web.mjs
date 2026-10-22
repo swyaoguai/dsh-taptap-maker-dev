@@ -36,6 +36,7 @@ import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touc
 import { resolveAssetDir } from './assets.mjs'
 import { laneEnabled } from './lanes.mjs'
 import { countProcessesContaining, killProcessesContaining, psSingleQuote } from './win-proc.mjs'
+import { focusBrowserWindow } from './win-focus.mjs'
 
 /**
  * Two sites, chosen by network reachability — the international site forces
@@ -168,6 +169,12 @@ function runBrowser(dshHome, snippet, { headless = false, timeoutMs = 600000, ac
   const prof = profileDir(dshHome, accountId)
   fs.mkdirSync(prof, { recursive: true })
   releaseProfile(prof)
+  // 同 ChatGPT 生图：把浏览器窗口拉到前台，否则用户看不到登录页会以为没反应。
+  const focusTimer = headless
+    ? null
+    : setTimeout(() => {
+      focusBrowserWindow(prof, { timeoutMs: 45000 }).catch(() => { /* 只是提升可见性 */ })
+    }, 1500)
   const script = `import json
 from playwright.sync_api import sync_playwright
 result = {"ok": False, "log": [], "error": None}
@@ -202,6 +209,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
+      clearTimeout(focusTimer)
       // Killing the python process alone is NOT enough: playwright keeps its own
       // driver node plus the whole Chromium tree alive, and those hold the
       // profile lock forever (that was the "卡住" the user hit). Kill the tree,
@@ -218,6 +226,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(focusTimer)
       fs.rmSync(tmp, { force: true })
       resolve({ ok: false, err: error?.message ?? String(error) })
     })
@@ -225,6 +234,7 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(focusTimer)
       fs.rmSync(tmp, { force: true })
       const marker = out.indexOf('__RESULT__')
       if (marker < 0) {

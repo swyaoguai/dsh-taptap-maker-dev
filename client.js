@@ -1041,6 +1041,10 @@ window.__ModuleLoader__.load({
       // Poll until the chosen account shows as logged in (or we give up), so
       // the card reflects reality instead of a blind "started".
       const waitForLogin = useCallback((account) => {
+        // 「添加账号」是直接调 waitForLogin 的（登录窗口由服务端启动），
+        // 不经过 doLogin，所以这里必须自己把按钮置为「登录中…」，
+        // 否则用户能连点、反复开一堆窗口。
+        setBusy(account ? `login:${account}` : 'login')
         let tries = 0
         const timer = setInterval(() => {
           tries += 1
@@ -1093,17 +1097,21 @@ window.__ModuleLoader__.load({
         const id = (newId || '').trim()
         if (!id) { setErr('请填账号短名（如 a2、小号）'); return }
         setBusy('add'); setErr('')
+        // 告诉后端「顺便把登录窗口开起来」——服务端已经会 detached spawn，
+        // 前端只需进入等待状态。以前是前端 add 完再发一次 /gpt-login，
+        // 等于让后端弹两次窗口（第二次会把第一次的 profile 锁清掉，行为很难解释）。
         fetch(`${API_BASE}/gpt-pool`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ action: 'add', id }),
+          body: JSON.stringify({ action: 'add', id, login: true }),
         })
           .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
           .then(({ ok, j }) => {
             if (!ok || !j.ok) { setErr(j.error || '添加失败'); setBusy(''); return }
+            if (j.warn) setErr(j.warn)
             setInfo(j)
             setNewId(''); setShowAdd(false)
-            // 紧接着为该账号打开登录浏览器。
-            doLogin(id)
+            // 登录窗口由服务端启动，这里只负责轮询到「已登录」为止。
+            waitForLogin(id)
           })
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
       }, [newId, doLogin])

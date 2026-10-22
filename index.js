@@ -1199,6 +1199,22 @@ export function apply(ctx, config = {}) {
                 accounts: [...pool.accounts,
                   { id, label: typeof parsed.label === 'string' && parsed.label ? parsed.label : id, status: 'unknown', lastUsedAt: null, note: '' }],
               })
+              // 「添加并登录」是一步动作：光建条目不算完成，用户还得自己再点一次
+              // 「登录」才弹浏览器 —— 那正是「点了没反应」的另一半原因。
+              // 这里直接把它启动起来（失败不影响账号已建好，warn 里如实说明）。
+              if (parsed.login !== false) {
+                try {
+                  const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
+                  const argv = [cli, 'login', '--waitMs', '300000', '--account', id]
+                  const child = spawn(process.execPath, argv, { detached: true, stdio: 'ignore' })
+                  child.unref()
+                } catch (e) {
+                  return sendJson(res, 200, {
+                    ok: true, ...gptStatus(home),
+                    warn: `账号 ${id} 已添加，但登录窗口没能自动打开：${e?.message ?? e}（请点该账号的「登录」）`,
+                  })
+                }
+              }
             } else if (action === 'remove') {
               if (!id) return sendJson(res, 400, { ok: false, error: 'missing id' })
               writeGptPool(home, { accounts: readGptPool(home).accounts.filter((a) => a.id !== id) })
