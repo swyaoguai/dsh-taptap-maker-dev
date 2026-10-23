@@ -50,6 +50,7 @@ import {
 } from './src/lanes.mjs'
 import { resolveAssetDir as resolveAssetDirForApi } from './src/assets.mjs'
 import { guardUserSetting, guardrailLines, hasApproval, requireApproval } from './src/guards.mjs'
+import { startBackgroundCheck, currentVersion, checkForUpdates, readCachedCheck, shouldCheck } from './src/version-checker.mjs'
 
 // API 层的短别名：路由函数里反复写 readLanes/writeLanes 太长，且和已有的
 // read*FromApi 风格不一致。
@@ -596,6 +597,11 @@ export function apply(ctx, config = {}) {
     applyPolicySection()
   })
 
+  // --- 1c. 版本检查（GitHub raw 上的 package.json 对比本地版本）----------
+  // 缓存在 version-check.json，设置页「关于」卡直接读缓存展示；
+  // 后台 6 小时一次，网络失败静默 —— 绝不影响插件主流程。
+  startBackgroundCheck(home, { logger: ctx.logger })
+
   // --- 2. Skill provider (bundled + updatable cache) ---------------------
   let invalidateSkills = () => {}
   let skillProvider = null
@@ -885,6 +891,26 @@ export function apply(ctx, config = {}) {
           try {
             const models = await relayListModels(probe)
             return sendJson(res, 200, { ok: true, models })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        // ── 版本检查 ──
+        // GET   /version          → 当前版本 + 缓存的检查结果（设置页「关于」卡）
+        // POST  /version/check    → 立即检查一次（绕过冷却，结果落盘）
+        if (req.method === 'GET' && sub === 'version') {
+          const cached = readCachedCheck(home)
+          return sendJson(res, 200, {
+            ok: true,
+            current: currentVersion(),
+            cached: cached ?? null,
+            needsCheck: shouldCheck(home),
+          })
+        }
+        if (req.method === 'POST' && sub === 'version/check') {
+          try {
+            const r = await checkForUpdates(home)
+            return sendJson(res, 200, { ok: !r.error, ...r })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
           }

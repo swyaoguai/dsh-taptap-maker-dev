@@ -1945,12 +1945,85 @@ window.__ModuleLoader__.load({
      *   生成通道（图 / 视频）· 音频素材 · 治理与工具 · 怎么用
      * 每组内部把「先配什么、后配什么」按使用频率排好。
      */
+    /**
+     * 「关于」卡：当前版本 + 更新检查。
+     *
+     * 读的是后端缓存的检查结果（version-check.json），打开页面不发网络请求；
+     * 点「检查更新」才发一次。后台另有一个 6 小时的定时检查，这里只是手动入口。
+     */
+    function AboutCard() {
+      const [data, setData] = useState(null)
+      const [checking, setChecking] = useState(false)
+      const [err, setErr] = useState('')
+
+      const load = useCallback(() => {
+        fetch(`${API_BASE}/version`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => { setData(j); setErr('') })
+          .catch(() => setErr('宿主服务未就绪，读不到版本信息。'))
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const checkNow = useCallback(() => {
+        setChecking(true); setErr('')
+        fetch(`${API_BASE}/version/check`, { method: 'POST', headers: { 'content-type': 'application/json' } })
+          .then((r) => r.json().catch(() => ({ ok: false, error: '响应解析失败' })))
+          .then((j) => {
+            if (!j.ok && j.error) setErr(j.error)
+            setData((prev) => ({ ...(prev || {}), current: j.current ?? prev?.current, cached: j }))
+          })
+          .catch(() => setErr('检查失败：宿主服务未就绪'))
+          .finally(() => setChecking(false))
+      }, [])
+
+      if (data === null) {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, '关于本插件'),
+          h('p', { style: { ...S.sub, marginTop: 0 } }, err || '加载中…'))
+      }
+
+      const cur = data.current || '?'
+      const cached = data.cached
+      const latest = cached?.latest
+      const outdated = cached?.isOutdated === true
+      const checkedAt = cached?.checkedAt ? new Date(cached.checkedAt).toLocaleString('zh-CN') : null
+
+      return h('div', { style: S.card },
+        h('h2', { style: S.cardTitle }, '关于本插件'),
+        h('div', { style: { ...S.rowBetween, marginTop: 4 } },
+          h('div', null,
+            h('div', { style: { display: 'flex', alignItems: 'baseline', gap: 8 } },
+              h('span', { style: { fontSize: 20, fontWeight: 700 } }, `v${cur}`),
+              outdated ? h('span', { style: S.pill }, `有新版本 v${latest}`) : h('span', { style: S.offPill }, '已是最新')),
+            h('p', { style: { ...S.hint, marginTop: 4 } },
+              cached?.error
+                ? `上次检查失败：${cached.error}`
+                : checkedAt
+                  ? `上次检查：${checkedAt}（后台每 6 小时自动检查一次）`
+                  : '尚未检查过更新。点击右侧按钮立即检查。')),
+          h('button', { style: S.btn, disabled: checking, onClick: checkNow }, checking ? '检查中…' : '检查更新')),
+        outdated
+          ? h('div', { style: S.warnBox },
+            h('span', { style: S.warnTitle }, `可以更新到 v${latest}`),
+            h('p', { style: { ...S.hint, margin: 0 } },
+              '更新方式：拉取最新仓库后重启 DSH。命令：',
+              h('br'),
+              h('span', { style: S.codeInline }, 'git -C <插件目录> pull'),
+              '（或用你装插件时的同一方式更新）。'))
+          : null,
+        h('p', { style: { ...S.hint, marginTop: 10 } },
+          '仓库：', h('span', { style: S.codeInline }, 'github.com/swyaoguai/dsh-taptap-maker-dev'),
+          ' · 版本源为该仓库 main 分支的 package.json。'),
+      )
+    }
+
     function TaptapMakerSettings() {
       const [group, setGroup] = useState('render')
       const groups = [
         { id: 'render', icon: '🎨', label: '生成通道', desc: '优先级 / 开关与各通道 Key', count: 5 },
         { id: 'audio', icon: '🔊', label: '音频素材', desc: '音效库与 BGM 账号', count: 2 },
         { id: 'govern', icon: '🛡️', label: '治理与工具', desc: '额度红线、skills', count: 2 },
+        { id: 'about', icon: 'ℹ️', label: '关于', desc: '版本与更新检查', count: 1 },
         { id: 'help', icon: '📖', label: '怎么用', desc: '日常全部在对话里完成', count: 0 },
       ]
       return h('div', { style: S.page },
@@ -1988,6 +2061,11 @@ window.__ModuleLoader__.load({
             '额度红线防误花 Maker 内置额度；skills 决定模型能用到哪些游戏开发知识。'),
           h(PolicyToggle),
           h(SkillManager),
+        ),
+
+        // ── 关于（版本与更新检查）──
+        h(PanelGroup, { active: group === 'about' },
+          h(AboutCard),
         ),
 
         // ── 怎么用 ──
