@@ -9,9 +9,10 @@
  *
  * 用法：node scripts/verify-lanes.mjs
  */
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   GROUPS, LANE_GROUPS, fallbackCandidates, laneOrder, quotaSignal,
@@ -143,6 +144,23 @@ console.log('\n[6] 候选序列 = 开关 + 顺序 + 就绪判断')
   writeLanes(clean, { groups: { video: { order: ['local', 'relay', 'minimax'], enabled: { local: true, relay: false, minimax: false } } } })
   ok(laneOrder(clean, 'video').join('>') === 'local', '只开 local → 候选序列就是它')
   ok(fallbackCandidates(clean, 'video', () => true).length === 0, '但 local 不作为自动回退候选（要用户手动挑文件）')
+}
+
+console.log('\n[7] 逐条开关被命令层尊重 + 统一入口已接线（源码契约）')
+{
+  // [Bug 2026-10-24] 两套开关曾脱节：设置页「生成通道」卡关掉 gptWeb 后，
+  // /taptap-gpt 只读 imageLane.json 总开关照样弹浏览器。锁死三个契约：
+  //   1. generateWithRotation 同时检查 lanes 逐条开关；
+  //   2. /taptap-image 入口检查 relayImage 逐条开关；
+  //   3. /taptap-gpt 生图路径走统一入口 generateImage（autoFallback 才有入口）。
+  // 相对 cwd 的路径在别的工作目录跑会 ENOENT —— 用脚本自身位置定位仓库文件。
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const gpt = readFileSync(path.join(here, '..', 'src', 'taptap-gpt.mjs'), 'utf8')
+  const rot = /export async function generateWithRotation[\s\S]*?\n\}/.exec(gpt)?.[0] ?? ''
+  ok(rot.includes("isLaneEnabled(dshHome, 'image', 'gptWeb')"), 'generateWithRotation 检查 image/gptWeb 逐条开关')
+  const idx = readFileSync(path.join(here, '..', 'index.js'), 'utf8')
+  ok(/relayImageLaneEnabled\(home\)/.test(idx), '/taptap-image 入口检查 relayImage 逐条开关')
+  ok(/gptGenerateImage\(home, prompt/.test(idx), '/taptap-gpt 生图走统一入口 generateImage（含 autoFallback 回退）')
 }
 
 try { rmSync(scratch, { recursive: true, force: true }) } catch { /* ignore */ }

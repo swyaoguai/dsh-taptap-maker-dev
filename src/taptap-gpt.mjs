@@ -1010,6 +1010,20 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
       failures: [],
     }
   }
+  // 设置页「生成通道」卡里的**逐条开关**（lanes.json image/gptWeb）也必须算数：
+  // 只查上面的总开关（imageLane.json）时，用户在通道卡里单独关掉网页通道后，
+  // 斜杠命令照样弹浏览器烧配额 —— 两套开关脱节（2026-10-24 实测）。CLI 的
+  // gen 子命令已查（isLaneEnabled），这里给所有调用方（含 /taptap-gpt）补上。
+  if (!isLaneEnabled(dshHome, 'image', 'gptWeb')) {
+    return {
+      ok: false,
+      error: 'lane_disabled',
+      hint: '「ChatGPT 网页生图」通道已在设置页「生成通道」卡里关闭；打开它，或改用中转站 /taptap-image。',
+      rotated: false,
+      tried: [],
+      failures: [],
+    }
+  }
   const pool = readGptPool(dshHome)
   // Auto-resume FIRST: if a previous run left a conversation behind (its image
   // may have finished after we closed the browser), download that instead of

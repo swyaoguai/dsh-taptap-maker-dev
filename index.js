@@ -46,7 +46,7 @@ import { listModels as listVideoModels, estimateCostCny, detectKeyKind, describe
 import { normalizeRelayConfig, relayListModels, relayReady, RELAY_PROTOCOLS } from './src/video-relay.mjs'
 import {
   GROUPS as LANE_GROUPS_IDS, LANE_GROUPS, lanesConfigPath, quotaSignal,
-  readLanes, writeLanes,
+  readLanes, writeLanes, laneEnabled as isLaneEnabledFor,
 } from './src/lanes.mjs'
 import { resolveAssetDir as resolveAssetDirForApi } from './src/assets.mjs'
 import { guardUserSetting, guardrailLines, hasApproval, requireApproval } from './src/guards.mjs'
@@ -59,6 +59,10 @@ const writeLanesForApi = writeLanes
 const lanesConfigPathForApi = lanesConfigPath
 const LANE_GROUPS_FOR_API = LANE_GROUPS
 const relayReadyForApi = relayReady
+/** 「生成通道」卡里 relayImage 逐条开关是否开着（/taptap-image 入口用）。 */
+const relayImageLaneEnabled = (home) => {
+  try { return isLaneEnabledFor(home, 'image', 'relayImage') } catch { return true }
+}
 
 /** 「开着但还没配」时给界面的一句话 —— 要具体，否则用户不知道该去哪儿填。 */
 const LANE_UNREADY_REASON = {
@@ -72,7 +76,7 @@ const LANE_UNREADY_REASON = {
 import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
 import os from 'node:os'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile } from './src/taptap-gpt.mjs'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile } from './src/taptap-gpt.mjs'
 import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
@@ -145,11 +149,6 @@ const CREDIT_TOOLS = [
   'audition_voices_for_character', 'confirm_character_voice', 'text_to_dialogue',
   'create_3d_asset',
 ]
-
-/** Wrap a gpt gen call and report honestly; never fabricate a file path. */
-async function gptGen(home, prompt, { accountId, downscale } = {}) {
-  return gptGenerateWithRotation(home, prompt, { accountId, downscale })
-}
 
 /** Handle `/taptap-gpt pool …` subcommands and render them as human text. */
 async function gptPoolCommand(home, raw) {
@@ -2071,7 +2070,21 @@ export function apply(ctx, config = {}) {
         const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
         const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
         const prompt = desc.replace(/(?:--downscale|-d)\s+\d+x\d+/, '').replace(/(?:--account|-a)\s+\S+/, '').trim()
-        const r = await gptGen(home, prompt, { accountId: acct, downscale })
+        // 走统一入口 generateImage：它按「生成通道」卡的顺序/开关/autoFallback
+        // 决定先走谁、额度不足要不要换下一条。旧写法直接调 generateWithRotation，
+        // 用户打开「额度不足自动换通道」后生图也永远不会切到中转站（入口没人接）。
+        const imageCfgNow = readImageConfigRaw(home)
+        const relayOut = path.join(resolveDownloadDir(home, {}).dir, `relay-${Date.now()}.png`)
+        const r = await gptGenerateImage(home, prompt, {
+          gptOpts: { accountId: acct, downscale },
+          relayOpts: {
+            dshHome: home,
+            prompt,
+            out: relayOut,
+            ...(downscale ? { downscale } : {}),
+          },
+          relayReady: () => Boolean(imageCfgNow.baseURL && imageCfgNow.apiKey && imageCfgNow.model) && relayImageLaneEnabled(home),
+        })
         if (!r.ok) {
           const triedList = Array.isArray(r.failures) ? r.failures.map((f) => `  ${f.account ?? '(默认)'}: ${f.error}`).join('\n') : ''
           const isQuota = String(r.error ?? '').startsWith('quota:')
@@ -2099,6 +2112,7 @@ export function apply(ctx, config = {}) {
           kind: 'success',
           text: [
             r.resumed ? `已取回上一次生成好的图（没有重新生成）：${r.saved}` : `已生成：${r.saved}`,
+            r.lane === 'relayImage' ? '（网页通道额度不足，已自动切换到中转站出图）' : '',
             r.rotated ? `（自动轮换账号：${(r.tried ?? []).join(' → ')}）` : '',
             ...(r.notes ?? []),
             '',
@@ -2127,6 +2141,19 @@ export function apply(ctx, config = {}) {
           }
         }
 
+        // 「生成通道」卡里的逐条开关必须算数：关掉 relayImage 后本命令直接拒绝，
+        // 不再往下走配置检查/生图（开关与行为脱节就是「设置不生效」）。
+        if (!relayImageLaneEnabled(home)) {
+          return {
+            kind: 'error',
+            text: [
+              '「中转站生图」通道已在设置页「生成通道」卡里关闭，不会走这条通道。',
+              '',
+              '要用图片就打开它，或走网页通道 /taptap-gpt <描述>。',
+            ].join('\n'),
+          }
+        }
+
         const cfg = readJson(imageFile) ?? {}
         const configured = Boolean(cfg.baseURL && cfg.apiKey && cfg.model)
         if (!configured) {
@@ -2135,7 +2162,7 @@ export function apply(ctx, config = {}) {
             text: [
               '中转站（回退通道）还没配置，且它已不是首选——图片默认走 ChatGPT 网页生图。',
               '',
-              `配置文件：${imageFile}`,
+              `配置文件：${imageFile}（或设置页「中转站生图」卡）`,
               '',
               '网页通道：/taptap-gpt login 登录一次即可用（默认走这条）。',
               '确实要用中转站：填好 baseURL / apiKey / model 再回来。',
@@ -2943,7 +2970,10 @@ async function videoCommand(home, rawInput) {
         text: [
           `已导入 Maker 工程：${path.relative(process.cwd(), result.file) || result.file}`,
           `  .meta：${path.basename(result.meta)}（uuid ${result.manifest.uuid}）`,
-          `  清单：${path.basename(result.manifest ? job.import.manifest : '')}`,
+          // importToMaker 返回的 job 是导入后的新快照；旧写法读导入前旧 job 的
+          // job.import.manifest（当时还是 undefined）→ TypeError，导入明明成功
+          // 却报错，用户看到报错再导一次 = 项目里出现重复素材。
+          `  清单：${path.basename(result.job.import?.manifest ?? '')}`,
           '',
           '游戏里按格子切图（直接贴进 Lua）：',
           '',
