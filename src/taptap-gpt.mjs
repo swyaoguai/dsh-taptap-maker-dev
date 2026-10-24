@@ -812,13 +812,22 @@ while time.time() < hard_deadline:
             break
     else:
         stable = 0
-    if not new_img:
+    # Quota check runs on EVERY poll, not only when no new image exists: the
+    # banner can coexist with stale images on the page (a leftover thumbnail
+    # that slipped the "before" filter makes new_img non-null, which used to
+    # skip this check entirely and the run degraded to a plain no_image).
+    if quota_hit is None:
         try:
             txt = pg.inner_text("body")
         except Exception:
             txt = ""
-        for kw in ["达到上限", "已达上限", "rate limit", "Rate limit", "too many requests",
-                   "稍后再试", "limit reached", "quota"]:
+        # Quota keywords: the exact CN free-tier banner is 「今日免费额度已用完」
+        # (user-reported 2026-10-24). The old list missed it, so the run ended as
+        # a plain no_image failure — no account rotation, no lane fallback, and
+        # the user saw the same banner again on every retry.
+        for kw in ["达到上限", "已达上限", "今日免费额度已用完", "免费额度已用完", "额度已用完",
+                    "用量已达上限", "今日额度", "rate limit", "Rate limit", "too many requests",
+                    "稍后再试", "limit reached", "quota"]:
             if kw in txt:
                 quota_hit = kw
                 break

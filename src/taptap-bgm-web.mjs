@@ -1002,21 +1002,32 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
     tried.push(acct.id)
     last = await generate(dshHome, prompt, { out, waitMs, site, instrumental, count, accountId: acct.id, ignoreInstrumental })
     const isCredit = typeof last.error === 'string' && last.error.startsWith('credit_exhausted')
-    if (last.ok && !isCredit) {
+    // 成功 = ok 且真的拿到文件（steps.saved）。runBrowser 的包装器只在
+    // 「Python 没抛异常」时置 ok=True，而片段里的 instrumental_unset /
+    // no new track / download_error 都是「设 error 后正常 return」——
+    // 旧判定 last.ok && !isCredit 把这些当成功：结构性失败照样换账号白开
+    // 浏览器，没额度的账号也不进 cooling。
+    const gotFile = last.ok && last?.steps?.saved != null
+    if (gotFile && !isCredit) {
       touchBgmAccount(dshHome, acct.id, { status: 'ok', lastUsedAt: Date.now(), note: '' })
       return { ...last, rotated: tried.length > 1, tried, failures }
     }
     if (isCredit) {
       // Out of credits: cool it down so the next picker skips it for a while.
+      // （credit_exhausted 由片段「设 error 后 return」产生，此时 last.ok 仍是
+      // true —— 判定只看 error 前缀，不能捎带 last.ok。）
       touchBgmAccount(dshHome, acct.id, { status: 'cooling', lastUsedAt: Date.now(), note: last.error })
     } else {
       touchBgmAccount(dshHome, acct.id, { lastUsedAt: Date.now() })
     }
     skip.add(acct.id)
     failures.push({ account: acct.id, error: last.error ?? 'no file' })
-    // A structural failure (selectors, env, auth) would repeat on every account.
+    // A structural failure (selectors, env, auth, deliberate stops) repeats on
+    // every account — stop early instead of opening N browsers to fail the same
+    // way. instrumental_unset 是「刻意中止（没花额度）」，换账号无意义。
     const structural = typeof last.error === 'string'
-      && (last.error.includes('no style input') || last.error.includes('创作')
+      && (last.error === 'instrumental_unset'
+        || last.error.includes('no style input') || last.error.includes('创作')
         || last.error.includes('token') || last.error.includes('playwright')
         || last.error.includes('could not fill prompt'))
     if (structural) break

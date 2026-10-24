@@ -40,10 +40,10 @@ import { resolveImageConfig, maskSecret, imageConfigPath, resolveDshHome } from 
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024'])
 
 function parseArgs(argv) {
-  const args = {}
+  const args = { _: [] }
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
-    if (!token.startsWith('--')) continue
+    if (!token.startsWith('--')) { args._.push(token); continue }
     const key = token.slice(2)
     const next = argv[i + 1]
     if (next === undefined || next.startsWith('--')) {
@@ -220,6 +220,123 @@ export async function generateImage(options) {
   throw new Error(`image generation failed after ${maxAttempts} attempts: ${lastError?.message ?? 'unknown'}`)
 }
 
+/**
+ * Image-to-image edit through an OpenAI-compatible `/images/edits` endpoint.
+ *
+ * This is the reskin lane: send the ORIGINAL image + a style prompt, get a
+ * re-rendered image back. Used by the spine-rig workflow to restyle a whole
+ * character while keeping the layout (the caller then slices the output back
+ * into per-part regions — pixel positions carry over because the good
+ * endpoints keep composition).
+ *
+ * Transport notes:
+ *  - multipart/form-data (the OpenAI /images/edits shape): `image` file field,
+ *    `prompt`, `model`, optional `size`/`n`. gpt-image-* style endpoints.
+ *  - Some relays only accept JSON with a base64 `image`; we try multipart
+ *    first and fall back to JSON+b64 on a 400 that mentions the body format.
+ *  - Transport-layer failures are NOT retried (same rule as generations:
+ *    the request may already be generating server-side).
+ *
+ * @returns {Promise<{outputs: string[], size: string, model: string, notes: string[]}>}
+ */
+export async function editImage(options) {
+  const cfg = resolveImageConfig(options)
+  if (cfg.baseURL.length === 0 || cfg.apiKey.length === 0 || cfg.model.length === 0) {
+    throw new Error(
+      `custom image endpoint not configured. Set baseURL / apiKey / model in ${imageConfigPath(options.dshHome)} `
+      + '(or TAPTAP_IMAGE_BASE_URL / TAPTAP_IMAGE_API_KEY / TAPTAP_IMAGE_MODEL env). Run with --config to inspect.',
+    )
+  }
+  const inPath = String(options.in ?? options.input ?? '')
+  if (inPath.length === 0 || !fs.existsSync(inPath)) {
+    throw new Error(`--in <原图> 不存在：${inPath || '(空)'}`)
+  }
+  const out = String(options.out ?? '')
+  if (out.length === 0) throw new Error('editImage 需要 --out <输出文件>')
+  const size = String(options.size || '').trim()
+  const url = `${cfg.baseURL.replace(/\/$/, '')}/images/edits`
+  const notes = []
+
+  const attempt = async (useJsonB64) => {
+    let response
+    try {
+      if (useJsonB64) {
+        const b64 = fs.readFileSync(inPath).toString('base64')
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model: cfg.model, prompt: options.prompt, image: `data:image/png;base64,${b64}`, ...(size ? { size } : {}) }),
+          signal: AbortSignal.timeout(Number(options.timeoutMs || 240000)),
+        })
+      } else {
+        // multipart: Node 22 has global FormData + Blob
+        const form = new FormData()
+        form.append('model', cfg.model)
+        form.append('prompt', options.prompt)
+        if (size) form.append('size', size)
+        form.append('image', new Blob([fs.readFileSync(inPath)], { type: 'image/png' }), path.basename(inPath))
+        response = await fetch(url, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${cfg.apiKey}` },
+          body: form,
+          signal: AbortSignal.timeout(Number(options.timeoutMs || 240000)),
+        })
+      }
+    } catch (error) {
+      const detail = error?.message ?? String(error)
+      throw new Error(
+        `连接 ${url} 失败：${detail}\n`
+        + '请求可能已经发出、服务端也可能已经在生成 —— 重试有重复扣费的风险。\n'
+        + '请先确认端点可用再重试（不要连续重发）。',
+      )
+    }
+    const text = await response.text()
+    if (!response.ok) return { status: response.status, text }
+    let json
+    try {
+      json = JSON.parse(text)
+    } catch {
+      throw new Error(`endpoint returned non-JSON 200 (check baseURL "${cfg.baseURL}"): ${text.slice(0, 200)}`)
+    }
+    const items = Array.isArray(json.data) ? json.data : []
+    if (items.length === 0) throw new Error('endpoint returned no image data')
+    const outputs = []
+    for (const item of items) {
+      if (typeof item.b64_json === 'string' && item.b64_json.length > 0) {
+        fs.mkdirSync(path.dirname(out), { recursive: true })
+        fs.writeFileSync(out, Buffer.from(item.b64_json, 'base64'))
+        outputs.push(out)
+        break // one output is all this lane needs
+      }
+      if (typeof item.url === 'string') {
+        const img = await fetch(item.url, { signal: AbortSignal.timeout(120000) })
+        fs.mkdirSync(path.dirname(out), { recursive: true })
+        fs.writeFileSync(out, Buffer.from(await img.arrayBuffer()))
+        outputs.push(out)
+        break
+      }
+    }
+    if (outputs.length === 0) throw new Error('endpoint returned no usable image item (need b64_json or url)')
+    return { ok: true, outputs, size: size || '(endpoint default)', model: cfg.model, notes }
+  }
+
+  // 1) multipart（OpenAI 标准形态）
+  const first = await attempt(false)
+  if (first.ok) return first
+  // 2) 只有 400 且正文**明确指向请求体格式**时才换 JSON+b64 再试一次。
+  //    条件不能宽：业务错误（prompt 违规、参数非法）正文里常含 "image"，
+  //    按它回退等于多发一次注定失败的请求（烧用户的钱）。
+  const bodyFormatRejected = first.status === 400
+    && /multipart|form-data|content-type|use json|json body|base64|unexpected content/i.test(first.text)
+  if (bodyFormatRejected) {
+    notes.push('multipart 被拒（400 格式问题），已改用 JSON+base64 重试')
+    const second = await attempt(true)
+    if (second.ok) return second
+    throw new Error(`image edit endpoint HTTP ${second.status}: ${String(second.text).slice(0, 300)}`)
+  }
+  throw new Error(`image edit endpoint HTTP ${first.status}: ${String(first.text).slice(0, 300)}`)
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2))
   if (args.config === true) {
@@ -234,9 +351,21 @@ async function main() {
     }, null, 2)}\n`)
     return
   }
+  // edit 子命令：图生图（reskin 链路）
+  if (args.edit === true || args._?.[0] === 'edit') {
+    if (typeof args.prompt !== 'string' || typeof args.in !== 'string' || typeof args.out !== 'string') {
+      process.stderr.write('usage: taptap-image edit --in <原图> --prompt "<风格描述>" --out <输出.png> [--size WxH]\n')
+      process.exitCode = 2
+      return
+    }
+    const result = await editImage(args)
+    process.stdout.write(`${JSON.stringify({ ok: true, ...result }, null, 2)}\n`)
+    return
+  }
   if (typeof args.prompt !== 'string' || typeof args.out !== 'string') {
     process.stderr.write(
-      'usage: taptap-image --prompt "<text>" --out <file.png> [--size WxH] [--n 1] [--transparent] [--downscale WxH]\n',
+      'usage: taptap-image [--prompt "<text>" --out <file.png> [--size WxH] [--n 1] [--transparent] [--downscale WxH]]\n'
+      + '       taptap-image edit --in <原图> --prompt "<风格>" --out <输出.png>   # 图生图（spine reskin）\n',
     )
     process.exitCode = 2
     return

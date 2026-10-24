@@ -1269,7 +1269,7 @@ window.__ModuleLoader__.load({
                   h('span', { style: { fontSize: 13, fontWeight: 600 } }, '轮询'),
                   h('p', { style: { ...S.hint, marginTop: 2 } },
                     `附加账号 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling ?? 0}，封禁 ${pool.banned ?? 0}）。`
-                    + '一个触配额自动换下一个。')),
+                    + '一个触配额自动换下一个；全部触配额后停下（是否换到中转站通道由「生成通道」卡的自动切换开关决定，默认不换）。')),
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
                   h('span', { style: pool.autoRotate ? S.pill : S.offPill }, pool.autoRotate ? '轮换开' : '轮换关'),
                   h(Toggle, {
@@ -1322,6 +1322,9 @@ window.__ModuleLoader__.load({
       }
       const ready = info !== 'error' && info.ready === true
       const count = info !== 'error' ? info.count : 0
+      // autoEnsure 关掉时如实显示（否则用户关了开关、界面毫无反馈，
+      // 首次用时又只看到一条报错，搞不清两者是一回事）。
+      const autoOff = info !== 'error' && info.autoEnsureDisabled === true
 
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
@@ -1329,8 +1332,8 @@ window.__ModuleLoader__.load({
             h('h2', { style: S.cardTitle }, '音效素材库'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
               'Kenney 等 CC0 音源，可商用、可修改、无需署名。',
-              info === 'error' ? '' : (ready ? ` 本地已有 ${count} 个音频。` : ' 尚未下载，首次使用自动获取（约 7MB）。'))),
-          h('span', { style: ready ? S.pill : S.offPill }, ready ? '已就绪' : '未下载'),
+              info === 'error' ? '' : (ready ? ` 本地已有 ${count} 个音频。` : autoOff ? ' 自动下载已关（用下面的按钮手动下载）。' : ' 尚未下载，首次使用自动获取（约 7MB）。'))),
+          h('span', { style: ready ? S.pill : S.offPill }, ready ? '已就绪' : (autoOff ? '自动下载已关' : '未下载')),
         ),
         info === 'error'
           ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
@@ -1338,9 +1341,13 @@ window.__ModuleLoader__.load({
           : null,
         h('div', { style: S.bar },
           h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: sync },
-            busy === 'sync' ? '下载中…' : '更新素材库'),
+            busy === 'sync' ? '下载中…' : (autoOff && !ready ? '下载素材库' : '更新素材库')),
           err ? h('span', { style: S.warn }, err) : null,
         ),
+        autoOff
+          ? h('p', { style: { ...S.hint, marginTop: 8 } },
+            '插件配置里「首次用到时自动下载」已关闭：对话里搜/装音效前需先手动下载一次（上面的按钮）。')
+          : null,
         h('p', { style: { ...S.hint, marginTop: 8 } },
           '搜索与安装都在对话里做：说「加个金币音效」即可。'),
       )
@@ -1641,7 +1648,9 @@ window.__ModuleLoader__.load({
           h('div', null,
             h('div', { style: { fontWeight: 600 } }, '额度不足时自动换下一条通道'),
             h('p', { style: { ...S.hint, margin: '2px 0 0' } },
-              '默认关闭 —— 打开后可能在你不知情的情况下动用付费通道（如中转站）。只有「额度/配额」类失败才换，参数写错这类问题换了也一样错，不会浪费一轮。')),
+              '默认关闭 —— 打开后可能在你不知情的情况下动用付费通道（如中转站）。只有「额度/配额」类失败才换，参数写错这类问题换了也一样错，不会浪费一轮。'),
+            h('p', { style: { ...S.hint, margin: '4px 0 0' } },
+              '⚠️ 关着时网页提示「今日免费额度已用完」等配额信息不会换通道：同一通道内的多账号轮换仍会做（上面的「轮换」开关），但不会跳到下一条通道 —— 会停下并把每条通道的失败原因列给你，由你决定切换、补账号还是等额度恢复。')),
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
             h('span', { style: data.autoFallback ? S.pill : S.offPill }, data.autoFallback ? '自动切换开' : '自动切换关'),
             h(Toggle, {

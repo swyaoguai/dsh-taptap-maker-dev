@@ -34,6 +34,22 @@ print("ok")
 `
 
 let failed = 0
+
+// 第 0 步：先验宿主 JS 文件本身的语法。内嵌 Python 片段住在 JS template
+// literal 里，Python 注释里一个反引号就会终止外层字符串、把整个模块炸成
+// SyntaxError（2026-10-24 实际发生：check-py-snippets 只验 Python 反而全绿，
+// 由 verify-host-routes 抓到）。先 node --check 宿主，这类错误当场暴露。
+for (const host of [SRC, SRC_BGM]) {
+  const r = spawnSync(process.execPath, ['--check', host], { encoding: 'utf8' })
+  const label = path.basename(host)
+  if (r.status === 0) {
+    process.stdout.write(`${label}: host JS syntax OK\n`)
+  } else {
+    failed += 1
+    process.stdout.write(`${label}: host JS syntax FAILED\n${r.stderr}\n`)
+  }
+}
+
 for (const [name, body] of Object.entries(snippets)) {
   const filled = body.replace(/\$\{[^}]*\}/g, 'X')
   const py = wrapper(filled)

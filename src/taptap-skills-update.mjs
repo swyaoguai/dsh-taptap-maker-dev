@@ -31,11 +31,20 @@ import { defaultCacheDir, readJson, writeJson } from './paths.js'
 const sha256 = (buffer) => crypto.createHash('sha256').update(buffer).digest('hex')
 
 function copySkillDir(srcDir, destDir) {
+  copySkillDirSelective(srcDir, destDir, () => true)
+}
+
+/** copySkillDir 的可筛版本：keep(relPath, absPath) 为 false 的条目跳过。 */
+function copySkillDirSelective(srcDir, destDir, keep) {
   fs.mkdirSync(destDir, { recursive: true })
   for (const entry of fs.readdirSync(srcDir, { withFileTypes: true })) {
+    // .git 整目录跳过：临时 clone 里带着完整 .git，拷进 skills-cache 既浪费
+    // 磁盘又可能泄露用户机器路径。
+    if (entry.name === '.git') continue
     const src = path.join(srcDir, entry.name)
     const dest = path.join(destDir, entry.name)
-    if (entry.isDirectory()) copySkillDir(src, dest)
+    if (!keep(entry.name, src)) continue
+    if (entry.isDirectory()) copySkillDirSelective(src, dest, keep)
     else if (entry.isFile()) fs.copyFileSync(src, dest)
   }
 }
@@ -54,6 +63,29 @@ function findSkillDirs(root, acc, depth = 0) {
   }
 }
 
+/**
+ * findSkillDirs 的「必下钻」版：根自身有 SKILL.md 时**仍然**继续找子技能目录
+ * （仓库根技能 + 子目录技能可以共存，如 spine-rig 布局）。只在子目录也是
+ * 技能目录时停住，不再把「根是技能」当成整棵树的终点。
+ */
+function findAllSkillDirs(root, acc, depth = 0) {
+  if (depth > 6) return
+  let entries
+  try { entries = fs.readdirSync(root, { withFileTypes: true }) } catch { return }
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'references' || entry.name === 'assets' || entry.name === '.git') continue
+    const sub = path.join(root, entry.name)
+    let subEntries
+    try { subEntries = fs.readdirSync(sub, { withFileTypes: true }) } catch { continue }
+    const subHasSkill = subEntries.some((e) => e.isFile() && /^skill\.md$/i.test(e.name))
+    if (subHasSkill) {
+      acc.push(sub)
+      continue // 子技能目录自身不再下钻
+    }
+    findAllSkillDirs(sub, acc, depth + 1)
+  }
+}
+
 /** Collect every skill under a source directory (supports nested category layouts). */
 function importFromDirectory(sourceDir, cacheDir, record) {
   if (!fs.existsSync(sourceDir)) throw new Error(`source directory not found: ${sourceDir}`)
@@ -61,9 +93,40 @@ function importFromDirectory(sourceDir, cacheDir, record) {
   const skillsSub = path.join(sourceDir, 'skills')
   const root = fs.existsSync(skillsSub) && fs.statSync(skillsSub).isDirectory() ? skillsSub : sourceDir
   // 1) Directory-bundle skills at any depth (skills/<name>/ or skills/<cat>/<name>/).
+  //    用「必下钻」版：根自身有 SKILL.md 时仍要找子技能（两者共存，见下）。
   const skillDirs = []
   findSkillDirs(root, skillDirs)
+  const rootHasSkillMd = ['SKILL.md', 'skill.md'].some((f) => fs.existsSync(path.join(sourceDir, f)))
+  if (rootHasSkillMd && root === sourceDir) {
+    // findSkillDirs 会把「根有 SKILL.md」当叶子提前停；共存场景改用必下钻版。
+    const subDirs = []
+    findAllSkillDirs(sourceDir, subDirs)
+    for (const d of subDirs) {
+      if (!skillDirs.some((x) => path.resolve(x) === path.resolve(d))) skillDirs.push(d)
+    }
+  }
+  // Repo-root SKILL.md（如 spine-animation-ai 这种单技能仓库）：目录名是临时
+  // clone 路径（Windows 上是 dsh-skills-xxxx 之类的随机名）—— 直接用会把
+  // 「技能名」变成随机串，每次更新都判定为「新增 + 旧项消失」。改用仓库目录
+  // 名（clone 时就是 repo 名）做稳定 id。
+  const rootSkillMd = ['SKILL.md', 'skill.md'].map((f) => path.join(sourceDir, f)).find((p) => fs.existsSync(p))
+  let rootSkillRecorded = false
+  if (rootSkillMd !== undefined && path.dirname(rootSkillMd) === sourceDir && root === sourceDir) {
+    // 根技能**总是**收录（即使仓库里同时还有别的技能目录——两者可以共存）。
+    const repoName = path.basename(sourceDir.replace(/[\\/]+$/, ''))
+      .replace(/\.git$/, '') || 'skill'
+    // 拷贝时排除子技能目录（它们会按自己的名字单独收录，重复拷进根技能
+    // 目录只会浪费磁盘 + 造成「改一个动两处」的错觉）。
+    const subSkillDirs = new Set(skillDirs.map((d) => path.resolve(d)))
+    copySkillDirSelective(sourceDir, path.join(cacheDir, repoName), (_rel, abs) => !subSkillDirs.has(path.resolve(abs)))
+    record(repoName, fs.readFileSync(rootSkillMd))
+    rootSkillRecorded = true
+  }
+  // 1b) 子目录技能（skills/<name>/、<cat>/<name>/ 或与根技能共存的 <name>/）。
+  //     按各自目录名单独收录；根自身若也在列表里（findSkillDirs 的叶子语义）
+  //     已经按仓库名收过了，跳过。
   for (const dir of skillDirs) {
+    if (root === sourceDir && path.resolve(dir) === path.resolve(sourceDir)) continue
     const name = path.basename(dir)
     if (name.startsWith('.')) continue
     const skillMd = ['SKILL.md', 'skill.md'].map((f) => path.join(dir, f)).find((p) => fs.existsSync(p))
@@ -74,6 +137,9 @@ function importFromDirectory(sourceDir, cacheDir, record) {
   // 2) Flat *.md skills directly under the chosen root.
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (entry.isFile() && entry.name.toLowerCase().endsWith('.md') && entry.name.toLowerCase() !== 'readme.md') {
+      // 根级 SKILL.md 已经按「稳定仓库名」收录过：再当扁平技能收一遍会出现
+      // 同一内容两个名字（repo + SKILL），每次更新都误报变更。
+      if (rootSkillRecorded && path.resolve(path.join(root, entry.name)) === path.resolve(rootSkillMd)) continue
       const data = fs.readFileSync(path.join(root, entry.name))
       fs.mkdirSync(cacheDir, { recursive: true })
       fs.writeFileSync(path.join(cacheDir, entry.name), data)

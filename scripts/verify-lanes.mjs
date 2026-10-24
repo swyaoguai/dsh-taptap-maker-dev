@@ -82,6 +82,10 @@ console.log('\n[4] 额度错误识别（三条链路的原始文本）')
   ok(quotaSignal(new Error('insufficient_balance_error')) === 'insufficient_balance', 'snake_case insufficient_balance')
   ok(quotaSignal(new Error('积分不足，请购买积分')) === 'credit_exhausted', '网页 BGM 中文提示')
   ok(quotaSignal(new Error('你已达到上限')) === 'quota_reached', 'ChatGPT 网页中文提示')
+  // 「今日免费额度已用完」是 ChatGPT 免费档的真实横幅（2026-10-24 报障）：
+  // 之前关键词表匹配不上它 → 账号不轮换、通道不回退。锁进测试防回归。
+  ok(quotaSignal(new Error('今日免费额度已用完，明天再来吧')) === 'credit_exhausted', 'ChatGPT「今日免费额度已用完」横幅')
+  ok(quotaSignal(new Error('免费额度已用完')) === 'credit_exhausted', '「免费额度已用完」简写')
   ok(quotaSignal(new Error('Rate limit reached')) === 'quota_reached', 'rate limit')
   ok(quotaSignal({ status: 429, message: 'too many requests' }) === 'rate_limited', '429 + too many requests')
   ok(quotaSignal(new Error('提示词为空')) === null, '普通错误不被误判成额度问题')

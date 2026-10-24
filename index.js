@@ -339,6 +339,11 @@ function policyText(config, gptLaneOn = true) {
       '**通道顺序由用户定**：设置页「生成通道」卡里可以拖拽排序、逐条开关、以及打开「额度不足自动换通道」；',
       '这些设置对三条链路（生图 / 视频 / BGM）统一生效。**不要替用户改顺序或开关**，',
       '也不要假设「网页一定优先」——先读一下当前顺序再决定走哪条。',
+      '**额度用完时的两层行为（如实告知用户，不要含糊）**：',
+      '  1) 同一通道内的账号轮换（如 ChatGPT 多账号池）默认开启，触配额自动换下一个账号；',
+      '  2) **跨通道切换默认是关的**——网页提示「今日免费额度已用完」之类配额横幅时，',
+      '     若用户没在设置页打开「额度不足自动换通道」，插件会**停下来**列出各通道失败原因，',
+      '     而不是自作主张切到中转站等付费通道。想自动切换需用户自己打开那个开关。',
       '**🚫 绝对禁止私自更换视频模型（视频按秒计费 = 替用户决定花多少钱）**：',
       '用户在设置页「MiniMax」里选了哪个模型，`/taptap-video` 就必须用哪个，一个字都不能改。',
       '即使你觉得「H3-Hailuo-02 更适合首尾帧」「这个模型不支持尾帧」「换成 Max 更便宜」，',
@@ -467,34 +472,58 @@ function policyText(config, gptLaneOn = true) {
   ].join('\n')
 }
 
-/** Seed $DSH_HOME/taptap-maker-dev/image.json from config without clobbering edits. */
+/**
+ * Seed $DSH_HOME/taptap-maker-dev/image.json from the config FORM (config.image.*).
+ *
+ * ⚠️ 仅首次（文件不存在）时 seed：表单值只作为初始值落一次盘。此后一切以
+ * 文件为准 —— 旧逻辑「表单非空就覆盖文件」会让设置页/手改的值在每次重启时
+ * 被表单旧值改回去（用户改了 baseURL → 重启 → 又变回去，典型「设置不生效」）。
+ */
 function seedImageConfig(config, home) {
   const file = imageConfigPath(home)
-  const existing = readJson(file) ?? {}
-  const merged = { ...existing }
-  let changed = false
+  if (fs.existsSync(file)) return file
   const image = config.image ?? {}
-  for (const key of ['baseURL', 'apiKey', 'model', 'size', 'credentialsFile']) {
-    const value = image[key]
-    if (typeof value === 'string' && value.length > 0 && existing[key] !== value) {
-      merged[key] = value
-      changed = true
-    }
-  }
-  if (!fs.existsSync(file)) {
-    // First run: write a template so the user has something to edit.
-    writeJson(file, {
-      _comment: '自定义生图（OpenAI 兼容 /images/generations）。此文件在 $DSH_HOME 下，不在任何 Maker 工作区内。',
-      baseURL: merged.baseURL ?? '',
-      apiKey: merged.apiKey ?? '',
-      model: merged.model ?? '',
-      size: merged.size ?? '1024x1024',
-      credentialsFile: merged.credentialsFile ?? '',
-    })
-    return file
-  }
-  if (changed) writeJson(file, merged)
+  const value = (key, fb = '') => (typeof image[key] === 'string' && image[key].length > 0 ? image[key] : fb)
+  writeJson(file, {
+    _comment: '自定义生图（OpenAI 兼容 /images/generations）。此文件在 $DSH_HOME 下，不在任何 Maker 工作区内。',
+    baseURL: value('baseURL'),
+    apiKey: value('apiKey'),
+    model: value('model'),
+    size: value('size', '1024x1024'),
+    credentialsFile: value('credentialsFile'),
+  })
   return file
+}
+
+/**
+ * Seed minimax.json from the plugin config FORM (config.video.*).
+ *
+ * ⚠️ 为什么必须有这个：设置页有两处 MiniMax 入口 —— schemastery 表单
+ * （config.video，用户在插件配置里填）和 video-minimax 路由（写 minimax.json）。
+ * 之前只有后者落盘：用户在表单里填了 Key/站点/模型后，`videoConfigOf()` 读的
+ * 却是 minimax.json —— 表单值被静默丢弃，表现为「设置了没生效」。
+ * 这里沿用 seedImageConfig 的「不覆盖已有编辑」语义：仅当文件里还是空值时
+ * 才从表单补写，用户在设置页保存过的值永远优先。
+ */
+function seedMinimaxConfig(config, home) {
+  const file = minimaxConfigFileOf(home)
+  // ⚠️ 只在文件**从未存在**（首次运行）时 seed：用户后来在设置页清空 Key 也
+  // 是一种设置，若每次启动都按「空就回填」，表单旧值会把用户删掉的 Key
+  // 复活（实测复现：清空 → 重启 → Key 又回来了）。首次之后一切以文件为准。
+  if (fs.existsSync(file)) return
+  const video = config.video ?? {}
+  const patch = {}
+  for (const key of ['apiKey', 'baseURL', 'model']) {
+    const value = video[key]
+    if (typeof value === 'string' && value.trim().length > 0) patch[key] = value.trim()
+  }
+  if (Object.keys(patch).length === 0) return
+  writeMinimaxConfigPatch(home, patch)
+}
+
+/** minimax.json 的绝对路径（seedMinimaxConfig 用，避免与路由内重复定义漂移）。 */
+function minimaxConfigFileOf(home) {
+  return path.join(dataDir(home), 'minimax.json')
 }
 
 /**
@@ -532,6 +561,8 @@ export function apply(ctx, config = {}) {
     : path.join(cacheDir, 'audio')
   const disabledFile = skillsDisabledPath(home)
   const imageFile = seedImageConfig(config, home)
+  // 表单里填的 MiniMax Key/站点/模型 seed 进 minimax.json（不覆盖设置页保存过的值）。
+  seedMinimaxConfig(config, home)
   ctx.logger?.info?.(`taptap-maker-dev: data=${dataDir(home)} skills-cache=${cacheDir} image-config=${imageFile}`)
 
   // --- 1b. CC0 audio library (lazy: fetched on first audio request) -------
@@ -539,8 +570,15 @@ export function apply(ctx, config = {}) {
   // plugin load stays fast. After that it is fully local and offline.
   let audioReady = false
   let audioEnsuring = null
-  const ensureAudio = async () => {
+  const ensureAudio = async (opts = {}) => {
     if (audioReady) return
+    // 「首次自动下载」是设置项（config.audio.autoEnsure，默认 true）：关掉后
+    // 必须真的不自动拉库 —— 否则用户明确关掉的开关照样联网下载 7MB。
+    // 显式 sync（设置页「更新素材库」按钮 / audio-sync 路由）传 force 跳过该闸。
+    if (audioCfg.autoEnsure === false && opts.force !== true) {
+      throw new Error('设置里已关闭「首次用到时自动下载音频库」（config.audio.autoEnsure=false）。'
+        + '如需启用：设置页点「更新素材库」，或把该开关打开。')
+    }
     if (audioEnsuring !== null) return audioEnsuring
     audioEnsuring = (async () => {
       const result = await ensureLibrary(audioCacheDir)
@@ -996,7 +1034,10 @@ export function apply(ctx, config = {}) {
           }
           const readiness2 = {
             gptWeb: () => readGptLaneEnabled(home),
-            relayImage: () => Boolean(imageCfg.baseURL && imageCfg.apiKey && imageCfg.model),
+            // ⚠️ 必须用 imageCfg2（POST 分支里刚读的那份）：这里曾误引用 GET 分支的
+            // imageCfg，而 POST 分支从未定义它 → 保存即 ReferenceError → 500。
+            // 用户看到的就是「点了保存没反应」，属于最典型的「设置不生效」。
+            relayImage: () => Boolean(imageCfg2.baseURL && imageCfg2.apiKey && imageCfg2.model),
             relay: () => relayReadyForApi(relayCfg),
             minimax: () => Boolean(mmxKey2),
             local: () => true,
@@ -1046,7 +1087,7 @@ export function apply(ctx, config = {}) {
           let parsed
           try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
           // 空 Key = 「不修改」（与生图卡同一惯例）；要清空得显式传 clear: true。
-          const file = path.join(dataDir(home), 'minimax.json')
+          const file = minimaxConfigFileOf(home)
           let patch = {}
           if (typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) patch.apiKey = parsed.apiKey.trim()
           if (typeof parsed.baseURL === 'string' && parsed.baseURL.trim()) patch.baseURL = parsed.baseURL.trim()
@@ -1458,10 +1499,13 @@ export function apply(ctx, config = {}) {
             cacheDir: audioCacheDir,
             ready,
             count: ready ? (readJson(path.join(audioCacheDir, 'index.json'))?.items?.length ?? 0) : 0,
+            // autoEnsure=false 时如实告诉界面：不是坏了，是用户关了自动下载。
+            autoEnsureDisabled: audioCfg.autoEnsure === false,
           })
         }
         if (req.method === 'POST' && sub === 'audio-sync') {
           try {
+            // force: 这是用户在设置页亲手点的「更新素材库」，绕过 autoEnsure 闸。
             const result = await ensureLibrary(audioCacheDir, { force: true })
             audioReady = true
             return sendJson(res, 200, { ok: result.errors.length === 0, count: result.index.length, errors: result.errors })
@@ -2044,6 +2088,7 @@ export function apply(ctx, config = {}) {
                   + '再跑一次时，在弹出的浏览器窗口里手动勾选那个验证框，勾完它会自动继续。'
                 : isQuota
                   ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/taptap-gpt pool list、pool unban），或回退到中转站 /taptap-image。'
+                    + '（若想以后额度用完时自动切到中转站：设置页「生成通道」→ 打开「额度不足时自动换下一条通道」，默认是关的。）'
                   : r.pendingUrl
                     ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /taptap-gpt grab 抓同一个对话即可：${r.pendingUrl}`
                     : (r.hint ?? '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。'),
@@ -2765,7 +2810,9 @@ async function videoCommand(home, rawInput) {
       const kind = (sub === 'last' || sub === '尾帧') ? 'lastFrame' : 'firstFrame'
       if (rest === '') return { kind: 'error', text: `用法：/taptap-video ${sub} <图片路径>` }
       let job = pickVideoJob(home, raw)
-      if (!job) job = createVideoJob(home, undefined)
+      // 自动建作业必须继承设置页模型（createJob 的红线注释：不传就退回内置
+      // 默认 H3，等于替用户换了计费模型）。
+      if (!job) job = createVideoJob(home, undefined, { model: config.model })
       const updated = await setVideoReference(home, job.id, kind, rest)
       const ref = updated.refs[kind]
       const lines = [`已设${kind === 'firstFrame' ? '首帧' : '尾帧'}：${ref.name}（${ref.width}×${ref.height}）→ 作业 ${updated.id}`]
@@ -2776,7 +2823,8 @@ async function videoCommand(home, rawInput) {
     if (sub === 'prompt' || sub === '提示词') {
       if (rest === '') return { kind: 'error', text: '用法：/taptap-video prompt <提示词>' }
       let job = pickVideoJob(home, raw)
-      if (!job) job = createVideoJob(home, undefined)
+      // 同上：自动建作业继承设置页模型，不退回内置默认（视频按秒计费）。
+      if (!job) job = createVideoJob(home, undefined, { model: config.model })
       const updated = saveVideoJob(home, job.id, { prompt: rest })
       return { kind: 'success', text: `已写提示词 → 作业 ${updated.id}:\n  ${rest}\n\n下一步：/taptap-video run` }
     }
@@ -2931,24 +2979,40 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'run' || sub === '跑') {
       let job = pickVideoJob(home, raw)
-      if (!job) job = createVideoJob(home, undefined)
-      if (!config.apiKey) {
+      // 同上：自动建作业继承设置页模型（红线：模型不允许被静默替换）。
+      if (!job) job = createVideoJob(home, undefined, { model: config.model })
+      // ⚠️ 旧逻辑在这里硬性要求 MiniMax Key（config.apiKey），哪怕用户把视频通道
+      // 排成「中转站优先」甚至只开中转站 —— 设置页的排序形同虚设，run 直接报
+      // 「没有可用的 MiniMax Key」。正确做法：中转站就绪就不拦；只有轮到
+      // MiniMax 提交时才会由 submitJobVideo/resolveBackend 如实报错。
+      const relayReady = relayReadyForApi(config.relay)
+      if (!config.apiKey && !relayReady) {
         const found = discoverMinimaxKey(home)
         return {
           kind: 'error',
           text: [
-            '没有可用的 MiniMax Key。',
+            '没有可用的视频提交通道：MiniMax 无 Key，中转站也未配置。',
             found.found ? `发现 ${found.source} 的登录态（${found.keyPrefix}），但插件配置里是空的 —— 在设置页「视频生成」点保存采用，或设环境变量 MINIMAX_API_KEY。` : '',
-            '先跑 /taptap-video doctor 看看还能缺什么。',
+            '配好任意一条即可：设置页「视频中转站」或「MiniMax」。',
+            '先跑 /taptap-video doctor 看看还缺什么。',
           ].filter(Boolean).join('\n'),
         }
       }
-      const cost = estimateCostCny(config.model)
+      // 旧的 estimateCostCny(config.model) 传参错误已修：价格现在按实际提交的
+      // 模型（下方 usedModel）计算，中转站后端不套官方单价表。
       const submitted = await submitJobVideo(home, job.id, config, { rawInput: raw })
+      // 回显**实际提交**的模型（submitted.job.video.model）：中转站后端会用自己的
+      // 模型名覆盖，旧写法回显 job.settings.model 会让用户以为走的是另一个模型
+      // —— 视频按秒计费，「显示的模型」必须与「实际扣费的模型」一致。
+      const usedModel = submitted?.job?.video?.model ?? job.settings.model
+      const usedBackend = submitted?.backend === 'relay' ? '中转站' : submitted?.backend === 'minimax' ? 'MiniMax' : ''
+      const costFor = (m) => estimateCostCny({ model: m, duration: job.settings.duration, resolution: job.settings.resolution })
+      const cost = usedBackend === '中转站' ? null : costFor(usedModel)
       return {
         kind: 'success',
         text: [
-          `已提交视频任务 ${submitted.taskId}（${job.settings.model} · ${job.settings.resolution} · ${job.settings.duration}s${cost ? ` · 约 ¥${estimateCostCny({ model: job.settings.model, duration: job.settings.duration, resolution: job.settings.resolution })}` : ''}）`,
+          `已提交视频任务 ${submitted.taskId}（${usedBackend ? `${usedBackend} · ` : ''}${usedModel} · ${job.settings.resolution} · ${job.settings.duration}s${cost ? ` · 约 ¥${cost}` : ''}）`,
+          ...(usedBackend === '中转站' ? ['（中转站按它自己的计费口径结算，官方单价表不适用）'] : []),
           '',
           '生成通常要 1~6 分钟。接下来：',
           '  /taptap-video poll    查进度（可以反复调，进程重启也能接着查）',

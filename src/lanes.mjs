@@ -243,8 +243,11 @@ export function quotaSignal(err) {
   const signals = [
     [/1008/, 'minimax_1008'],
     [/insufficient[_ ]?balance/i, 'insufficient_balance'],
-    [/积分不足|余额不足|额度不足|积分已用完|额度已用完|余额已用完|积分不够/, 'credit_exhausted'],
-    [/达到上限|已达上限|limit reached|quota/i, 'quota_reached'],
+    // 「今日免费额度已用完」是 ChatGPT 网页免费档的准确横幅文案（2026-10-24
+    // 用户实测报障）：之前的关键词表只有「达到上限」，完全匹配不上 → 统一的
+    // quotaSignal 认不出来，回退逻辑永远不会被触发。
+    [/积分不足|余额不足|额度不足|积分已用完|额度已用完|余额已用完|积分不够|免费额度已用完|今日额度/, 'credit_exhausted'],
+    [/达到上限|已达上限|用量已达上限|limit reached|quota/i, 'quota_reached'],
     [/rate[\s_-]?limit|too many requests|1002/i, 'rate_limited'],
   ]
   for (const [re, name] of signals) if (re.test(text)) return name

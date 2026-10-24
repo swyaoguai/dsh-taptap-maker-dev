@@ -105,6 +105,22 @@ console.log('\n[5] 同一套规则覆盖到视频中转站配置')
   ok(/patch\.clear === true/.test(fn), '支持 clear:true 显式清空')
 }
 
+console.log('\n[6] 表单 seed 只在首次落盘（清空/改过不被表单旧值复活）')
+{
+  // seed 的语义：config 表单值仅当目标文件**不存在**时写入一次。之后无论
+  // 表单里留着什么旧值，都不能把用户已保存/清空的设置改回去。
+  // （修复前：minimax 的 Key 被用户清空后，重启即被表单旧值复活；image 的
+  //   baseURL 每次启动都被表单值覆盖 —— 都是「设置不生效」的实锤。）
+  const src = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const seedImage = /function seedImageConfig[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
+  ok(seedImage.length > 0, '能找到 seedImageConfig')
+  ok(/existsSync\(file\)\s*\)\s*return file/.test(seedImage), 'image seed：文件已存在时直接返回（不覆盖）')
+  ok(!/existing\[key\] !== value/.test(seedImage), 'image seed：不再按表单值覆盖已保存的配置')
+  const seedMinimax = /function seedMinimaxConfig[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
+  ok(seedMinimax.length > 0, '能找到 seedMinimaxConfig')
+  ok(/existsSync\(file\)\s*\)\s*return/.test(seedMinimax), 'minimax seed：文件已存在时直接返回（清空的 Key 不会被复活）')
+}
+
 fs.rmSync(scratch, { recursive: true, force: true })
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

@@ -5,3 +5,4 @@ node_modules/
 skills-cache/
 *.tgz
 .DS_Store
+imgs/
