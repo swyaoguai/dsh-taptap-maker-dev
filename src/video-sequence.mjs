@@ -796,24 +796,32 @@ export async function pollJobVideo(home, id, config) {
   const backend = job.video.backend === 'relay' ? 'relay' : 'minimax'
   const model = job.video.model || job.settings.model
   let query
-  try {
-    query = backend === 'relay'
-      ? await relayQuery(config.relay, taskId)
-      : await queryVideo({ baseUrl: config.baseURL, apiKey: config.apiKey, model, taskId, timeoutMs: 60_000 })
-  } catch (error) {
-    // 单次查询失败 ≠ 任务失败，保留 running 让下一轮重试。
-    // ⚠️ 轮询本身**不会**再花钱（只是查状态），所以这里可以放心重试；
-    //    但要提醒别查太密：限流（RPM）下高频轮询容易把自己搞得更慢。
-    const fresh = getJob(home, id)
-    const status = Number(error?.status ?? 0)
-    const rateLimited = status === 429 || /1002|rate limit|too many requests/i.test(String(error?.message ?? ''))
-    fresh.video = {
-      ...fresh.video,
-      remoteStatus: rateLimited ? '查询被限流，等一会儿再查（不会额外扣费）' : `查询异常：${error?.message ?? error}`,
-      pollHint: rateLimited ? 'M Plan 档的 RPM 限制比按量付费紧。建议隔 30~60 秒再 poll 一次。' : undefined,
-      updatedAt: Date.now(),
+  // 上一轮「已生成、下载失败」：任务状态已知成功，跳过重复查询，直接重试下载。
+  // （查询免费但没必要——中转站还可能限流。）
+  if (job.video.downloadFailedAt && job.video.downloadHint) {
+    let hint = {}
+    try { hint = JSON.parse(job.video.downloadHint) } catch { hint = {} }
+    query = { status: 'succeeded', remoteStatus: '已生成（重试下载）', ...hint }
+  } else {
+    try {
+      query = backend === 'relay'
+        ? await relayQuery(config.relay, taskId)
+        : await queryVideo({ baseUrl: config.baseURL, apiKey: config.apiKey, model, taskId, timeoutMs: 60_000 })
+    } catch (error) {
+      // 单次查询失败 ≠ 任务失败，保留 running 让下一轮重试。
+      // ⚠️ 轮询本身**不会**再花钱（只是查状态），所以这里可以放心重试；
+      //    但要提醒别查太密：限流（RPM）下高频轮询容易把自己搞得更慢。
+      const fresh = getJob(home, id)
+      const status = Number(error?.status ?? 0)
+      const rateLimited = status === 429 || /1002|rate limit|too many requests/i.test(String(error?.message ?? ''))
+      fresh.video = {
+        ...fresh.video,
+        remoteStatus: rateLimited ? '查询被限流，等一会儿再查（不会额外扣费）' : `查询异常：${error?.message ?? error}`,
+        pollHint: rateLimited ? 'M Plan 档的 RPM 限制比按量付费紧。建议隔 30~60 秒再 poll 一次。' : undefined,
+        updatedAt: Date.now(),
+      }
+      return writeVideoJob(home, fresh)
     }
-    return writeVideoJob(home, fresh)
   }
   const fresh = getJob(home, id)
   if (query.status === 'failed') {
@@ -827,17 +835,40 @@ export async function pollJobVideo(home, id, config) {
     return writeVideoJob(home, fresh)
   }
   let bytes
-  if (backend === 'relay') {
-    bytes = await relayDownload(config.relay, taskId, query, 300_000)
-  } else {
-    // 成功：v2 直接有地址；v1 要先拿 file_id 换一次下载地址。
-    const url = query.videoUrl
-      ?? (query.fileId ? await retrieveFile({ baseUrl: config.baseURL, apiKey: config.apiKey, model, fileId: query.fileId, timeoutMs: 60_000 }) : undefined)
-    if (!url) {
-      fresh.video = { ...fresh.video, status: 'error', error: '任务已成功，但响应里没有视频地址', updatedAt: Date.now() }
-      return writeVideoJob(home, fresh)
+  try {
+    if (backend === 'relay') {
+      bytes = await relayDownload(config.relay, taskId, query, 300_000)
+    } else {
+      // 成功：v2 直接有地址；v1 要先拿 file_id 换一次下载地址。
+      const url = query.videoUrl
+        ?? (query.fileId ? await retrieveFile({ baseUrl: config.baseURL, apiKey: config.apiKey, model, fileId: query.fileId, timeoutMs: 60_000 }) : undefined)
+      if (!url) {
+        fresh.video = { ...fresh.video, status: 'error', error: '任务已成功，但响应里没有视频地址', updatedAt: Date.now() }
+        return writeVideoJob(home, fresh)
+      }
+      bytes = await downloadVideo(url, 300_000)
     }
-    bytes = await downloadVideo(url, 300_000)
+  } catch (error) {
+    // ⚠️ 下载失败绝不能抛出：任务**已经成功**、视频还在云端（不重下不扣费），
+    //    抛出去会让作业卡在 running + 台账停在 inflight（用户看到「结果未知」
+    //    可能误判成提交失败而重投 —— 那才是真烧钱）。记一个明确的
+    //    「succeeded_awaiting_download」状态，下次 poll 免查直接重试下载。
+    const fresh2 = getJob(home, id)
+    fresh2.video = {
+      ...fresh2.video,
+      status: 'running',
+      remoteStatus: '已生成，下载失败（视频还在云端，重试即可，不额外扣费）',
+      downloadError: error?.message ?? String(error),
+      downloadFailedAt: Date.now(),
+      updatedAt: Date.now(),
+    }
+    log(fresh2, 'warn', `视频已生成但下载失败（${error?.message ?? error}）；再跑一次 /taptap-video poll 会直接重试下载，不扣费`)
+    // 记下下载线索，短路径重试时不用重新查询就能拿到地址。
+    fresh2.video.downloadHint = backend === 'relay'
+      ? JSON.stringify({ directUrl: query.directUrl, contentUrl: query.contentUrl })
+      : JSON.stringify({ fileId: query.fileId })
+    clearSubmitLedger(home) // 任务确认成功，台账的「结果未知」已解除
+    return writeVideoJob(home, fresh2)
   }
   const target = 'videos/output.mp4'
   writeFileSync(absPath(home, id, target), bytes)

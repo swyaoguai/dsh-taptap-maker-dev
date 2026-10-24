@@ -46,7 +46,13 @@ console.log('\n[2] semver 比较（三段都比）')
   ok(compareVersions('0.2.9', '0.2.10') === -1, '⚠ patch 按数值比：0.2.9 < 0.2.10（字符串比会错判成大于）')
   ok(compareVersions('0.2.0', '0.2.9') === -1, '0.2.0 < 0.2.9')
   ok(compareVersions('1.0.0', '0.9.9') === 1, 'major 更大 → 1')
-  ok(compareVersions('0.2.0-beta', '0.2.0') === 0, '带后缀的版本不崩溃（0.2.0-beta 数值上等于 0.2.0，够用）')
+  // 2026-10-25：prerelease 语义修正——parseInt 曾把 `0-beta` 吞成 0，导致
+  // 1.0.0-beta vs 1.0.0 判成相等，正式版发布后用户收不到更新提示。
+  // 现在：带后缀 < 不带后缀；两边都带按字符串比。
+  ok(compareVersions('0.2.0-beta', '0.2.0') === -1, 'prerelease < 正式版（0.2.0-beta < 0.2.0）')
+  ok(compareVersions('0.2.0', '0.2.0-beta') === 1, '正式版 > prerelease')
+  ok(compareVersions('0.2.0-alpha', '0.2.0-beta') === -1, '两边都带后缀按字符串比')
+  ok(compareVersions('1.0.0-beta', '1.0.0') === -1, '1.0.0-beta < 1.0.0（正式版发布必须触发更新提示）')
   ok(compareVersions(undefined, '1.0.0') === -1, 'undefined 输入安全（视为 0.0.0）')
   ok(compareVersions('', '') === 0, '空串对空串 → 0')
 }

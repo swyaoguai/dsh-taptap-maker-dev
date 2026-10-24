@@ -35,24 +35,42 @@ export function currentVersion() {
  * 完整 semver 比较。返回 -1（a < b）/ 0（相等）/ 1（a > b）。
  *
  * ⚠️ 必须三段都比：只比 major.minor 的话，0.2.10 vs 0.2.9 会判成相等，
- * 用户就收不到补丁版本的更新提示。非数字段（如 -beta 后缀）按字符串处理，
- * 数字段按数值比 —— 简单场景够用，不做完整 semver 规范实现。
+ * 用户就收不到补丁版本的更新提示。
+ *
+ * prerelease 处理（`-beta` / `-rc.1` 后缀）：parseInt 会把 `0-beta` 静默解析
+ * 成 0，导致 1.0.0-beta vs 1.0.0 判成相等 —— 正式版发布后用户收不到更新。
+ * 语义：带 prerelease 的一方**小于**不带的一方；两边都带则按字符串比。
  */
 export function compareVersions(a, b) {
-  const pa = String(a ?? '').split('.')
-  const pb = String(b ?? '').split('.')
+  const splitVer = (v) => {
+    const s = String(v ?? '').replace(/^v/i, '').trim()
+    const dash = s.indexOf('-')
+    return dash < 0 ? { core: s, pre: '' } : { core: s.slice(0, dash), pre: s.slice(dash + 1) }
+  }
+  const A = splitVer(a)
+  const B = splitVer(b)
+  const pa = A.core.split('.')
+  const pb = B.core.split('.')
   const len = Math.max(pa.length, pb.length)
   for (let i = 0; i < len; i += 1) {
     const na = Number.parseInt(pa[i] ?? '0', 10)
     const nb = Number.parseInt(pb[i] ?? '0', 10)
-    // 两边都是纯数字段 → 按数值比（10 > 9）；否则按字符串比。
-    if (Number.isFinite(na) && Number.isFinite(nb)) {
+    const pureA = Number.isFinite(na) && String(pa[i] ?? '0') === String(na)
+    const pureB = Number.isFinite(nb) && String(pb[i] ?? '0') === String(nb)
+    if (pureA && pureB) {
       if (na !== nb) return na < nb ? -1 : 1
     } else {
+      // 混入非数字段（异常版本串）按字符串比，避免吞差异。
       const sa = pa[i] ?? ''
       const sb = pb[i] ?? ''
       if (sa !== sb) return sa < sb ? -1 : 1
     }
+  }
+  // 核心版本相等 → 比 prerelease：无后缀 > 有后缀；都有则字符串比。
+  if (A.pre !== B.pre) {
+    if (A.pre === '') return 1
+    if (B.pre === '') return -1
+    return A.pre < B.pre ? -1 : A.pre > B.pre ? 1 : 0
   }
   return 0
 }
