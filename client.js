@@ -1512,8 +1512,8 @@ window.__ModuleLoader__.load({
           placeholder: 'https://your-endpoint/v1', hint: '填到 /v1 这层，代码会自动拼 /images/generations（获取模型用 /models）。',
         }),
         h(LabeledInput, {
-          label: 'API Key', value: form.apiKey, onChange: (v) => set('apiKey', v), secret: true,
-          placeholder: 'sk-...', hint: '仅保存在本机 image.json。',
+          label: 'API Key（留空 = 不修改）', value: form.apiKey, onChange: (v) => set('apiKey', v), secret: true,
+          placeholder: 'sk-...', hint: '仅保存在本机 image.json。已保存的 Key 不回显明文；换 Key 直接粘贴新的即可。',
         }),
         h('div', { style: S.row },
           h('label', { style: S.label }, 'Model'),
@@ -1878,7 +1878,11 @@ window.__ModuleLoader__.load({
             label: 'Base URL', value: relay.baseURL || '', onChange: (v) => setR('baseURL', v),
             placeholder: 'https://your-relay.example.com/v1', hint: '填到 /v1 这层即可，粘整条 /videos 路径也会自动收敛。',
           }),
-          h(LabeledInput, { label: 'API Key', value: relay.apiKey || '', onChange: (v) => setR('apiKey', v), secret: true, placeholder: 'sk-...', hint: '仅保存在本机 video-relay.json。' }),
+          h(LabeledInput, {
+            label: 'API Key（留空 = 不修改）', value: relay.apiKey || '', onChange: (v) => setR('apiKey', v), secret: true,
+            placeholder: backends.relay ? '已配置（留空保持不变）' : 'sk-...',
+            hint: '仅保存在本机 video-relay.json。已保存的 Key 不回显明文；换 Key 直接粘贴新的即可。',
+          }),
           h('div', { style: S.row },
             h('label', { style: S.label }, '模型'),
             h('input', {

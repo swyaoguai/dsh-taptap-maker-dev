@@ -74,6 +74,9 @@ console.log('\n[1] 既有路由没被改坏')
   ok(p.status === 200 && typeof p.json.blockCreditTools === 'boolean', 'GET /policy 正常')
   const i = await req('GET', 'image')
   ok(i.status === 200 && typeof i.json.baseURL === 'string', 'GET /image 正常')
+  // 2026-10-24：GET /image 与 GET /video-relay 都曾把 Key 明文回显给浏览器
+  // （POST 不回显、GET 回显 = 同一路由自相矛盾）。GET 现在回掩码。
+  ok(!JSON.stringify(i.json).includes('sk-precious-key'), 'GET /image 不回显 Key 明文（回掩码）')
 }
 
 console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默清空的老 bug）')
@@ -106,6 +109,26 @@ console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默�
   ok(relayRaw.apiKey === 'sk-relay-keep', '只改 model 时中转站 Key 没被清空', relayRaw.apiKey)
   ok(relayRaw.model === 'vid-2', '中转站 model 已更新')
   ok(d.status === 200, '保存返回 200')
+
+  // GET /video-relay 同样不回显明文 + 掩码回传不被当成真 Key 存盘
+  const g2 = await req('GET', 'video-relay')
+  ok(!JSON.stringify(g2.json).includes('sk-relay-keep'), 'GET /video-relay 不回显 Key 明文（回掩码）')
+  const masked = g2.json.relay.apiKey
+  ok(typeof masked === 'string' && masked.includes('…'), `GET 回的是掩码形态（${masked}）`)
+  const e = await req('POST', 'video-relay', { ...g2.json.relay, model: 'vid-3' })
+  ok(e.status === 200, '设置页整表单回传（含掩码 Key）返回 200')
+  const relayRaw2 = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'video-relay.json'), 'utf8'))
+  ok(relayRaw2.apiKey === 'sk-relay-keep', '掩码被识别为「未修改」，磁盘 Key 仍是真值', relayRaw2.apiKey)
+  ok(relayRaw2.model === 'vid-3', '掩码回传时 model 照常更新')
+
+  // 生图卡同款掩码往返
+  const f1 = await req('GET', 'image')
+  const maskedImg = f1.json.apiKey
+  ok(typeof maskedImg === 'string' && maskedImg.includes('…'), `GET /image 回掩码（${maskedImg}）`)
+  const f2 = await req('POST', 'image', { ...f1.json, model: 'gpt-image-x' })
+  const imgRaw2 = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'image.json'), 'utf8'))
+  ok(imgRaw2.apiKey === 'sk-precious-key', '生图卡掩码回传后 Key 仍是真值')
+  ok(imgRaw2.model === 'gpt-image-x', '生图卡掩码回传时 model 照常更新')
 }
 
 console.log('\n[2] POST /video-minimax（设置页 MiniMax 配置卡）')

@@ -35,7 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, maskSecret, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
   getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
@@ -830,7 +830,9 @@ export function apply(ctx, config = {}) {
           return sendJson(res, 200, {
             ok: true,
             baseURL: raw.baseURL ?? '',
-            apiKey: raw.apiKey ?? '',
+            // ⚠️ Key 与 video-relay / video-minimax 同一约定：不回显明文给浏览器。
+            // 客户端原样提交掩码串时由 POST 路由识别为「未修改」。
+            apiKey: maskSecret(raw.apiKey ?? ''),
             model: raw.model ?? '',
             size: raw.size ?? '1024x1024',
             credentialsFile: raw.credentialsFile ?? '',
@@ -840,6 +842,12 @@ export function apply(ctx, config = {}) {
           const body = await readBody(req)
           let parsed
           try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          // GET 回的是掩码 Key；设置页整表单回传时 apiKey 就是掩码串 ——
+          // 识别为「未修改」（归入空串=不修改），否则掩码会被当成真 Key 存盘。
+          const savedImage = readImageConfigRaw(home)
+          if (typeof parsed.apiKey === 'string' && parsed.apiKey.trim() !== '' && parsed.apiKey === maskSecret(savedImage.apiKey ?? '')) {
+            parsed.apiKey = ''
+          }
           const merged = writeImageConfigPatch(home, {
             baseURL: typeof parsed.baseURL === 'string' ? parsed.baseURL.trim() : undefined,
             apiKey: typeof parsed.apiKey === 'string' ? parsed.apiKey.trim() : undefined,
@@ -865,7 +873,15 @@ export function apply(ctx, config = {}) {
           const mmxKey = mmx.apiKey || (process.env.MINIMAX_API_KEY ?? '').trim()
           return sendJson(res, 200, {
             ok: true,
-            relay: cfg,
+            relay: {
+              ...cfg,
+              // ⚠️ 与 video-minimax / 生图卡同一安全约定：Key 绝不回显明文给浏览器。
+              // 之前这里把 sk-secret 原样发出去（同一设置页三种 Key 三种待遇）。
+              // 客户端提交时 apiKey 为空串 → writeVideoRelayConfigPatch 的
+              // 「空串=不修改」保住已存的 Key；要清空走 clear: true。
+              apiKey: maskSecret(cfg.apiKey),
+            },
+            hasApiKey: Boolean(cfg.apiKey),
             protocols: RELAY_PROTOCOLS,
             minimax: {
               keyKind: detectKeyKind(mmxKey),
@@ -886,6 +902,13 @@ export function apply(ctx, config = {}) {
           const body = await readBody(req)
           let parsed
           try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          // GET 现在只回掩码 Key（不回显明文）；客户端把整个表单原样提交回来时
+          // apiKey 可能就是那个掩码串 —— 必须识别为「未修改」，否则会把
+          // `sk-se…2345` 这种掩码当成真 Key 存进去（设置当场坏掉）。
+          const savedBefore = normalizeRelayConfig(readVideoRelayConfigRaw(home))
+          if (typeof parsed.apiKey === 'string' && parsed.apiKey.trim() !== '' && parsed.apiKey === maskSecret(savedBefore.apiKey)) {
+            parsed.apiKey = '' // 归入「空串=不修改」的既有语义
+          }
           const patch = {}
           for (const key of ['protocol', 'baseURL', 'apiKey', 'model', 'size', 'ratio', 'referenceStyle', 'assetUploadPath', 'submitMethod', 'submitPath', 'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader', 'authPrefix', 'extraQuery', 'extraBody']) {
             if (typeof parsed[key] === 'string') patch[key] = parsed[key]
@@ -905,7 +928,7 @@ export function apply(ctx, config = {}) {
           const mmxKey = (readMinimaxConfigRaw(home).apiKey || (process.env.MINIMAX_API_KEY ?? '')).trim()
           return sendJson(res, 200, {
             ok: true,
-            relay: cfg,
+            relay: { ...cfg, apiKey: maskSecret(cfg.apiKey) }, // POST 响应同样不回显明文
             backends: {
               relay: Boolean(cfg.enabled && cfg.baseURL && cfg.apiKey && cfg.model),
               minimax: Boolean(mmxKey),
