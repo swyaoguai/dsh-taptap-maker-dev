@@ -519,10 +519,34 @@ return result`
  *
  * Returns the cookie name, or null.
  */
+// Cookie-status cache keyed by (mtimeMs, size): the settings page polls
+// GET /bgm every few seconds while a login window is open, and each poll
+// used to copy + sqlite-scan the whole cookie DB synchronously on the host
+// event loop (with PowerShell/esentutl fallback spawns when Chromium held
+// the file) — that polling loop was the 「添加账号卡顿」. The DB only
+// changes when Chromium flushes, so a stat match safely reuses the verdict.
+const authCookieCache = new Map() // cookieFile -> { statMs, statSize, result }
+
 function findAuthCookie(cookieFile) {
   if (!cookieFile) return null
+  try {
+    const stat = fs.statSync(cookieFile)
+    const cached = authCookieCache.get(cookieFile)
+    if (cached && cached.statMs === stat.mtimeMs && cached.statSize === stat.size) {
+      return cached.result
+    }
+    const result = findAuthCookieUncached(cookieFile)
+    authCookieCache.set(cookieFile, { statMs: stat.mtimeMs, statSize: stat.size, result })
+    return result
+  } catch {
+    return findAuthCookieUncached(cookieFile)
+  }
+}
+
+function findAuthCookieUncached(cookieFile) {
+  if (!cookieFile) return null
   const AUTH_NAMES = ['_token', 'token', 'session', 'access_token', 'Authorization']
-  const tmp = path.join(os.tmpdir(), `ckprobe-${process.pid}-${Date.now()}.db`)
+  const tmp = path.join(os.tmpdir(), `ckprobe-${process.pid}.db`)
   try {
     // Chromium opens the cookie DB with an exclusive lock, so a plain
     // copyFileSync/readFileSync throws EBUSY whenever the browser is running —

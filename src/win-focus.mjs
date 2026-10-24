@@ -56,10 +56,17 @@ function runPowerShell(script) {
   }
 }
 
-/** 把窗口句柄恢复到前台。 */
+/**
+ * Add-Type 每次调用都要起 csc 编译一遍 C#（数百毫秒的 CPU）。focusBrowserWindow
+ * 的重试循环以前每 700ms 完整跑一次「查找 + 编译 + 置前」，登录窗口存在期间
+ * 这段编译开销一直在烧 CPU、抢正要启动的浏览器的资源（「添加账号卡顿」的
+ * 另一半）。把「编译」与「置前」拆成两次调用，编译一次进程内复用。
+ */
+let focusTypeCompiled = false
+
+/** 把窗口句柄恢复到前台（首次调用时编译 Add-Type，之后复用）。 */
 function focusHandle(handle) {
-  const script = `
-$ErrorActionPreference = 0
+  const compile = focusTypeCompiled ? '' : `
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -74,6 +81,10 @@ public class DshFocus {
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
 }
 "@
+`
+  const script = `
+$ErrorActionPreference = 0
+${compile}
 $target = [IntPtr]${handle}
 if ($target -eq [IntPtr]::Zero) { exit 0 }
 $dll = [DshFocus]
@@ -91,6 +102,9 @@ if ($fgThread -ne 0 -and $fgThread -ne $curThread) { $dll::AttachThreadInput($cu
 if ($ok) { Write-Output "FOCUSED" }
 `
   const out = runPowerShell(script)
+  if (!focusTypeCompiled) focusTypeCompiled = /FOCUSED|False/.test(out ?? '') || out !== null
+  // 编译过一次后本进程内不再重复编译（不同 powershell 进程各有自己的缓存，
+  // 这里的标记只是避免重复下发编译文本）。
   return /FOCUSED/.test(out ?? '')
 }
 
@@ -100,17 +114,24 @@ if ($ok) { Write-Output "FOCUSED" }
  * 浏览器启动要几秒（实测约 7 秒才出现窗口），一次性调用很可能扑空 ——
  * 所以这里按间隔重试一段时间。
  *
+ * 间隔做成**渐进退避**（700ms 起步，逐次 ×1.5 封顶 3s）：窗口出现前每轮都是
+ * 「查一遍进程 + 空手而归」，固定 700ms 意味着 30 秒窗口期要跑 ~40 次
+ * PowerShell 子进程 —— 恰好撞上浏览器正在冷启动抢 CPU 的阶段（「添加账号
+ * 卡顿」的另一半）。成功即返回，所以正常路径只跑 1~2 次。
+ *
  * @param {string} needle profile 路径
  * @param {{timeoutMs?: number, intervalMs?: number}} [opts]
  * @returns {Promise<boolean>} 是否成功置前过
  */
 export async function focusBrowserWindow(needle, { timeoutMs = 30000, intervalMs = 700 } = {}) {
   const deadline = Date.now() + timeoutMs
+  let wait = Math.max(200, intervalMs)
   while (Date.now() < deadline) {
     try {
       if (focusWindowByCmdline(needle)) return true
     } catch { /* 忽略，继续轮询 */ }
-    await new Promise((r) => setTimeout(r, intervalMs))
+    await new Promise((r) => setTimeout(r, wait))
+    wait = Math.min(3000, Math.round(wait * 1.5))
   }
   return false
 }

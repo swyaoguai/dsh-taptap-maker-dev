@@ -254,9 +254,16 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
 }
 
 /**
- * Report whether a saved GPT session exists, using Node's built-in sqlite to
- * read the cookie DB (the CN-free approach verified in the BGM lane).
+ * Cookie-status cache: reading the cookie DB means copy-the-whole-file +
+ * sqlite full scan — synchronously on the DSH host event loop. The settings
+ * page polls GET /gpt every 3s while waiting for a login (up to 60 rounds ×
+ * every pool account), and each round froze the host for the duration of
+ * those scans — that was the 「添加账号卡顿」. The DB only changes when
+ * Chromium flushes it, so keying on (mtimeMs, size) is safe: same stat →
+ * reuse the previous verdict; changed → re-read once and re-cache.
  */
+const cookieStatusCache = new Map() // cookieFile -> { statMs, statSize, loggedIn, sample }
+
 /**
  * Report login state for ONE profile directory (or the default one).
  * `accountId` selects a pool account's isolated profile.
@@ -275,22 +282,34 @@ export function statusFor(dshHome, accountId) {
   let sample = null
   if (cookieFile) {
     try {
-      const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
-      const tmp = path.join(os.tmpdir(), `gptck-${process.pid}-${Date.now()}.db`)
-      fs.writeFileSync(tmp, fs.readFileSync(cookieFile))
-      try {
-        const db = new DatabaseSync(tmp)
-        const names = db.prepare('SELECT name FROM cookies').all().map((r) => r.name)
-        db.close()
-        // ONLY the next-auth session token proves a login. Everything else in
-        // this jar (ajs_anonymous_id, oai-dm, _puid) is set for ANONYMOUS
-        // visitors too — verified with a real cookie DB on 2026-10-17, after
-        // the settings page wrongly showed 「已登录」 when the user closed the
-        // login window mid-verification.
-        const hit = names.find((n) => n.startsWith('__Secure-next-auth.session-token'))
-        if (hit) { loggedIn = true; sample = hit }
-      } finally {
-        fs.rmSync(tmp, { force: true })
+      // Cache key = cookie DB stat. While the user is mid-login the DB does
+      // change (Chromium flushes periodically), so this still picks the login
+      // up within one poll cycle — but idle polling (the common case during
+      // 「添加账号」) no longer re-scans anything.
+      const stat = fs.statSync(cookieFile)
+      const cached = cookieStatusCache.get(cookieFile)
+      if (cached && cached.statMs === stat.mtimeMs && cached.statSize === stat.size) {
+        loggedIn = cached.loggedIn
+        sample = cached.sample
+      } else {
+        const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
+        const tmp = path.join(os.tmpdir(), `gptck-${process.pid}.db`)
+        fs.writeFileSync(tmp, fs.readFileSync(cookieFile))
+        try {
+          const db = new DatabaseSync(tmp)
+          const names = db.prepare('SELECT name FROM cookies').all().map((r) => r.name)
+          db.close()
+          // ONLY the next-auth session token proves a login. Everything else in
+          // this jar (ajs_anonymous_id, oai-dm, _puid) is set for ANONYMOUS
+          // visitors too — verified with a real cookie DB on 2026-10-17, after
+          // the settings page wrongly showed 「已登录」 when the user closed the
+          // login window mid-verification.
+          const hit = names.find((n) => n.startsWith('__Secure-next-auth.session-token'))
+          if (hit) { loggedIn = true; sample = hit }
+          cookieStatusCache.set(cookieFile, { statMs: stat.mtimeMs, statSize: stat.size, loggedIn, sample })
+        } finally {
+          fs.rmSync(tmp, { force: true })
+        }
       }
     } catch {
       // DB unreadable → fall back to a size heuristic, but cap it at "maybe":
