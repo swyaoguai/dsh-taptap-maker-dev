@@ -1481,7 +1481,10 @@ export function apply(ctx, config = {}) {
             if (full !== null && end > full) end = full
             if (end - start < 1) return sendJson(res, 400, { ok: false, error: '裁剪区间太短（至少 1 秒）' })
           }
-          const wantFade = p.fade !== false
+          // 「淡入淡出」开关只对**裁剪**有意义（避免裁剪点爆音）；「原样导入」
+          // 的承诺是不动内容 —— 之前 import 分支也无条件加 fade，文件被悄悄改了
+          // 首尾 0.3/0.5 秒的音量，与「原样」二字矛盾。
+          const wantFade = isTrim && p.fade !== false
           const base = path.basename(abs, path.extname(abs))
           try {
             // 1) cut + convert into a temp wav (no Maker credits; pure ffmpeg)

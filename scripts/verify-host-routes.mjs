@@ -258,6 +258,18 @@ console.log('\n[6] 未知路由仍然 404（没有把用户页面挂死）')
   ok(n.status === 404, `未知子路径返回 404（实际 ${n.status}）`)
 }
 
+console.log('\n[7] BGM 工作台：fade 只属于裁剪，原样导入不动内容')
+{
+  // 2026-10-24：「原样导入」分支也无条件加 fade-in/out，与按钮承诺的
+  // 「原样」矛盾（文件首尾 0.3/0.5 秒被悄悄压低）。锁死：wantFade 依赖 isTrim。
+  const src = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const route = /const wantFade = (.*?)(?:\n)/.exec(src)?.[1] ?? ''
+  ok(route.includes('isTrim'), `wantFade 依赖 isTrim（实际：${route.trim()}）`)
+  // 且 trim 分支的校验（区间太短/无效）仍存在
+  ok(src.includes('裁剪区间太短'), 'trim 区间下限校验仍在')
+  ok(src.includes('裁剪区间无效'), 'trim 区间有效性校验仍在')
+}
+
 server.close()
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exitCode = failed === 0 ? 0 : 1
