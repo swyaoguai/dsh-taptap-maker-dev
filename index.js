@@ -2456,7 +2456,9 @@ export function apply(ctx, config = {}) {
           if (argNames.length === 0) return { kind: 'error', text: '用法：/taptap-skills disable <skill名> [更多名…]' }
           // 禁用表是用户维护的清单：AI 觉得「这个 skill 没用了」就把用户的选择改掉，
           // 是越权。要禁用得他明说（带 --yes 或自己点名）。
-          const gate = guardUserSetting('lanes.enabled', { rawInput, from: '当前禁用表', to: `额外禁用 ${argNames.join('、')}` })
+          // ⚠️ 这里曾误传 { rawInput }（handler 里的变量叫 raw）→ undefined →
+          // 守卫永远不放行，连 disable --yes 都被拦死（防呆变成堵死）。
+          const gate = guardUserSetting('lanes.enabled', { rawInput: raw, from: '当前禁用表', to: `额外禁用 ${argNames.join('、')}` })
           if (!gate.ok) {
             return { kind: 'error', text: `${gate.text}\n\n（如果确实要禁用这些，请加 --yes 或自己点名要求。）` }
           }
@@ -2498,7 +2500,7 @@ export function apply(ctx, config = {}) {
             writeJson(path.join(dataDir(home), backupName), { disabled: current })
           } catch { /* 备份失败也要继续提示用户，只是没有退路 */ }
           const gate = requireApproval({
-            rawInput,
+            rawInput: raw, // 同上：handler 里变量叫 raw，误传 rawInput 会令 --yes 永远失效
             action: '清空 skill 禁用表',
             consequence: `当前禁用 ${current.length} 个：${current.join('、')}。清空后它们会全部重新出现在 skill 列表里。`,
             undo: `/taptap-skills restore（本次已备份到 ${backupName}）`,

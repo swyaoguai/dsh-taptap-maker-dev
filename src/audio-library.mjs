@@ -247,7 +247,10 @@ function scoreItem(item, tokens, weight = 1) {
     let hit = 0
     if (item.norm === t) hit = 100
     else if (item.norm.startsWith(`${t}-`)) hit = 60
-    else if (item.norm.includes(`-${t}`) || item.norm.startsWith(t)) hit = 45
+    // 词边界：'back' 以 45 分命中 'background-music' 属于语义误报（返回 vs
+    // 背景音乐毫无关系）。45 分档要求 token 作为**完整连字符词**出现；
+    // 纯前缀拼接（back+ground）落到 25 分 includes 档。
+    else if (item.norm.includes(`-${t}`) || item.norm.startsWith(`${t}-`)) hit = 45
     else if (item.norm.includes(t)) hit = 25
     score += hit * weight
   }

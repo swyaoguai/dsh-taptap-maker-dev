@@ -114,8 +114,17 @@ export function resolveAssetDir(dshHome, kind, { explicit, configured, projectDi
     : (typeof configured === 'string' ? configured : '')
   if (configuredRaw.trim().length > 0) {
     const dir = expand(configuredRaw, cwd, home)
-    // 只有真的落在项目目录下才算「在项目里」：配一个 D:\ 盘外路径不该被 gitignore 逻辑误伤。
-    const inside = inProject && path.resolve(dir).toLowerCase().startsWith(path.resolve(cwd).toLowerCase())
+    // 只有真的落在项目目录下才算「在项目里」：配一个项目外路径不该被
+    // gitignore 逻辑误伤。比较必须带路径分隔符 —— 裸 startsWith 会把
+    // 「D:\proj-other」误判成「D:\proj」的子路径（前缀撞名），往兄弟目录里
+    // 写自忽略 .gitignore，用户配置的素材目录内容会被 * 整个忽略掉。
+    const startsWithDir = (child, parent) => {
+      const c = path.resolve(child)
+      const p = path.resolve(parent)
+      if (c === p) return true
+      return c.startsWith(p + path.sep)
+    }
+    const inside = inProject && startsWithDir(dir, cwd)
     return {
       dir: ensureAssetDir(dir, { insideProject: inside }),
       source: explicit ? 'flag' : 'config',
