@@ -56,6 +56,12 @@ export const SOURCES = [
 
 /** Category pages we index, per source. Verified reachable. */
 const CATEGORY_PAGES = {
+  mixkit: [
+    { cat: 'game', url: 'https://mixkit.co/free-sound-effects/game/', tags: '游戏 金币 胜利 升级 街机 复古' },
+    { cat: 'interface', url: 'https://mixkit.co/free-sound-effects/interface/', tags: '界面 点击 通知 提示' },
+    { cat: 'notification', url: 'https://mixkit.co/free-sound-effects/notification/', tags: '通知 提示 成功 警告' },
+    { cat: 'modal', url: 'https://mixkit.co/free-sound-effects/modal/', tags: '弹窗 对话框 关闭' },
+  ],
   komori: [
     { cat: 'game-button', url: 'https://taira-komori.net/game01.html', tags: '游戏 按钮 硬币 跳跃 能量' },
     { cat: 'game-anime', url: 'https://taira-komori.net/anime01.html', tags: '动画 场面转换 噱头' },
@@ -95,14 +101,29 @@ function extractAudioLinks(html, pageUrl) {
   const base = new URL(pageUrl)
   const out = []
   const seen = new Set()
-  const re = /(?:href|src)="([^"]+\.(?:mp3|wav|ogg|m4a))"/gi
+  // 两类来源：
+  //  1. 常规 href/src（komori / soundeffect-lab 的静态页）
+  //  2. mixkit 的 Stimulus 数据属性 data-audio-player-preview-url-value
+  //     （2026-10 实测：mixkit 页面上既没有 <audio> 也没有 href/src 指向音频，
+  //      播放器 URL 全在 data 属性里 —— 只抓 href/src 会得到 0 条，
+  //      「Mixkit 可商用」这条源实际从未可用。）
+  const re = /(?:(?:href|src)="([^"]+\.(?:mp3|wav|ogg|m4a))")|(?:data-audio-player-preview-url-value="([^"]+\.(?:mp3|wav|ogg|m4a))")/gi
   let m
   while ((m = re.exec(html)) !== null) {
-    let ref = m[1]
+    let ref = m[1] ?? m[2]
+    if (!ref) continue
+    // mixkit 卡片：标题 <h2 class="item-grid-card__title"> 在 player div **之后**
+    // （实测相距 ~800 字符）。向后找最近的标题；抓不到就退回 URL 文件名。
+    let name = null
+    if (m[2]) {
+      const after = html.slice(m.index, m.index + 2000)
+      const tm = /item-grid-card__title[^>]*>\s*([^<]{2,90})</.exec(after)
+      if (tm !== null) name = tm[1].trim()
+    }
     // Kenney/comori pages use paths relative to different roots.
     if (ref.startsWith('//')) ref = `${base.protocol}${ref}`
     else if (ref.startsWith('/')) ref = `${base.origin}${ref}`
-    else {
+    else if (/^https?:\/\//i.test(ref)) { /* absolute (mixkit) — keep as-is */ } else {
       // relative: try page dir first, then site root (komori uses root-relative
       // "sound/..." from a page at "/game01.html")
       const candidates = [new URL(ref, pageUrl).href, new URL(`/${ref.replace(/^\.\//, '')}`, base).href]
@@ -110,8 +131,14 @@ function extractAudioLinks(html, pageUrl) {
     }
     if (seen.has(ref)) continue
     seen.add(ref)
-    const name = decodeURIComponent(ref.split('/').pop().replace(/\.[^.]+$/, ''))
-    out.push({ url: ref, name, ext: path.extname(new URL(ref).pathname).toLowerCase() })
+    const fallbackName = decodeURIComponent(ref.split('/').pop().replace(/\.[^.]+$/, ''))
+    out.push({
+      url: ref,
+      // 标题转可搜索名：空格→连字符，与 Kenney 索引的 normalize 规则对齐。
+      name: name ? name.replace(/['’]/g, '').replace(/[^\w\s-]+/g, '').replace(/\s+/g, '-').toLowerCase() : fallbackName,
+      title: name ?? undefined,
+      ext: path.extname(new URL(ref).pathname).toLowerCase(),
+    })
   }
   return out
 }
@@ -120,15 +147,24 @@ function extractAudioLinks(html, pageUrl) {
  * Mirror one source's category pages into cacheDir as an index (no audio bytes).
  * We deliberately index URLs only and download a single file when the user
  * actually picks one — no bulk scraping.
+ *
+ * 索引带 7 天新鲜度：站点改版会让旧链接 404，而索引一旦写盘就永不重建的话，
+ * 用户只会看到莫名其妙的「HTTP 404」。过期即重建（每页 sleep 600ms，仍然温和）。
  */
-export async function ensureSourceIndex(sourceId, cacheDir, { onProgress } = {}) {
+const SOURCE_INDEX_TTL_MS = 7 * 24 * 60 * 60 * 1000
+
+export async function ensureSourceIndex(sourceId, cacheDir, { onProgress, force = false } = {}) {
   const pages = CATEGORY_PAGES[sourceId]
   if (!pages) return { items: [], errors: [`unknown source: ${sourceId}`] }
   const indexFile = path.join(cacheDir, `index-${sourceId}.json`)
-  if (fs.existsSync(indexFile)) {
+  if (!force && fs.existsSync(indexFile)) {
     try {
       const parsed = JSON.parse(fs.readFileSync(indexFile, 'utf8'))
-      return { items: parsed.items ?? [], errors: [] }
+      const age = Date.now() - Date.parse(parsed?.builtAt ?? '')
+      if (Number.isFinite(age) && age >= 0 && age < SOURCE_INDEX_TTL_MS) {
+        return { items: parsed.items ?? [], errors: [] }
+      }
+      // 过期 → 落到下面重建。
     } catch { /* rebuild */ }
   }
   const items = []
@@ -196,6 +232,23 @@ export function searchSourceIndex(sourceId, cacheDir, tokens, limit = 6) {
 }
 
 /**
+ * 按文件头判断是不是常见音频容器（与视频链路的 looksLikeVideo 同一条防线）：
+ * 站点返回 200 + HTML 错误页/登录墙时，没有这一步就会把 HTML 字节当音频
+ * 写进 assets/audio/ 并打上 .meta 纳入构建 —— Maker 侧解析失败且极难排查。
+ * ID3(mp3)、RIFF(wav)、OggS(ogg/opus)、fLaC(flac)、ftyp(m4a)。
+ */
+export function looksLikeAudio(buf) {
+  if (!buf || buf.length < 12) return false
+  if (buf.subarray(0, 3).toString('ascii') === 'ID3') return true
+  if (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0) return true // 裸 MPEG 帧头
+  if (buf.subarray(0, 4).toString('ascii') === 'RIFF') return true
+  if (buf.subarray(0, 4).toString('ascii') === 'OggS') return true
+  if (buf.subarray(0, 4).toString('ascii') === 'fLaC') return true
+  if (buf.subarray(4, 8).toString('ascii') === 'ftyp') return true
+  return false
+}
+
+/**
  * Download one audio file from a source, with referer + backoff.
  * Single-file, sequential use only.
  */
@@ -217,6 +270,11 @@ export async function downloadSourceFile(item, destFile) {
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const bytes = Buffer.from(await response.arrayBuffer())
       if (bytes.length === 0) throw new Error('empty file')
+      if (!looksLikeAudio(bytes)) {
+        // 200 但不是音频 —— 多半是错误页/登录墙/防爬拦截页。如实报出来。
+        const head = bytes.subarray(0, 120).toString('utf8').replace(/\s+/g, ' ')
+        throw new Error(`下载内容不是音频（多半是拦截页）：${head.slice(0, 100)}`)
+      }
       fs.mkdirSync(path.dirname(destFile), { recursive: true })
       fs.writeFileSync(destFile, bytes)
       return { ok: true, bytes: bytes.length, file: destFile }
