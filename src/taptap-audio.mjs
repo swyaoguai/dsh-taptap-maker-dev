@@ -55,7 +55,11 @@ function audioDir(project, kind) {
 export function installFile(srcAbs, project, kind, outName) {
   const dir = audioDir(project, kind)
   fs.mkdirSync(dir, { recursive: true })
-  const name = outName && outName.length > 0 ? outName : `${path.basename(srcAbs, path.extname(srcAbs))}${path.extname(srcAbs)}`
+  // ⚠️ outName 可能来自用户输入（CLI --out / 工作台表单）。必须砍到纯文件名：
+  //    `..\..\evil.wav` 这类值会把文件写出 audio/ 乃至写出项目（实测
+  //    `..\..\..\..` 可逃到 %TEMP%）——路径穿越。同名 .meta 也会跟着写出去。
+  const safeName = path.basename(String(outName && outName.length > 0 ? outName : `${path.basename(srcAbs, path.extname(srcAbs))}${path.extname(srcAbs)}`))
+  const name = safeName.length > 0 && safeName !== '.' && safeName !== '..' ? safeName : `audio-${Date.now()}${path.extname(srcAbs)}`
   const target = path.join(dir, name)
   fs.copyFileSync(srcAbs, target)
   const meta = path.join(dir, `${name}.meta`)
@@ -202,7 +206,9 @@ async function main() {
       files.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)
       if (args.latest === true || args.latest === 'true') files.splice(1)
     }
-    if (args.latest === true || args.latest === 'true') files.splice(1)
+    // ⚠️ 旧的第二个 splice 在 isDirectory 条件外：单文件 + --latest 会把唯一的
+    //    文件删成空数组 → 「导入 0 个文件」静默失败（--latest 本意是「只取最新
+    //    一个」，对单文件输入就是 no-op，绝不能删）。
 
     const results = importLocalFiles(files, project, kind, {
       convertTo: typeof args.to === 'string' ? args.to : null,

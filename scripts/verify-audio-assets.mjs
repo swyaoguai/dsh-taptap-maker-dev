@@ -110,6 +110,27 @@ console.log('\n[4] 转换分支仍可用（ffmpegPath 解析 + 超时）')
   ok(String(out?.files?.[0]?.file ?? '').endsWith('.mp3'), '落盘的是 .mp3')
 }
 
+console.log('\n[5] installFile 的 outName 路径穿越防护（2026-10-25）')
+{
+  const proj = path.join(scratch, 'proj3')
+  fs.mkdirSync(path.join(proj, 'assets'), { recursive: true })
+  const wav = path.join(scratch, 'tone3.wav')
+  execFileSync(ffmpegPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=1', wav])
+  const mod = await import('../src/taptap-audio.mjs')
+  const sfxDir = path.join(proj, 'assets', 'audio', 'sfx')
+
+  const r1 = mod.installFile(wav, proj, 'sfx', '..\\..\\evil.wav')
+  ok(r1.target.startsWith(sfxDir), '相对穿越被砍回 sfx/ 内', r1.target)
+  const r2 = mod.installFile(wav, proj, 'sfx', '..\\..\\..\\..\\ESC.wav')
+  ok(r2.target.startsWith(sfxDir), '深层穿越逃不出项目', r2.target)
+  const r3 = mod.installFile(wav, proj, 'sfx', 'D:\\other\\x.wav')
+  ok(r3.target.startsWith(sfxDir) && path.basename(r3.target) === 'x.wav', '绝对路径输入砍成纯文件名')
+  const r4 = mod.installFile(wav, proj, 'bgm', '战斗BGM.wav')
+  ok(path.basename(r4.target) === '战斗BGM.wav', '正常（含中文）名字不受影响')
+  ok(fs.existsSync(r4.meta), '同名 .meta 仍生成')
+  ok(!fs.existsSync(path.join(scratch, 'evil.wav')) && !fs.existsSync(path.join(os.tmpdir(), 'ESC.wav')), '项目外没有任何逃逸文件')
+}
+
 fs.rmSync(scratch, { recursive: true, force: true })
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
