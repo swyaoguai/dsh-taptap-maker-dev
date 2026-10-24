@@ -252,7 +252,32 @@ function chromaDominance(rgba, p, chroma) {
  */
 export function keyFrame(rgba, width, height, options = {}) {
   const opts = { ...DEFAULT_KEY_OPTIONS, ...options }
-  const chroma = opts.chroma && opts.chroma !== 'auto' ? opts.chroma : 'green'
+  // 'auto' 真的做检测：整帧平均后哪个通道优势最大就按哪个处理。此前
+  // 'auto' 无条件落成 'green'，蓝幕/品红幕素材（默认设置就是 auto！）按
+  // 绿幕判据抠像 → 背景整片保留（实测：蓝幕帧 corner alpha=255，fraction=0）。
+  let chroma = opts.chroma && opts.chroma !== 'auto' ? opts.chroma : null
+  if (chroma === null) {
+    let sumR = 0
+    let sumG = 0
+    let sumB = 0
+    let count = 0
+    for (let p = 0; p < rgba.length; p += 4 * Math.max(1, Math.floor((width * height) / 4096)) * 4) {
+      sumR += rgba[p]
+      sumG += rgba[p + 1]
+      sumB += rgba[p + 2]
+      count += 1
+    }
+    // 退化保险：采样步进异常时兜底为绿（历史行为）
+    if (count === 0) chroma = 'green'
+    else {
+      const meanR = sumR / count
+      const meanG = sumG / count
+      const meanB = sumB / count
+      if (meanB > meanR && meanB > meanG) chroma = 'blue'
+      else if (Math.min(meanR, meanB) > meanG) chroma = 'magenta'
+      else chroma = 'green'
+    }
+  }
   const low = Math.max(0, Math.min(255, opts.keyLow))
   const high = Math.max(low + 1, Math.min(255, opts.keyHigh))
   const span = high - low
