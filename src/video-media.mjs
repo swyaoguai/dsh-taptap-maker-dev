@@ -100,9 +100,14 @@ function resolveBin(name) {
   const cached = resolvedBins.get(name)
   if (cached && (cached.hit || now - cached.at < MISS_TTL_MS)) return cached.value
   const envKey = name === 'ffmpeg' ? 'FFMPEG_PATH' : 'FFPROBE_PATH'
+  const envShort = name === 'ffmpeg' ? 'FFMPEG' : 'FFPROBE'
   const candidates = []
+  // 双命名：本模块历史上只认 FFMPEG_PATH，音频转换模块只认 FFMPEG ——
+  // 用户为一边设的变量对另一边无效。现在两种都接受（_PATH 优先）。
   const fromEnv = process.env[envKey]?.trim() ?? ''
   if (fromEnv) candidates.push(fromEnv)
+  const fromEnvShort = process.env[envShort]?.trim() ?? ''
+  if (fromEnvShort) candidates.push(fromEnvShort)
   if (process.platform === 'win32') {
     const fromRegistry = windowsRegistryValue(envKey)?.trim() ?? ''
     if (fromRegistry) candidates.push(fromRegistry)

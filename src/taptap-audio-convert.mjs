@@ -15,7 +15,8 @@
  *   node taptap-audio-convert.mjs --in bgm.mp3 --out cut.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5
  *   node taptap-audio-convert.mjs --probe D:\tmp\coin.ogg
  *
- * Requires ffmpeg + ffprobe on PATH (or set FFMPEG / FFPROBE). If missing, the
+ * Requires ffmpeg + ffprobe on PATH (or set FFMPEG_PATH / FFMPEG — both names
+ * are accepted, matching the video lane). If missing, the
  * script prints the exact install hint instead of failing silently.
  *
  * @module src/taptap-audio-convert.mjs
@@ -52,9 +53,14 @@ function parseArgs(argv) {
 
 const binCache = new Map() // `${name}:${envValue}` -> resolved bin | null
 function resolveBin(name, envVar) {
-  const key = `${name}:${process.env[envVar] ?? ''}`
+  // 环境变量双命名：本模块历史上只认 FFMPEG/FFPROBE，视频链路（video-media）
+  // 只认 FFMPEG_PATH/FFPROBE_PATH —— 用户为一条链路设的变量对另一条无效。
+  // 现在两边都同时接受两种命名（_PATH 优先，与 video-media 的口径一致）。
+  const envPath = process.env[`${envVar}_PATH`]?.trim() ?? ''
+  const envShort = process.env[envVar]?.trim() ?? ''
+  const key = `${name}:${envPath}:${envShort}`
   if (binCache.has(key)) return binCache.get(key)
-  let result = process.env[envVar] || null
+  let result = envPath || envShort || null
   if (result === null) {
     const probe = spawnSync(name, ['-version'], { stdio: 'ignore' })
     result = probe.status === 0 ? name : null

@@ -50,6 +50,7 @@ import {
 } from './src/lanes.mjs'
 import { resolveAssetDir as resolveAssetDirForApi } from './src/assets.mjs'
 import { guardUserSetting, guardrailLines, hasApproval, requireApproval } from './src/guards.mjs'
+import { killProcessesContaining } from './src/win-proc.mjs'
 import { startBackgroundCheck, currentVersion, checkForUpdates, readCachedCheck, shouldCheck } from './src/version-checker.mjs'
 
 // API 层的短别名：路由函数里反复写 readLanes/writeLanes 太长，且和已有的
@@ -2370,10 +2371,10 @@ export function apply(ctx, config = {}) {
           new Promise((resolve) => setTimeout(() => {
             try {
               const prof = profileDir(home)
-              spawnSync('powershell', ['-NoProfile', '-Command',
-                `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${prof.replace(/\\/g, '\\\\')}*' } | ` +
-                `ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
-              ], { stdio: 'ignore', timeout: 20000 })
+              // ⚠️ 必须走 win-proc 的统一实现：这里原先内联拼 `'*${prof}*'`，
+              // 路径含单引号时 PowerShell 字符串提前闭合（命令注入，见
+              // win-proc.mjs 文件头的分析）。统一模块已做转义 + 通配符防误配。
+              killProcessesContaining(prof)
               for (const f of ['SingletonLock', 'SingletonCookie', 'SingletonSocket', 'lockfile']) {
                 try { fs.rmSync(path.join(prof, f), { force: true }) } catch { /* ignore */ }
               }
