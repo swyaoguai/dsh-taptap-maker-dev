@@ -47,13 +47,74 @@ function parseArgs(argv) {
     const key = token.slice(2)
     const next = argv[i + 1]
     if (next === undefined || next.startsWith('--')) {
-      args[key] = true
+      // 重复出现的开关（--in a.png --in b.png）收成数组；单次仍是字符串，
+      // 保持既有调用方（resolveImageConfig 读 args.apiKey 等）不受影响。
+      args[key] = args[key] === undefined ? true : (Array.isArray(args[key]) ? [...args[key], true] : [args[key], true])
     } else {
-      args[key] = next
+      args[key] = args[key] === undefined
+        ? next
+        : (Array.isArray(args[key]) ? [...args[key], next] : [args[key], next])
       i += 1
     }
   }
   return args
+}
+
+/**
+ * 收集所有输入图（支持 `--in a.png --in b.png`、`--in a.png,b.png`、`--refs`）。
+ *
+ * 多图参考是 OpenAI 兼容 `/images/edits` 的标准能力（`image[]` 数组，gpt-image-1
+ * 最多 16 张）。但**不是所有模型都支持**：老式 DALL·E 系只吃一张，很多中转站
+ * 自建模型也只实现单图。这里只负责收集，是否允许多图由调用方按模型判断。
+ */
+function collectInputs(args) {
+  const raw = []
+  for (const key of ['in', 'input', 'ref', 'refs']) {
+    const v = args[key]
+    if (v === undefined || v === true) continue
+    const list = Array.isArray(v) ? v : [v]
+    for (const item of list) {
+      if (typeof item !== 'string' || item.trim() === '') continue
+      // 逗号分隔是用户手写多图的常见形式；但 Windows 路径不含英文逗号，
+      // 所以按逗号切分是安全的。
+      for (const part of item.split(',')) {
+        const p = part.trim()
+        if (p.length > 0) raw.push(p)
+      }
+    }
+  }
+  // 去重但保序：同一个文件重复传会让上游把权重放大，通常不是用户本意。
+  const seen = new Set()
+  const out = []
+  for (const p of raw) {
+    const abs = path.resolve(p)
+    if (seen.has(abs)) continue
+    seen.add(abs)
+    out.push(abs)
+  }
+  return out
+}
+
+/**
+ * 已知**只支持单图**的模型特征。命中即拒绝多图，而不是把多图发给它再吃一个
+ * 语焉不详的 400（那会浪费一次请求，用户还看不出原因）。
+ *
+ * 判定刻意保守：只列出「确定单图」的老模型；其余交给用户用 `--multi-ref`
+ * 显式声明或让上游如实报错。宁可让上游说，也不要替用户猜错而少传一张图。
+ */
+const SINGLE_IMAGE_MODEL_HINTS = [
+  /dall-?e[-_ ]?3/i,
+  /dall-?e[-_ ]?2/i,
+  /stable-?diffusion/i,
+  /\bsdxl\b/i,
+  /flux[-_.]?1[-_.]?(schnell|dev)(?!.*kontext)/i,
+]
+
+/** 这个模型名看起来只支持单图参考吗？ */
+function looksSingleImageModel(model) {
+  const m = String(model ?? '')
+  if (m.length === 0) return false
+  return SINGLE_IMAGE_MODEL_HINTS.some((re) => re.test(m))
 }
 
 /** Parse "WxH" into { w, h } or null. */
@@ -247,9 +308,16 @@ export async function editImage(options) {
       + '(or TAPTAP_IMAGE_BASE_URL / TAPTAP_IMAGE_API_KEY / TAPTAP_IMAGE_MODEL env). Run with --config to inspect.',
     )
   }
-  const inPath = String(options.in ?? options.input ?? '')
-  if (inPath.length === 0 || !fs.existsSync(inPath)) {
-    throw new Error(`--in <原图> 不存在：${inPath || '(空)'}`)
+  // 多图参考：--in 可重复 / 逗号分隔，或 --refs。
+  const inputPaths = collectInputs(options)
+  if (inputPaths.length === 0) {
+    throw new Error(
+      '没有输入图：用 --in <原图>（可重复：--in a.png --in b.png，或逗号分隔）\n'
+      + '（editImage 需要至少一张参考图）',
+    )
+  }
+  for (const p of inputPaths) {
+    if (!fs.existsSync(p)) throw new Error(`--in 文件不存在：${p}`)
   }
   const out = String(options.out ?? '')
   if (out.length === 0) throw new Error('editImage 需要 --out <输出文件>')
@@ -257,15 +325,46 @@ export async function editImage(options) {
   const url = `${cfg.baseURL.replace(/\/$/, '')}/images/edits`
   const notes = []
 
+  // 多图能力判断：不是所有模型都吃多张参考图。
+  //  - 显式 --single-ref：用户知道这个模型只吃一张，强制只传第一张。
+  //  - --multi-ref：用户确认模型支持多图（覆盖下面的保守判断）。
+  //  - 都没有：只对**确定单图**的已知模型名拒绝多图，其余交给上游。
+  let usePaths = inputPaths
+  const multi = inputPaths.length > 1
+  if (multi) {
+    if (options['single-ref'] === true) {
+      usePaths = inputPaths.slice(0, 1)
+      notes.push(`模型声明为单图（--single-ref）：只传第 1 张，忽略其余 ${inputPaths.length - 1} 张`)
+    } else if (options['multi-ref'] !== true && looksSingleImageModel(cfg.model)) {
+      throw new Error(
+        `模型「${cfg.model}」看起来只支持单图参考，但你传了 ${inputPaths.length} 张。\n\n`
+        + '可选做法：\n'
+        + '  · 只传一张：--in <最重要的那张>\n'
+        + `  · 若你确认这个模型其实支持多图：加 --multi-ref 强制多图\n`
+        + `  · 若这个模型确实只吃一张：用 --single-ref 明确只用第一张\n\n`
+        + '（插件不会悄悄丢图，也不会把多图硬塞给只吃一张的模型——那会白花一次请求）',
+      )
+    }
+  }
+
   const attempt = async (useJsonB64) => {
     let response
     try {
       if (useJsonB64) {
-        const b64 = fs.readFileSync(inPath).toString('base64')
+        // JSON 形态：单图用 image，多图用 image 数组（各家的习惯字段名不一，
+        // 这里同时提供 image / images 两个键，让宽松的实现至少能认一个）。
+        const b64s = usePaths.map((p) => `data:image/png;base64,${fs.readFileSync(p).toString('base64')}`)
+        const payload = {
+          model: cfg.model,
+          prompt: options.prompt,
+          ...(size ? { size } : {}),
+          image: b64s.length === 1 ? b64s[0] : b64s,
+          ...(b64s.length > 1 ? { images: b64s } : {}),
+        }
         response = await fetch(url, {
           method: 'POST',
           headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
-          body: JSON.stringify({ model: cfg.model, prompt: options.prompt, image: `data:image/png;base64,${b64}`, ...(size ? { size } : {}) }),
+          body: JSON.stringify(payload),
           signal: AbortSignal.timeout(Number(options.timeoutMs || 240000)),
         })
       } else {
@@ -274,7 +373,12 @@ export async function editImage(options) {
         form.append('model', cfg.model)
         form.append('prompt', options.prompt)
         if (size) form.append('size', size)
-        form.append('image', new Blob([fs.readFileSync(inPath)], { type: 'image/png' }), path.basename(inPath))
+        // OpenAI 标准多图形态：重复的 `image[]` 字段。
+        // 单图时仍用 `image`（老实现/老模型只认这个，改成 image[] 会破坏兼容）。
+        const field = usePaths.length === 1 ? 'image' : 'image[]'
+        for (const p of usePaths) {
+          form.append(field, new Blob([fs.readFileSync(p)], { type: 'image/png' }), path.basename(p))
+        }
         response = await fetch(url, {
           method: 'POST',
           headers: { Authorization: `Bearer ${cfg.apiKey}` },
@@ -317,7 +421,14 @@ export async function editImage(options) {
       }
     }
     if (outputs.length === 0) throw new Error('endpoint returned no usable image item (need b64_json or url)')
-    return { ok: true, outputs, size: size || '(endpoint default)', model: cfg.model, notes }
+    return {
+      ok: true,
+      outputs,
+      size: size || '(endpoint default)',
+      model: cfg.model,
+      inputCount: usePaths.length,
+      notes,
+    }
   }
 
   // 1) multipart（OpenAI 标准形态）
@@ -351,10 +462,15 @@ async function main() {
     }, null, 2)}\n`)
     return
   }
-  // edit 子命令：图生图（reskin 链路）
+  // edit 子命令：图生图（reskin 链路 / 多图参考）
   if (args.edit === true || args._?.[0] === 'edit') {
-    if (typeof args.prompt !== 'string' || typeof args.in !== 'string' || typeof args.out !== 'string') {
-      process.stderr.write('usage: taptap-image edit --in <原图> --prompt "<风格描述>" --out <输出.png> [--size WxH]\n')
+    const inputs = collectInputs(args)
+    if (typeof args.prompt !== 'string' || inputs.length === 0 || typeof args.out !== 'string') {
+      process.stderr.write(
+        'usage: taptap-image edit --in <原图> --prompt "<风格描述>" --out <输出.png> [--size WxH]\n'
+        + '       多图参考：--in a.png --in b.png   （或 --in "a.png,b.png" / --refs ...）\n'
+        + '       单图模型：--single-ref（只用第一张）；确认支持多图：--multi-ref\n',
+      )
       process.exitCode = 2
       return
     }

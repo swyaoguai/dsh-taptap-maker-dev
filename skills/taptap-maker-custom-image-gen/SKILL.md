@@ -92,7 +92,9 @@ node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复�
 { "baseURL": "https://your-endpoint/v1", "apiKey": "sk-...", "model": "gpt-image-2.5", "size": "1024x1024" }
 ```
 
-也可用环境变量 `TAPTAP_IMAGE_BASE_URL` / `TAPTAP_IMAGE_API_KEY` / `TAPTAP_IMAGE_MODEL`，或 `credentialsFile`。优先级：credentialsFile > env > image.json。
+也可用环境变量 `TAPTAP_IMAGE_BASE_URL` / `TAPTAP_IMAGE_API_KEY` / `TAPTAP_IMAGE_MODEL`，或 `credentialsFile`。
+优先级：credentialsFile > **显式传参** > `image.json`（设置页保存的）> 环境变量。
+（设置页保存的值必须压过机器上的环境变量残留，否则会出现「显示已保存却不生效」。）
 
 ```powershell
 node "<plugin>/src/taptap-image.mjs" --prompt "一只橙色小猫，扁平矢量风格" --out D:\tmp\cat.png
@@ -100,6 +102,34 @@ node "<plugin>/src/taptap-image.mjs" --config    # 查看生效配置（key 掩�
 ```
 
 接口：`POST {baseURL}/images/generations`，`Authorization: Bearer <key>`，body `{model,prompt,size,n}`；优先读响应 `b64_json`。
+
+### 图生图 / 参考图
+
+```powershell
+# 中转站：单图参考
+node "<plugin>/src/taptap-image.mjs" edit --in 原图.png --prompt "改成赛博朋克风格" --out 输出.png
+
+# 中转站：多图参考（OpenAI 标准 image[] 数组）
+node "<plugin>/src/taptap-image.mjs" edit --in 角色.png --in 服装.png --prompt "按服装替换角色衣服" --out 输出.png
+node "<plugin>/src/taptap-image.mjs" edit --in "角色.png,服装.png" --prompt "..." --out 输出.png   # 等价写法
+
+# 网页通道：把参考图上传进 ChatGPT 输入框
+node "<plugin>/src/taptap-gpt.mjs" gen --prompt "把这个角色改成水彩风格" --ref 角色.png --out 输出.png
+```
+
+**多图参考不是所有模型都支持**（这是最容易踩的坑）：
+
+| 情况 | 行为 |
+|---|---|
+| 模型名命中已知单图族（dall-e-3/2、多数 SD/SDXL、旧 Flux） | **直接拒绝、不发请求**，并给出三条出路 |
+| 模型不确定 | 照常发多图，让上游如实报错（不替用户猜而少传图） |
+| `--multi-ref` | 强制多图（你确认该模型支持） |
+| `--single-ref` | 只用第一张，其余丢弃**并在结果里说明**（不静默丢） |
+
+**尺寸的实情**：
+- 中转站 `--size` 真的生效（只认 1024x1024 / 1024x1536 / 1536x1024）。
+- **网页通道不能指定尺寸**：`--size` 会被忽略并在 `notes` 里说明，返回的 `size` 是 `null`、
+  另给 `requestedSize`。要特定比例 → 提示词写明，或下载后 `--downscale` / 自己裁切。
 
 ### 实测坑
 

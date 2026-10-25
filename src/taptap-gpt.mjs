@@ -511,12 +511,40 @@ return result`
  * Account rotation: on a quota / rate-limit signal we ban the account and the
  * caller (generateWithRotation) retries with the next pool account.
  */
-export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, dir, projectDir } = {}) {
+/**
+ * 网页生图 / 图生图。
+ *
+ * `reference` / `references`：参考图路径（图生图）。网页通道本质支持传图
+ * （ChatGPT 输入框的附件），所以这里直接把本地文件塞进 <input type="file">。
+ *
+ * ⚠️ 网页通道**不支持指定 size**：尺寸由 ChatGPT 决定，给了 size 也只能如实
+ * 告知"已忽略、请下载后自行裁切"，绝不假装生效（假参数比缺功能更坑）。
+ */
+export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, dir, projectDir, reference, references } = {}) {
   // Master switch: when the lane is off, refuse honestly instead of opening a
   // browser. The relay lane (taptap-image) is the documented fallback.
   if (!readGptLaneEnabled(dshHome)) {
     return { ok: false, error: 'lane_disabled', hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。' }
   }
+  // 参考图：接受数组 / 逗号分隔 / 单值，统一成绝对路径。
+  const referencePaths = (() => {
+    const raw = []
+    for (const v of [references, reference]) {
+      if (Array.isArray(v)) raw.push(...v)
+      else if (typeof v === 'string' && v.trim().length > 0) raw.push(...v.split(','))
+    }
+    const abs = raw.map((p) => String(p).trim()).filter((p) => p.length > 0).map((p) => path.resolve(p))
+    const missing = abs.filter((p) => !fs.existsSync(p))
+    return { list: Array.from(new Set(abs)), missing }
+  })()
+  if (referencePaths.missing.length > 0) {
+    return {
+      ok: false,
+      error: 'reference_missing',
+      hint: `参考图不存在：${referencePaths.missing.join('、')}`,
+    }
+  }
+  const refs = referencePaths.list
   const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
   // Follow the project by default; --dir / config override it.
   const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
@@ -738,6 +766,81 @@ if box is None:
     result["error"] = "no composer found after new chat"
     return result
 steps["composer"] = composer_sel
+# ── 参考图上传（图生图）────────────────────────────────────────────────
+# ChatGPT 网页本来就支持传图（"+" / 回形针 → 文件选择器），本质是
+# <input type="file">。直接 set_input_files 比模拟点击文件对话框可靠
+# （原生对话框 Playwright 操作不了）。
+# ⚠️ 网页通道**不能指定 size**：尺寸由 ChatGPT 自己决定。需要特定比例只能
+#    下载后自己裁切 —— 这一点必须在返回里如实说明，不能假装参数生效。
+REFS = ${JSON.stringify(refs)}
+if REFS:
+    uploaded = 0
+    fi = None
+    def _find_file_input():
+        for sel in ["input[type='file']", "input[type=file]"]:
+            try:
+                cands = pg.query_selector_all(sel)
+            except Exception:
+                cands = []
+            for c in cands or []:
+                try:
+                    acc = (c.get_attribute("accept") or "")
+                    # 页面上可能有多个 file input（头像等），优先 accept 含 image 的。
+                    if acc == "" or "image" in acc:
+                        return c
+                except Exception:
+                    pass
+        return None
+    try:
+        fi = _find_file_input()
+        if fi is None:
+            # 没有常驻 file input 时，先点一次 "+" / 回形针 触发挂载，再找一遍。
+            for sel in ["button[aria-label*='添加']", "button[aria-label*='Add']",
+                        "button[aria-label*='附件']", "button[aria-label*='Attach']",
+                        "button[data-testid*='attach']", "button[aria-label*='上传']"]:
+                try:
+                    b = pg.query_selector(sel)
+                    if b and b.is_visible():
+                        b.click(force=True)
+                        pg.wait_for_timeout(700)
+                        break
+                except Exception:
+                    pass
+            fi = _find_file_input()
+        if fi is None:
+            result["steps"] = steps
+            result["error"] = "ref_upload_no_input"
+            return result
+        fi.set_input_files(REFS)
+        uploaded = len(REFS)
+        # 等缩略图真正出现在输入区：只 set_input_files 不等待的话，紧接着回车
+        # 会在附件还没传完时发送，模型根本拿不到图。
+        waited_up = 0
+        while waited_up < 60:
+            pg.wait_for_timeout(500)
+            waited_up += 1
+            try:
+                thumbs = pg.evaluate("""() => {
+                    let n = 0;
+                    document.querySelectorAll('img').forEach(i => {
+                        const s = i.currentSrc || i.src || '';
+                        if (!s) return;
+                        const r = i.getBoundingClientRect();
+                        if (r.width > 20 && r.width < 220 && r.height > 20 && r.height < 220
+                            && r.top > window.innerHeight * 0.45) n += 1;
+                    });
+                    return n;
+                }""")
+                if thumbs and thumbs >= 1:
+                    break
+            except Exception:
+                pass
+        steps["refs_uploaded"] = uploaded
+        steps["refs_wait_s"] = waited_up
+    except Exception as e:
+        result["steps"] = steps
+        result["error"] = "ref_upload_failed: " + str(e)
+        return result
 try:
     box.click(force=True)
     pg.wait_for_timeout(500)
@@ -1000,11 +1103,28 @@ return result`
     fs.copyFileSync(saved, out)
     saved = out
   }
+  // 网页通道的尺寸限制必须如实说：size 参数在这里**不生效**。
+  // 以前它只被原样回显到返回值里，用户看到 size: "128x128" 以为生效了，
+  // 实际拿到的是 ChatGPT 自己定的分辨率 —— 假参数比没有参数更坑人。
+  if (typeof size === 'string' && size.trim().length > 0) {
+    notes.push(
+      `网页通道不支持指定尺寸：--size ${size} 已忽略（实际尺寸由 ChatGPT 决定）。`
+      + '需要特定比例/尺寸请下载后用 --downscale 或图像工具裁切。'
+      + '（要精确控制尺寸请走中转站 taptap-image --size）',
+    )
+  }
+  if (refs.length > 0) {
+    notes.push(`图生图：已随提示词上传 ${refs.length} 张参考图（网页通道）`)
+  }
   return {
     ok: true,
     saved,
     bytes: steps.bytes ?? null,
-    size: size ?? null,
+    // ⚠️ 网页通道不保证尺寸：这里如实返回 null 而不是把用户传的 size 原样回显，
+    //    否则调用方会把「用户想要的值」当成「实际得到的值」再往下传。
+    size: null,
+    requestedSize: size ?? null,
+    referenceCount: refs.length,
     steps,
     account: accountId ?? null,
     notes,
@@ -1023,7 +1143,7 @@ return result`
  * ToS and risks bans. The user asked for this explicitly (2026-10) and owns the
  * risk; we do NOT hide it and we do NOT retry a banned account.
  */
-export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir, noResume = false } = {}) {
+export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir, noResume = false, reference, references } = {}) {
   // Master switch first: never open a browser for a lane the user turned off.
   if (!readGptLaneEnabled(dshHome)) {
     return {
@@ -1068,7 +1188,7 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
   }
   // No pool configured → fall back to the single default profile.
   if (pool.accounts.length === 0) {
-    const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size, dir, projectDir })
+    const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size, dir, projectDir, reference, references })
     return { ...r, rotated: false, tried: [r.account] }
   }
   // Rotation OFF means "use this account and stop" — the settings switch has to
@@ -1076,7 +1196,7 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
   // one account's quota intact) still silently gets walked through the pool.
   if (pool.autoRotate === false) {
     const only = typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
-    const r = await gen(dshHome, prompt, { accountId: only, waitMs, out, downscale, size, dir, projectDir })
+    const r = await gen(dshHome, prompt, { accountId: only, waitMs, out, downscale, size, dir, projectDir, reference, references })
     return { ...r, rotated: false, tried: [only ?? null] }
   }
   const tried = []
@@ -1094,7 +1214,7 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
       continue
     }
     tried.push(acct.id)
-    last = await gen(dshHome, prompt, { accountId: acct.id, waitMs, out, downscale, size, dir, projectDir })
+    last = await gen(dshHome, prompt, { accountId: acct.id, waitMs, out, downscale, size, dir, projectDir, reference, references })
     if (last.ok) return { ...last, rotated: tried.length > 1, tried, failures }
     skip.add(acct.id)
     // Always carry a concrete reason + the step log: a bare `{account}` told us
@@ -1399,7 +1519,11 @@ async function main() {
   if (cmd === 'gen' || cmd === 'generate') {
     const prompt = args.prompt
     if (typeof prompt !== 'string' || prompt.length === 0) {
-      process.stderr.write('usage: taptap-gpt gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>] [--no-resume]\n')
+      process.stderr.write(
+        'usage: taptap-gpt gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>] [--no-resume]\n'
+        + '       图生图：--ref <参考图>（可重复：--ref a.png --ref b.png，或 --ref "a.png,b.png"）\n'
+        + '       注意：网页通道无法指定尺寸（尺寸由 ChatGPT 决定，需特定比例请下载后裁切）。\n',
+      )
       process.exitCode = 2
       return
     }
@@ -1414,6 +1538,20 @@ async function main() {
       process.exitCode = 1
       return
     }
+    // --ref / --refs / --reference 都接受（重复出现收成数组，见 parseArgs）。
+    const reference = []
+    for (const key of ['ref', 'refs', 'reference', 'references']) {
+      const v = args[key]
+      if (v === undefined || v === true) continue
+      const list = Array.isArray(v) ? v : [v]
+      for (const item of list) {
+        if (typeof item !== 'string') continue
+        for (const part of item.split(',')) {
+          const p = part.trim()
+          if (p.length > 0) reference.push(p)
+        }
+      }
+    }
     const r = await generateWithRotation(home, prompt, {
       accountId: args.account,
       waitMs: Number(args.waitMs ?? 300000),
@@ -1421,6 +1559,7 @@ async function main() {
       downscale: args.downscale,
       size: args.size,
       noResume: args['no-resume'] === true,
+      references: reference.length > 0 ? reference : undefined,
     })
     process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     if (!r.ok) process.exitCode = 1
