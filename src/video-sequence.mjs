@@ -503,7 +503,44 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
   const job = getJob(home, id)
   if (!job) throw new Error(`视频作业不存在：${id}`)
   if (job.video?.status === 'running') {
-    throw new Error(`视频任务已在跑（${job.video.taskId ?? '提交中'}），等它跑完再提交，避免重复扣费`)
+    // 「已生成、只是下载失败」也是一种 running：此时**绝对不要提交新任务**
+    // （云端已经有一份付过钱的片子），正确动作是重试下载。给出出口而不是
+    // 一句「任务已在跑」——否则用户以为卡死，很可能去新建作业重烧一次。
+    if (job.video?.downloadError) {
+      throw new Error(
+        '这个作业的视频**已经生成成功**，只是上次下载失败（视频还在云端，重试不额外扣费）。\n'
+        + '不要重新提交。请运行：/taptap-video poll\n'
+        + `（上次错误：${String(job.video.downloadError).slice(0, 200)}）`,
+      )
+    }
+    // ⚠️ 卡在「提交中」且从未拿到 task_id：上次提交时进程被杀/崩溃。
+    //    没有 taskId 就没有可恢复的远端任务，但也不能假定服务端没收下 ——
+    //    所以不自动重投；用户确认服务端确实没有该任务后，带 --yes 放行。
+    if (!job.video?.taskId) {
+      const gate = requireApproval({
+        rawInput,
+        action: '重新提交一个**卡在「提交中」且没有 task_id** 的作业',
+        consequence: '上一次提交在过程中被中断，服务端**可能已经收下并扣了费**；'
+          + '若它其实在跑，这次重投就是多花一份钱。',
+        undo: '没有撤销。先用 /taptap-video status 看台账，确认服务端没有该任务。',
+      })
+      if (!gate.ok) {
+        throw new Error(
+          '这个作业停在「提交中」但没有拿到 task_id（提交过程中被中断）。\n'
+          + '服务端**可能已经收下并扣了费**，因此插件不会自动重投。\n\n'
+          + `${gate.text}\n\n`
+          + `（提交台账：${readSubmitLedger(home)?.submitId ?? '无记录'}）`,
+        )
+      }
+      // 用户已明确确认放行：清掉悬空状态，继续走正常提交流程。
+      const cleared = getJob(home, id)
+      cleared.video = { ...cleared.video, status: 'error', remoteStatus: '已确认可重投', updatedAt: Date.now() }
+      writeVideoJob(home, cleared)
+      job.video = cleared.video
+      log(job, 'warn', '用户确认后重投此前卡在「提交中」的作业')
+    } else {
+      throw new Error(`视频任务已在跑（${job.video.taskId}），等它跑完再提交，避免重复扣费。查看进度：/taptap-video poll`)
+    }
   }
   // 🚫 上一次提交「结果未知」时**不许再提交**。
   //    这是白烧额度最典型的路径：网络抖一下 → 作业标成失败 → 用户（尤其 AI）

@@ -25,7 +25,6 @@
  *
  * @module src/lanes.mjs
  */
-import fs from 'node:fs'
 import path from 'node:path'
 import { dataDir, readJson, writeJson } from './paths.js'
 

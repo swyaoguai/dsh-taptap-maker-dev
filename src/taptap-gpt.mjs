@@ -233,6 +233,12 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       clearTimeout(timer)
       clearTimeout(focusTimer)
       fs.rmSync(tmp, { force: true })
+      // ⚠️ 成功路径也要收拾 profile：python 退出后 Chromium 子进程可能还在异步
+      // 收尾，SingletonLock/lockfile 留在盘上，下一次同一账号的运行就会被锁住
+      // （表现为「第二次生成必然超时/开不出窗口」）。超时路径本来就有这步，
+      // 成功路径曾漏掉。releaseProfile 内部有 3 次重试与"无残留即返回"快路径，
+      // 正常情况下几乎零成本。
+      try { releaseProfile(prof) } catch { /* 清理失败不影响本次结果 */ }
       const marker = out.indexOf('__RESULT__')
       if (marker < 0) {
         const convUrl = readSidecar()
@@ -1100,7 +1106,10 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     })
     // A hard UI failure (selectors / bot wall) will repeat on every account —
     // stop early instead of opening N browsers to fail the same way.
-    if (last?.error === 'no_image' || last?.error === 'download_failed') break
+    // `write_failed` / `download_failed` 同属「图**已经生成**了，只是没落到本地」：
+    // 换账号重跑 = 再花一份配额去生成一张已经存在的图。必须一起停下。
+    // （write_failed 曾漏在名单外：本地磁盘写不动时，池里每个账号都会被白烧一次。）
+    if (last?.error === 'no_image' || last?.error === 'download_failed' || last?.error === 'write_failed') break
     if (last?.error === 'cloudflare_challenge' || last?.error === 'not_logged_in') break
   }
   const lastErr = last?.error ?? 'no usable account (all not logged in)'

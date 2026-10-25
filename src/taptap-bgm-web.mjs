@@ -236,6 +236,10 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
       clearTimeout(timer)
       clearTimeout(focusTimer)
       fs.rmSync(tmp, { force: true })
+      // 成功路径同样要收拾 profile：python 退出后 Chromium 可能在异步收尾，
+      // 残留的 SingletonLock/lockfile 会让同一账号的下一次运行开不出窗口
+      // （表现为「第二次生成必定超时」）。超时路径本来就有，成功路径曾漏掉。
+      try { releaseProfile(prof) } catch { /* 清理失败不影响本次结果 */ }
       const marker = out.indexOf('__RESULT__')
       if (marker < 0) {
         resolve({ ok: false, err: out.trim().split('\n').slice(-3).join(' | ') || 'no result' })
@@ -1045,11 +1049,18 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
       touchBgmAccount(dshHome, acct.id, { lastUsedAt: Date.now() })
     }
     skip.add(acct.id)
-    failures.push({ account: acct.id, error: last.error ?? 'no file' })
+    failures.push({ account: acct.id, error: last.error ?? (last?.steps?.download_error ? 'download_error' : 'no file') })
     // A structural failure (selectors, env, auth, deliberate stops) repeats on
     // every account — stop early instead of opening N browsers to fail the same
     // way. instrumental_unset 是「刻意中止（没花额度）」，换账号无意义。
-    const structural = typeof last.error === 'string'
+    //
+    // ⚠️ 「曲已生成、只是没下载下来」也必须停：站点上那首曲**已经扣了额度**、
+    // 就躺在该账号的作品列表里，换账号再生成一次 = 白烧一份额度（而且新账号
+    // 也会重复同样的下载失败，因为失败点在本地/网络而非账号）。以前只判
+    // `error` 字符串，下载失败时 error 是空的（片段只写了 steps.download_error），
+    // 于是被当成普通失败走轮换。生图侧同源问题（write_failed）已一并修掉。
+    const structural = last?.steps?.download_error != null
+      || typeof last.error === 'string'
       && (last.error === 'instrumental_unset'
         || last.error.includes('no style input') || last.error.includes('创作')
         || last.error.includes('token') || last.error.includes('playwright')

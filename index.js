@@ -535,8 +535,12 @@ function minimaxConfigFileOf(home) {
  *
  * 规则：minimax.json 已存在（新版里已有配置）就不动；music.json 有实质字段
  * 才迁移，迁完把旧文件改名为 music.json.migrated-<时间戳> 留档不删。
+ *
+ * ⚠️ logger 由调用方（apply）传入：本函数在模块层，没有 ctx。曾直接写
+ * `ctx?.logger` —— 可选链防不了「未声明变量」，0.1.0 升级用户一启动就
+ * ReferenceError 崩掉，迁移反而成了升级杀手。
  */
-function migrateLegacyConfigs(home) {
+function migrateLegacyConfigs(home, { logger } = {}) {
   const newFile = minimaxConfigFileOf(home)
   if (fs.existsSync(newFile)) return
   const legacy = path.join(dataDir(home), 'music.json')
@@ -549,7 +553,7 @@ function migrateLegacyConfigs(home) {
   if (Object.keys(patch).length === 0) return
   writeMinimaxConfigPatch(home, patch)
   try { fs.renameSync(legacy, `${legacy}.migrated-${Date.now().toString(36)}`) } catch { /* 留档失败不影响迁移结果 */ }
-  ctx?.logger?.info?.('taptap-maker-dev: migrated music.json → minimax.json')
+  logger?.info?.('taptap-maker-dev: migrated music.json → minimax.json')
 }
 
 /**
@@ -586,11 +590,14 @@ export function apply(ctx, config = {}) {
     ? path.resolve(audioCfg.cacheDir)
     : path.join(cacheDir, 'audio')
   const disabledFile = skillsDisabledPath(home)
+  // 0.1.0 → 0.2.0：music.json 里的 Key 迁到 minimax.json（不覆盖新版已有配置）。
+  // ⚠️ 必须在 seedMinimaxConfig 之前：seed 会创建 minimax.json，迁移见到
+  // 「文件已存在」就跳过 —— 顺序反了的话，表单里有 video 字段的升级用户，
+  // music.json 里的 Key 永远迁不过来（保存值 > 表单值的优先序）。
+  migrateLegacyConfigs(home, { logger: ctx?.logger })
   const imageFile = seedImageConfig(config, home)
   // 表单里填的 MiniMax Key/站点/模型 seed 进 minimax.json（不覆盖设置页保存过的值）。
   seedMinimaxConfig(config, home)
-  // 0.1.0 → 0.2.0：music.json 里的 Key 迁到 minimax.json（不覆盖新版已有配置）。
-  migrateLegacyConfigs(home)
   ctx.logger?.info?.(`taptap-maker-dev: data=${dataDir(home)} skills-cache=${cacheDir} image-config=${imageFile}`)
 
   // --- 1b. CC0 audio library (lazy: fetched on first audio request) -------

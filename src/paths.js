@@ -722,6 +722,11 @@ export function minimaxConfigPath(dshHome) {
   return path.join(dataDir(dshHome), 'minimax.json')
 }
 
+/** 归一化 MiniMax 站点：去尾斜杠、剥 /v1|/v2 路径后缀（三处读取共用，防语义漂移）。 */
+function normalizeMinimaxBaseURL(value, fallback = 'https://api.minimaxi.com') {
+  return String(value ?? '').replace(/\/+$/, '').replace(/\/(v1|v2)$/i, '') || fallback
+}
+
 /**
  * Resolve effective MiniMax video config with precedence:
  *   设置页 minimax.json  >  env vars (MINIMAX_API_KEY / MINIMAX_BASE_URL / MINIMAX_VIDEO_MODEL)
@@ -733,6 +738,10 @@ export function minimaxConfigPath(dshHome) {
  * 都读到那个失效 Key —— 设置页显示「已保存 ✓」，AI 调用时却报「鉴权失败 /
  * 没有 Key」，用户完全无从查起。文件是用户显式保存的地方，理应最优先；
  * CI 场景需要 env 时请清空文件里的对应字段（或显式传参）。
+ *
+ * ⚠️ 默认站点是国内站（api.minimaxi.com），与 readMinimaxConfigRaw /
+ * readMinimaxConfigWithSource 保持一致 —— 曾默认国际站，文件里没写 baseURL
+ * 的用户会「设置页显示国内站、实际提交到国际站」，国内 Key 必 401。
  */
 export function resolveMinimaxConfig(dshHome) {
   const fromFile = readJson(minimaxConfigPath(dshHome)) ?? {}
@@ -742,11 +751,9 @@ export function resolveMinimaxConfig(dshHome) {
     process.env.MINIMAX_VIDEO_MODEL,
   ) ?? 'MiniMax-H3'
   // 国际站 v2 与国内站 v2 的路径相同，只有域名不同。
-  let baseURL = pick(
-    fromFile.baseURL,
-    process.env.MINIMAX_BASE_URL,
-  ) ?? 'https://api.minimax.io'
-  baseURL = baseURL.replace(/\/+$/, '').replace(/\/v2$/, '') // 统一存根域名
+  const baseURL = normalizeMinimaxBaseURL(
+    pick(fromFile.baseURL, process.env.MINIMAX_BASE_URL, 'https://api.minimaxi.com'),
+  )
   return {
     apiKey: pick(fromFile.apiKey, process.env.MINIMAX_API_KEY) ?? '',
     baseURL,
@@ -783,7 +790,7 @@ export function readMinimaxConfigRaw(dshHome) {
   const str = (v, fb) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : fb)
   return {
     apiKey: str(fromFile.apiKey, ''),
-    baseURL: str(fromFile.baseURL, 'https://api.minimaxi.com').replace(/\/+$/, '').replace(/\/(v1|v2)$/i, ''),
+    baseURL: normalizeMinimaxBaseURL(str(fromFile.baseURL, 'https://api.minimaxi.com')),
     model: str(fromFile.model, 'MiniMax-H3'),
     measurements: typeof fromFile.measurements === 'object' && fromFile.measurements !== null ? fromFile.measurements : {},
   }
@@ -804,7 +811,7 @@ export function readMinimaxConfigWithSource(dshHome) {
   const apiKey = fileKey || envKey
   const fileBase = str(fromFile.baseURL)
   const envBase = str(process.env.MINIMAX_BASE_URL)
-  const baseURL = (fileBase || envBase || 'https://api.minimax.io').replace(/\/+$/, '').replace(/\/v2$/, '')
+  const baseURL = normalizeMinimaxBaseURL(fileBase || envBase || 'https://api.minimaxi.com')
   const model = str(fromFile.model) || str(process.env.MINIMAX_VIDEO_MODEL) || 'MiniMax-H3'
   return {
     apiKey,
