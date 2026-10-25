@@ -1737,6 +1737,7 @@ window.__ModuleLoader__.load({
       const [mmx, setMmx] = useState({ apiKey: '', baseURL: '', model: '' })
       const [backends, setBackends] = useState({ relay: false, minimax: false, local: true })
       const [keyKindText, setKeyKindText] = useState('')
+      const [keySource, setKeySource] = useState('')
       const [protocol, setProtocol] = useState('openai')
       const [showAdvanced, setShowAdvanced] = useState(false)
       const [status, setStatus] = useState('')
@@ -1753,6 +1754,7 @@ window.__ModuleLoader__.load({
             setProtocol((j.relay && j.relay.protocol) || 'openai')
             setBackends(j.backends || { relay: false, minimax: false, local: true })
             setKeyKindText((j.minimax && j.minimax.keyKindText) || '')
+            setKeySource((j.minimax && j.minimax.keySource) || '')
             // Minimax 的 Key 不回显：后端只回「有没有」，设置页沿用「留空=不修改」的惯例。
             setMmx({ apiKey: '', baseURL: (j.minimax && j.minimax.baseURL) || '', model: (j.minimax && j.minimax.model) || '' })
           })
@@ -1776,7 +1778,7 @@ window.__ModuleLoader__.load({
         setStatus('saving')
         fetch(`${API_BASE}/video-minimax`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(mmx) })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-          .then((j) => { setStatus('saved'); setKeyKindText(j.keyKindText || ''); setBackends((b) => ({ ...b, minimax: Boolean(j.hasApiKey) })); setMmx((f) => ({ ...f, apiKey: '' })) })
+          .then((j) => { setStatus('saved'); setKeyKindText(j.keyKindText || ''); setKeySource(j.keySource || ''); setBackends((b) => ({ ...b, minimax: Boolean(j.hasApiKey) })); setMmx((f) => ({ ...f, apiKey: '' })) })
           .catch(() => setStatus('error'))
       }, [mmx])
 
@@ -1853,6 +1855,10 @@ window.__ModuleLoader__.load({
             h('button', { style: S.btn, disabled: status === 'saving', onClick: saveMmx }, '保存 MiniMax 配置'),
             status === 'saved' ? h('span', { style: S.ok }, '已保存 ✓ 即时生效') : null,
             status === 'error' ? h('span', { style: S.warn }, '保存失败') : null),
+          keySource === 'env' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+            '⚠ 当前生效的 Key 来自环境变量 MINIMAX_API_KEY，设置页文件里没有保存 Key。在此保存后文件值优先生效；只改环境变量的话这里不会跟着变。') : null,
+          keySource === 'none' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+            '还没有保存任何 Key：设置页文件与环境变量 MINIMAX_API_KEY 都为空。') : null,
         ),
 
         // ────────── 3. 中转站 ──────────

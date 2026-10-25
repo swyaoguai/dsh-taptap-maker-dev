@@ -15,7 +15,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { dataDir } from './paths.js'
+import { dataDir, writeJson } from './paths.js'
 
 const PKG_PATH = fileURLToPath(new URL('../package.json', import.meta.url))
 const REPO_RAW = 'https://raw.githubusercontent.com/swyaoguai/dsh-taptap-maker-dev/main/package.json'
@@ -99,9 +99,9 @@ export function readCachedCheck(dshHome) {
   }
 }
 
-/** 写缓存（整体替换）。 */
+/** 写缓存（整体替换，原子写：崩溃/并发不留半截 JSON）。 */
 function writeCachedCheck(dshHome, record) {
-  fs.writeFileSync(versionCheckPath(dshHome), JSON.stringify(record, null, 2), 'utf8')
+  writeJson(versionCheckPath(dshHome), record)
 }
 
 /**

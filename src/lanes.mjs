@@ -27,7 +27,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { dataDir } from './paths.js'
+import { dataDir, readJson, writeJson } from './paths.js'
 
 /* ------------------------------------------------------------------------- *
  * 通道清单 —— 唯一的真相来源
@@ -87,18 +87,11 @@ export function lanesConfigPath(dshHome) {
   return path.join(dataDir(dshHome), 'lanes.json')
 }
 
-function readRaw(dshHome) {
-  try {
-    return JSON.parse(fs.readFileSync(lanesConfigPath(dshHome), 'utf8')) ?? {}
-  } catch {
-    return {}
-  }
-}
-
-function writeRaw(dshHome, data) {
-  fs.mkdirSync(dataDir(dshHome), { recursive: true })
-  fs.writeFileSync(lanesConfigPath(dshHome), JSON.stringify(data, null, 2), 'utf8')
-}
+// 读 / 写统一走 paths.js 的 readJson / writeJson：
+//  - 写是原子的（先 tmp 再 rename）：进程被杀或并发调用不会留下半截 JSON。
+//    以前直接 writeFileSync，一旦留下半截文件，下次读就解析失败 —— 而
+//    readRaw 又把异常吞掉返回 {}，表现为「用户排的通道顺序悄悄变回默认」。
+//  - 读失败会另存 .corrupt-<时间戳> 留现场，事后能找回用户亲手排的顺序。
 
 /**
  * 默认值 —— 刻意**沿用改造前的实际行为**，这样升级后行为不突变：
@@ -153,7 +146,7 @@ function normalizeGroup(group, raw) {
  * @returns {{autoFallback: boolean, groups: Record<string, {order: string[], enabled: Record<string, boolean>}>}}
  */
 export function readLanes(dshHome) {
-  const raw = readRaw(dshHome)
+  const raw = readJson(lanesConfigPath(dshHome)) ?? {}
   // 只有显式写了 true 才算开启「额度不足自动换通道」—— 默认不动用户的付费通道。
   const out = { autoFallback: raw.autoFallback === true, groups: {} }
   for (const group of GROUPS) {
@@ -186,7 +179,7 @@ export function writeLanes(dshHome, patch = {}) {
     }
     next.groups[group] = normalizeGroup(group, { order, enabled })
   }
-  writeRaw(dshHome, next)
+  writeJson(lanesConfigPath(dshHome), next)
   return next
 }
 

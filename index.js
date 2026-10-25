@@ -35,7 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, maskSecret, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, maskSecret, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, readMinimaxConfigWithSource, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
   getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
@@ -527,6 +527,32 @@ function minimaxConfigFileOf(home) {
 }
 
 /**
+ * 版本升级迁移：0.1.0 的 MiniMax 配置存在 music.json，0.2.0 改名为 minimax.json。
+ *
+ * 没有这一步，升级 = 用户在旧版里保存过的 Key「凭空消失」—— 新代码只认
+ * minimax.json，旧文件躺在原地没人读。这正是「版本更新后设置页显示已保存、
+ * 实际却报没有 Key」的另一条腿（文件名换了的升级从来不迁移）。
+ *
+ * 规则：minimax.json 已存在（新版里已有配置）就不动；music.json 有实质字段
+ * 才迁移，迁完把旧文件改名为 music.json.migrated-<时间戳> 留档不删。
+ */
+function migrateLegacyConfigs(home) {
+  const newFile = minimaxConfigFileOf(home)
+  if (fs.existsSync(newFile)) return
+  const legacy = path.join(dataDir(home), 'music.json')
+  const data = readJson(legacy)
+  if (!data) return
+  const patch = {}
+  for (const key of ['apiKey', 'baseURL', 'model']) {
+    if (typeof data[key] === 'string' && data[key].trim().length > 0) patch[key] = data[key].trim()
+  }
+  if (Object.keys(patch).length === 0) return
+  writeMinimaxConfigPatch(home, patch)
+  try { fs.renameSync(legacy, `${legacy}.migrated-${Date.now().toString(36)}`) } catch { /* 留档失败不影响迁移结果 */ }
+  ctx?.logger?.info?.('taptap-maker-dev: migrated music.json → minimax.json')
+}
+
+/**
  * Fetch model ids from an OpenAI-compatible `{baseURL}/models` endpoint.
  * Runs on the host (no browser CORS), returns a de-duped, sorted id list.
  */
@@ -563,6 +589,8 @@ export function apply(ctx, config = {}) {
   const imageFile = seedImageConfig(config, home)
   // 表单里填的 MiniMax Key/站点/模型 seed 进 minimax.json（不覆盖设置页保存过的值）。
   seedMinimaxConfig(config, home)
+  // 0.1.0 → 0.2.0：music.json 里的 Key 迁到 minimax.json（不覆盖新版已有配置）。
+  migrateLegacyConfigs(home)
   ctx.logger?.info?.(`taptap-maker-dev: data=${dataDir(home)} skills-cache=${cacheDir} image-config=${imageFile}`)
 
   // --- 1b. CC0 audio library (lazy: fetched on first audio request) -------
@@ -1095,6 +1123,9 @@ export function apply(ctx, config = {}) {
         if (req.method === 'GET' && sub === 'video-minimax') {
           const cfg = readMinimaxConfigRaw(home)
           const key = cfg.apiKey || (process.env.MINIMAX_API_KEY ?? '').trim()
+          // Key 来源要亮出来：文件里没有、靠 env 撑着时，设置页必须说实话，
+          // 否则用户以为保存过（曾经保存过后来被清掉 / 升级丢了都看不出来）。
+          const src = readMinimaxConfigWithSource(home).source
           return sendJson(res, 200, {
             ok: true,
             baseURL: cfg.baseURL,
@@ -1102,6 +1133,8 @@ export function apply(ctx, config = {}) {
             hasApiKey: Boolean(key),
             keyKind: detectKeyKind(key),
             keyKindText: describeKey(key),
+            keySource: src.apiKey,
+            envKeyPresent: src.envKeyPresent,
             models: listVideoModels().map((m) => ({ id: m.id, note: m.note, supportsLastFrame: m.supportsLastFrame })),
           })
         }
@@ -1128,6 +1161,7 @@ export function apply(ctx, config = {}) {
             ? writeMinimaxConfigPatch(home, patch)
             : (readJson(file) ?? {})
           const key = (merged.apiKey || (process.env.MINIMAX_API_KEY ?? '')).trim()
+          const src = readMinimaxConfigWithSource(home).source
           return sendJson(res, 200, {
             ok: true,
             baseURL: merged.baseURL || 'https://api.minimaxi.com',
@@ -1135,6 +1169,8 @@ export function apply(ctx, config = {}) {
             hasApiKey: Boolean(key),
             keyKind: detectKeyKind(key),
             keyKindText: describeKey(key),
+            keySource: src.apiKey,
+            envKeyPresent: src.envKeyPresent,
           })
         }
         // BGM ACCOUNT routes: which account is logged in, logging in, logging
@@ -2807,11 +2843,19 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'doctor' || sub === '自检') {
       const d = await videoDoctor(home, config)
+      // Key 来源：文件（设置页保存的）还是环境变量（机器上残留的）。
+      // 排查「保存了却不生效」时，这里是第一眼该看的地方。
+      const keySource = readMinimaxConfigWithSource(home)
+      const sourceText = keySource.source.apiKey === 'file'
+        ? '设置页保存的 minimax.json'
+        : keySource.source.apiKey === 'env'
+          ? `环境变量 MINIMAX_API_KEY（设置页文件里没有 Key！）`
+          : '（无）'
       const lines = ['视频动作帧 · 自检结果：', '']
       lines.push(`  ffmpeg：${d.ffmpeg.ok ? '✓ ' + (d.ffmpeg.version ?? '') : '✗ ' + d.ffmpeg.error}`)
       lines.push('', '  三个后端：')
       lines.push(`    ${d.backends.relay ? '✓' : '·'} 中转站${d.relay.configured ? `（${d.relay.protocol} · ${d.relay.model}）` : '（未配置）'}`)
-      lines.push(`    ${d.backends.minimax ? '✓' : '·'} MiniMax ${d.baseURL}${d.hasKey ? `（${describeKey(config.apiKey)}）` : '（无 Key）'}`)
+      lines.push(`    ${d.backends.minimax ? '✓' : '·'} MiniMax ${d.baseURL}${d.hasKey ? `（${describeKey(config.apiKey)}，来自${sourceText}）` : '（无 Key）'}`)
       lines.push('    ✓ 自选本地视频（零额度，随便用）')
       // 按设置页里排的顺序报一次「实际会走哪条」，别让用户自己推。
       const laneCfg = readLanes(home)
@@ -2824,6 +2868,12 @@ async function videoCommand(home, rawInput) {
         lines.push(`  额度不足自动换通道：${laneCfg.autoFallback ? '开' : '关（只在设置页改）'}`)
       }
       lines.push('', `  当前默认模型：${d.model}`)
+      // 环境变量里有 Key 但文件里没有 → 明确警告：这个 Key 不在设置页里，
+      // 换 Key 只能改环境变量或回设置页保存；这正是「保存了却不生效」最常见的现场。
+      if (keySource.source.apiKey === 'env') {
+        lines.push('', '  ⚠ 当前生效的 Key 来自环境变量 MINIMAX_API_KEY，不是设置页保存的那份。')
+        lines.push('    在设置页「MiniMax」里保存 Key 后，文件里的值优先生效（否则环境变量说了算）。')
+      }
       if (d.estimate !== null) lines.push(`  参考单价：H3 768P 4 秒约 ¥${d.estimate}`)
       if (d.probe) {
         lines.push('', '  MiniMax 远端探测（免费）：')

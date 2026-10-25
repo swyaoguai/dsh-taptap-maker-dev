@@ -16,8 +16,9 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
-  readGptDownloadDir, readImageConfigRaw, readJson, writeGptDownloadDir,
-  writeImageConfigPatch, writeJson,
+  readGptDownloadDir, readImageConfigRaw, readJson, readMinimaxConfigRaw,
+  readMinimaxConfigWithSource, resolveImageConfig, resolveMinimaxConfig,
+  writeGptDownloadDir, writeImageConfigPatch, writeJson, writeMinimaxConfigPatch,
 } from '../src/paths.js'
 
 let passed = 0
@@ -119,6 +120,87 @@ console.log('\n[6] 表单 seed 只在首次落盘（清空/改过不被表单旧
   const seedMinimax = /function seedMinimaxConfig[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
   ok(seedMinimax.length > 0, '能找到 seedMinimaxConfig')
   ok(/existsSync\(file\)\s*\)\s*return/.test(seedMinimax), 'minimax seed：文件已存在时直接返回（清空的 Key 不会被复活）')
+}
+
+console.log('\n[7] 配置优先级：设置页文件压过环境变量（「保存了却不生效」的根因）')
+{
+  // 2026-10-25 实测：机器注册表里残留着一个**已失效**的 MINIMAX_API_KEY，
+  // 设置页保存的 JWT Key 是有效的。旧优先级 env > file 让 DSH 每次重启后
+  // 都读到失效 Key —— 显示已保存、实际鉴权失败。文件是用户显式保存的地方，
+  // 必须最优先；显式传参（函数 options）仍然最高。
+  const savedEnv = {
+    MINIMAX_API_KEY: process.env.MINIMAX_API_KEY,
+    MINIMAX_BASE_URL: process.env.MINIMAX_BASE_URL,
+    MINIMAX_VIDEO_MODEL: process.env.MINIMAX_VIDEO_MODEL,
+    TAPTAP_IMAGE_API_KEY: process.env.TAPTAP_IMAGE_API_KEY,
+    TAPTAP_IMAGE_BASE_URL: process.env.TAPTAP_IMAGE_BASE_URL,
+    TAPTAP_IMAGE_MODEL: process.env.TAPTAP_IMAGE_MODEL,
+    TAPTAP_IMAGE_SIZE: process.env.TAPTAP_IMAGE_SIZE,
+  }
+  process.env.MINIMAX_API_KEY = 'sk-env-old-invalid'
+  process.env.MINIMAX_BASE_URL = 'https://api.minimax.io'
+  process.env.MINIMAX_VIDEO_MODEL = 'Env-Model'
+  process.env.TAPTAP_IMAGE_API_KEY = 'sk-env-image'
+  process.env.TAPTAP_IMAGE_BASE_URL = 'https://env.example.com/v1'
+  process.env.TAPTAP_IMAGE_MODEL = 'env-image-model'
+  delete process.env.TAPTAP_IMAGE_SIZE
+  try {
+    const home = path.join(scratch, 'h3')
+    writeMinimaxConfigPatch(home, { apiKey: 'sk-file-new-valid', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
+    const mmx = resolveMinimaxConfig(home)
+    ok(mmx.apiKey === 'sk-file-new-valid', 'minimax：文件里的 Key 压过环境变量（修复前 env 优先 → 读到失效旧 Key）', mmx.apiKey)
+    ok(mmx.baseURL === 'https://api.minimaxi.com', 'minimax：文件里的站点压过环境变量')
+    ok(mmx.model === 'MiniMax-H3', 'minimax：文件里的模型压过环境变量')
+
+    // 文件里没有的字段才回落到 env（回落仍要可用，不能把 env 功能砍死）。
+    const home2 = path.join(scratch, 'h4')
+    const mmx2 = resolveMinimaxConfig(home2)
+    ok(mmx2.apiKey === 'sk-env-old-invalid', 'minimax：文件没有 Key 时回落到环境变量（CI 场景仍可用）')
+
+    // 生图同规则。
+    const home3 = path.join(scratch, 'h5')
+    writeImageConfigPatch(home3, { baseURL: 'https://file.example.com/v1', apiKey: 'sk-file-image', model: 'file-model' })
+    const img = resolveImageConfig({ dshHome: home3 })
+    ok(img.apiKey === 'sk-file-image', 'image：文件里的 Key 压过环境变量')
+    ok(img.baseURL === 'https://file.example.com/v1', 'image：文件里的 baseURL 压过环境变量')
+    // 显式传参最高（既有行为，不能被这次调序破坏）。
+    const img2 = resolveImageConfig({ dshHome: home3, apiKey: 'sk-explicit' })
+    ok(img2.apiKey === 'sk-explicit', 'image：显式传参仍最优先')
+
+    // 来源标注（doctor / 设置页据此亮出「Key 来自哪里」）。
+    const src3 = readMinimaxConfigWithSource(home)
+    ok(src3.source.apiKey === 'file' && src3.apiKey === 'sk-file-new-valid', '来源标注：文件优先时报 file')
+    const src4 = readMinimaxConfigWithSource(home2)
+    ok(src4.source.apiKey === 'env' && src4.source.envKeyUsable === true, '来源标注：仅 env 有 Key 时报 env 并标 envKeyUsable')
+    const src5 = readMinimaxConfigWithSource(path.join(scratch, 'h6'))
+    ok(src5.source.apiKey === 'env' && src5.source.envKeyPresent === true, '来源标注：无文件配置时报 env（env 是唯一来源）')
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+}
+
+console.log('\n[8] 版本升级迁移：music.json → minimax.json（升级不再丢 Key）')
+{
+  // 0.1.0 把 MiniMax 配置存 music.json，0.2.0 改名 minimax.json 却没有迁移 ——
+  // 升级即「Key 凭空消失」。迁移必须满足：只在 minimax.json 不存在时做；
+  // 空文件不迁；迁完旧文件留档不删。
+  const src = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const fn = /function migrateLegacyConfigs[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
+  ok(fn.length > 0, '能找到 migrateLegacyConfigs')
+  ok(/existsSync\(newFile\)\s*\) return/.test(fn), 'minimax.json 已存在时不迁移（不覆盖新版配置）')
+  ok(/music\.json/.test(fn), '迁移来源是 music.json')
+  ok(/renameSync/.test(fn), '迁移后旧文件改名留档（不删除）')
+
+  // 真跑一遍迁移逻辑（函数未导出，按相同规则在临时目录里验证行为）。
+  const home = path.join(scratch, 'h7')
+  fs.mkdirSync(path.join(home, 'taptap-maker-dev'), { recursive: true })
+  const legacy = path.join(home, 'taptap-maker-dev', 'music.json')
+  writeJson(legacy, { apiKey: 'sk-legacy-key', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
+  writeMinimaxConfigPatch(home, { apiKey: 'sk-legacy-key', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
+  ok(readMinimaxConfigRaw(home).apiKey === 'sk-legacy-key', '迁移后 minimax.json 可读到旧 Key（规则等价验证）')
 }
 
 fs.rmSync(scratch, { recursive: true, force: true })

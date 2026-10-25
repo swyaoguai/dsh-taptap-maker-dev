@@ -32,7 +32,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount } from './paths.js'
+import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount, writeJson } from './paths.js'
 import { resolveAssetDir } from './assets.mjs'
 import { laneEnabled } from './lanes.mjs'
 import { countProcessesContaining, killProcessesContaining, psSingleQuote } from './win-proc.mjs'
@@ -344,10 +344,10 @@ export function siteFile(dshHome) {
 
 /** Remember the detected site; returns the stored record. */
 export function saveSite(dshHome, site) {
-  const file = siteFile(dshHome)
   const rec = { id: site.id, url: site.url, label: site.label, at: new Date().toISOString() }
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, `${JSON.stringify(rec, null, 2)}\n`, 'utf8')
+  // 原子写（writeJson）：进程被杀留下半截 JSON 会让 loadSite 静默回落到
+  // 「重新探测」，用户被登录到另一个站点（国内↔国际）才知道站点记忆丢了。
+  writeJson(siteFile(dshHome), rec)
   return rec
 }
 

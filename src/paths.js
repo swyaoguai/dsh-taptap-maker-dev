@@ -660,7 +660,12 @@ export function suggestBgmForProject(projectDir) {
 
 /**
  * Resolve effective image config with precedence:
- *   explicit credentialsFile JSON  >  env vars  >  image.json  >  inline fields.
+ *   explicit credentialsFile JSON  >  显式传参  >  设置页 image.json  >  env vars.
+ *
+ * ⚠️ 文件必须压过环境变量：设置页是用户「亲手保存」的地方，保存后立即生效是
+ * 最小预期。曾把 env 放在文件之前，机器上残留的旧 TAPTAP_IMAGE_* 变量会**静默
+ * 盖掉**用户刚保存的值 —— 表现为「显示已保存、实际没生效」，且 DSH 重启后必现。
+ * 每次调用显式传的参数（CLI --apiKey / --model / --size）仍然最优先。
  * Returns { baseURL, apiKey, model, size, n } with best-effort fields.
  */
 export function resolveImageConfig(options = {}) {
@@ -673,20 +678,23 @@ export function resolveImageConfig(options = {}) {
   return {
     baseURL: pick(
       fromCred.base_url, fromCred.baseURL,
+      options.baseURL,
+      fromFile.baseURL,
       process.env.TAPTAP_IMAGE_BASE_URL,
-      fromFile.baseURL, options.baseURL,
     ) ?? '',
     apiKey: pick(
       fromCred.api_key, fromCred.apiKey,
+      options.apiKey,
+      fromFile.apiKey,
       process.env.TAPTAP_IMAGE_API_KEY,
-      fromFile.apiKey, options.apiKey,
     ) ?? '',
     model: pick(
       fromCred.model,
+      options.model,
+      fromFile.model,
       process.env.TAPTAP_IMAGE_MODEL,
-      fromFile.model, options.model,
     ) ?? '',
-    size: pick(process.env.TAPTAP_IMAGE_SIZE, fromFile.size, options.size) ?? '1024x1024',
+    size: pick(options.size, fromFile.size, process.env.TAPTAP_IMAGE_SIZE) ?? '1024x1024',
     n: num(options.n, fromFile.n) ?? 1,
   }
 }
@@ -716,24 +724,31 @@ export function minimaxConfigPath(dshHome) {
 
 /**
  * Resolve effective MiniMax video config with precedence:
- *   env vars (MINIMAX_API_KEY / MINIMAX_BASE_URL / MINIMAX_VIDEO_MODEL)
- *   > minimax.json  > defaults.
+ *   设置页 minimax.json  >  env vars (MINIMAX_API_KEY / MINIMAX_BASE_URL / MINIMAX_VIDEO_MODEL)
+ *   >  defaults.
+ *
+ * ⚠️ 文件必须压过环境变量（2026-10-25 实测复现的「保存了却不生效」）：
+ * 用户机器的注册表里残留着一个**已失效**的 MINIMAX_API_KEY（401 鉴权失败），
+ * 而设置页保存的 JWT Key 是有效的。旧优先级 env > file 让每次 DSH 重启后
+ * 都读到那个失效 Key —— 设置页显示「已保存 ✓」，AI 调用时却报「鉴权失败 /
+ * 没有 Key」，用户完全无从查起。文件是用户显式保存的地方，理应最优先；
+ * CI 场景需要 env 时请清空文件里的对应字段（或显式传参）。
  */
 export function resolveMinimaxConfig(dshHome) {
   const fromFile = readJson(minimaxConfigPath(dshHome)) ?? {}
   const pick = (...vals) => vals.find((v) => typeof v === 'string' && v.trim().length > 0)
   const model = pick(
-    process.env.MINIMAX_VIDEO_MODEL,
     fromFile.model,
+    process.env.MINIMAX_VIDEO_MODEL,
   ) ?? 'MiniMax-H3'
   // 国际站 v2 与国内站 v2 的路径相同，只有域名不同。
   let baseURL = pick(
-    process.env.MINIMAX_BASE_URL,
     fromFile.baseURL,
+    process.env.MINIMAX_BASE_URL,
   ) ?? 'https://api.minimax.io'
   baseURL = baseURL.replace(/\/+$/, '').replace(/\/v2$/, '') // 统一存根域名
   return {
-    apiKey: pick(process.env.MINIMAX_API_KEY, fromFile.apiKey) ?? '',
+    apiKey: pick(fromFile.apiKey, process.env.MINIMAX_API_KEY) ?? '',
     baseURL,
     model,
   }
@@ -771,6 +786,35 @@ export function readMinimaxConfigRaw(dshHome) {
     baseURL: str(fromFile.baseURL, 'https://api.minimaxi.com').replace(/\/+$/, '').replace(/\/(v1|v2)$/i, ''),
     model: str(fromFile.model, 'MiniMax-H3'),
     measurements: typeof fromFile.measurements === 'object' && fromFile.measurements !== null ? fromFile.measurements : {},
+  }
+}
+
+/**
+ * 读**生效**的 MiniMax 配置并标注每个字段来自哪里（file / env / default）。
+ *
+ * 为什么要有来源：排查「保存了却不生效」时，第一件事就是确认运行时到底读的
+ * 哪一份。doctor 与设置页用这个函数把来源亮出来 —— Key 与站点不一致这种错位
+ * 一眼可见，不用再去翻注册表和配置文件对质。
+ */
+export function readMinimaxConfigWithSource(dshHome) {
+  const fromFile = readJson(minimaxConfigPath(dshHome)) ?? {}
+  const str = (v) => (typeof v === 'string' && v.trim().length > 0 ? v.trim() : '')
+  const fileKey = str(fromFile.apiKey)
+  const envKey = str(process.env.MINIMAX_API_KEY)
+  const apiKey = fileKey || envKey
+  const fileBase = str(fromFile.baseURL)
+  const envBase = str(process.env.MINIMAX_BASE_URL)
+  const baseURL = (fileBase || envBase || 'https://api.minimax.io').replace(/\/+$/, '').replace(/\/v2$/, '')
+  const model = str(fromFile.model) || str(process.env.MINIMAX_VIDEO_MODEL) || 'MiniMax-H3'
+  return {
+    apiKey,
+    baseURL,
+    model,
+    source: {
+      apiKey: fileKey ? 'file' : envKey ? 'env' : 'none',
+      envKeyPresent: Boolean(envKey),
+      envKeyUsable: !fileKey && Boolean(envKey),
+    },
   }
 }
 

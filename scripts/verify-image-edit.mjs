@@ -92,8 +92,13 @@ await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const port = server.address().port
 
 const cli = path.resolve('src/taptap-image.mjs')
+// ⚠️ 隔离 DSH_HOME：配置优先级现在是「文件 > env」，不隔离的话本机真实的
+// image.json 会压过测试注入的 env 变量，测试结果取决于开发机的配置状态。
+const isolatedHome = path.join(scratch, 'dsh-home')
+fs.mkdirSync(isolatedHome, { recursive: true })
 const env = {
   ...process.env,
+  DSH_HOME: isolatedHome,
   TAPTAP_IMAGE_BASE_URL: `http://127.0.0.1:${port}/v1`,
   TAPTAP_IMAGE_API_KEY: 'test-key-edit',
   TAPTAP_IMAGE_MODEL: 'gpt-image-test',
