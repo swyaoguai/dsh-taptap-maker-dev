@@ -34,6 +34,7 @@ fs.writeFileSync(b, Buffer.from(pngB64, 'base64'))
 let seen = []
 const server = http.createServer((req, res) => {
   if (req.method !== 'POST') { res.writeHead(404); res.end('{}'); return }
+  const reqPath = new URL(req.url, 'http://x').pathname
   const ctype = String(req.headers['content-type'] ?? '')
   const chunks = []
   req.on('data', (c) => chunks.push(c))
@@ -43,11 +44,11 @@ const server = http.createServer((req, res) => {
       const text = body.toString('latin1')
       const names = []
       for (const m of text.matchAll(/name="(image\[\]|image|images)"/g)) names.push(m[1])
-      seen.push({ kind: 'multipart', fieldNames: names })
+      seen.push({ kind: 'multipart', path: reqPath, fieldNames: names })
     } else {
       let keys = []
       try { keys = Object.keys(JSON.parse(body.toString('utf8'))) } catch { /* ignore */ }
-      seen.push({ kind: 'json', keys })
+      seen.push({ kind: 'json', path: reqPath, keys })
     }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ data: [{ b64_json: pngB64 }] }))
@@ -132,6 +133,46 @@ console.log('\n[6] 不存在的参考图 → 明确报错')
   const r = await run(['edit', '--in', path.join(scratch, 'nope.png'), '--prompt', 'x', '--out', path.join(scratch, 'o7.png')])
   ok(r.ok === false, '报错退出')
   ok(/不存在/.test(r.stderr), '说明文件不存在', r.stderr?.slice(0, 60))
+}
+
+console.log('\n[7] 统一入口 generateImage：中转站回退带参考图时必须走 edits 而不是 generations')
+{
+  // 这是最容易「看起来接上了、实际没生效」的地方：relayOpts 带了 in，
+  // 但旧的 runLane 无条件调 generateImage（/images/generations，纯文生图），
+  // 参考图被静默丢弃 —— 用户以为图生图生效，实际拿到一张无关新图。
+  const gptSrc = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
+  const runLane = /const runLane = async \(laneId\) => \{[\s\S]*?\n  \}/.exec(gptSrc)?.[0] ?? ''
+  ok(runLane.length > 0, '能找到 runLane')
+  ok(/wantsRefs/.test(runLane), 'runLane 会判断是否带了参考图')
+  ok(/relayEdit\(relayOpts\)/.test(runLane), '带参考图时走 relayEdit（/images/edits）')
+  ok(/relayGenerate\(relayOpts\)/.test(runLane), '无参考图时仍走 relayGenerate（/images/generations）')
+  // 顺序：应先判断 wantsRefs 再 generateImage，否则永远走不到 edit
+  const iRefs = runLane.indexOf('wantsRefs')
+  const iGen = runLane.lastIndexOf('relayGenerate(relayOpts)')
+  ok(iRefs > 0 && iRefs < iGen, '判断在生成调用之前（否则分支永远不生效）')
+  ok(/import .*editImage as relayEdit/.test(gptSrc), 'gpt 模块确实 import 了 editImage')
+
+  // 真跑一次：给 mock 端点发请求，确认走的是 /images/edits 且带两张图。
+  seen = []
+  const { generateImage: unified } = await import('../src/taptap-gpt.mjs')
+  const home = path.join(scratch, 'home-unified')
+  fs.mkdirSync(path.join(home, 'taptap-maker-dev'), { recursive: true })
+  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'image.json'), JSON.stringify({
+    baseURL: `http://127.0.0.1:${port}/v1`, apiKey: 'sk-test', model: 'gpt-image-1',
+  }))
+  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'), JSON.stringify({
+    autoFallback: true,
+    groups: { image: { order: ['gptWeb', 'relayImage'], enabled: { gptWeb: false, relayImage: true } } },
+  }))
+  const r = await unified(home, '改风格', {
+    relayOpts: { dshHome: home, prompt: '改风格', out: path.join(scratch, 'unified.png'), in: [a, b] },
+    relayReady: () => true,
+  })
+  ok(r.ok === true, '统一入口调用成功', JSON.stringify(r).slice(0, 160))
+  ok(seen.length === 1 && /\/images\/edits$/.test(seen[0]?.path ?? ''), '请求打到 /images/edits（不是 generations）', JSON.stringify(seen))
+  ok(!/generations/.test(seen[0]?.path ?? ''), '确实没走 /images/generations')
+  ok((seen[0]?.fieldNames ?? []).filter((n) => n === 'image[]').length === 2, '带上了两张 image[]')
+  ok(r.via === 'edit', '返回值标注 via=edit')
 }
 
 server.close()

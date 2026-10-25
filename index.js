@@ -2148,19 +2148,48 @@ export function apply(ctx, config = {}) {
         }
         const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
         const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
-        const prompt = desc.replace(/(?:--downscale|-d)\s+\d+x\d+/, '').replace(/(?:--account|-a)\s+\S+/, '').trim()
+        // 参考图（图生图）：`--ref <图>` 可重复、也可逗号分隔。
+        // ⚠️ 这些参数必须从 prompt 里剥掉：以前只剥 downscale/account，
+        //    用户写 `/taptap-gpt 改成水彩风 --ref a.png` 时，"--ref a.png"
+        //    会原样混进提示词发给 ChatGPT（模型会把它当成文字要求）。
+        const refs = []
+        for (const m of raw.matchAll(/(?:--ref(?:erence)?s?|-r)\s+(?:"([^"]+)"|(\S+))/g)) {
+          const value = m[1] ?? m[2] ?? ''
+          for (const part of value.split(',')) {
+            const p = part.trim()
+            if (p.length > 0) refs.push(p)
+          }
+        }
+        const prompt = desc
+          .replace(/(?:--downscale|-d)\s+\d+x\d+/g, '')
+          .replace(/(?:--account|-a)\s+\S+/g, '')
+          .replace(/(?:--ref(?:erence)?s?|-r)\s+(?:"[^"]+"|\S+)/g, '')
+          .trim()
+        if (prompt.length === 0) {
+          return {
+            kind: 'error',
+            text: '请给一句图片描述。图生图：/taptap-gpt 把这个角色改成水彩风 --ref 角色.png',
+          }
+        }
         // 走统一入口 generateImage：它按「生成通道」卡的顺序/开关/autoFallback
         // 决定先走谁、额度不足要不要换下一条。旧写法直接调 generateWithRotation，
         // 用户打开「额度不足自动换通道」后生图也永远不会切到中转站（入口没人接）。
         const imageCfgNow = readImageConfigRaw(home)
         const relayOut = path.join(resolveDownloadDir(home, {}).dir, `relay-${Date.now()}.png`)
         const r = await gptGenerateImage(home, prompt, {
-          gptOpts: { accountId: acct, downscale },
+          gptOpts: {
+            accountId: acct,
+            downscale,
+            ...(refs.length > 0 ? { references: refs } : {}),
+          },
           relayOpts: {
             dshHome: home,
             prompt,
             out: relayOut,
             ...(downscale ? { downscale } : {}),
+            // 中转站回退也接受参考图：单图用 in，多图交给 editImage 的 image[]。
+            ...(refs.length === 1 ? { in: refs[0] } : {}),
+            ...(refs.length > 1 ? { in: refs } : {}),
           },
           relayReady: () => Boolean(imageCfgNow.baseURL && imageCfgNow.apiKey && imageCfgNow.model) && relayImageLaneEnabled(home),
         })
@@ -2204,8 +2233,8 @@ export function apply(ctx, config = {}) {
     // /taptap-gpt 作为首选后，/taptap-image 变成显式回退入口。
     scoped.commands.register({
       name: 'taptap-image',
-      description: '中转站生图（回退通道）：生成图片 / --config 查看配置',
-      input: { hint: '<图片描述>（网页通道不可用时的回退）/ --config' },
+      description: '中转站生图（回退通道）：文生图 / 图生图（--ref）/ --config 查看配置',
+      input: { hint: '<图片描述> [--ref <参考图>]（可重复）/ --config' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const cli = path.join(PKG_DIR, 'src', 'taptap-image.mjs')
@@ -2249,8 +2278,24 @@ export function apply(ctx, config = {}) {
           }
         }
 
-        const desc = raw.replace(/^(图片|生图|生成图片|画一张|生成一张)\s*/i, '').trim()
-        if (desc.length === 0) {
+        const descRaw = raw.replace(/^(图片|生图|生成图片|画一张|生成一张)\s*/i, '').trim()
+        // 参考图（图生图）：与 /taptap-gpt 同一套解析，并且必须从提示词里剥掉 ——
+        // 否则 `--ref a.png` 会被当成描述的一部分发给模型。
+        const relayRefs = []
+        for (const m of raw.matchAll(/(?:--ref(?:erence)?s?|-r)\s+(?:"([^"]+)"|(\S+))/g)) {
+          const value = m[1] ?? m[2] ?? ''
+          for (const part of value.split(',')) {
+            const p = part.trim()
+            if (p.length > 0) relayRefs.push(p)
+          }
+        }
+        const desc = descRaw
+          .replace(/(?:--ref(?:erence)?s?|-r)\s+(?:"[^"]+"|\S+)/g, '')
+          .replace(/(?:--size|-s)\s+\d+x\d+/g, '')
+          .replace(/(?:--downscale|-d)\s+\d+x\d+/g, '')
+          .replace(/(?:--multi-ref|--single-ref)/g, '')
+          .trim()
+        if (desc.length === 0 && relayRefs.length === 0) {
           return {
             kind: 'success',
             text: [
@@ -2259,9 +2304,19 @@ export function apply(ctx, config = {}) {
               `  node "${cli}" --prompt "<描述>" --out D:\\tmp\\out.png --size 1024x1024`,
               `  node "${cli}" --prompt "蓝色盾牌图标，扁平，居中留白" --out D:\\tmp\\icon.png --transparent --downscale 128x128`,
               '',
+              '图生图（参考图）：',
+              `  node "${cli}" edit --in 原图.png --prompt "<怎么改>" --out D:\\tmp\\out.png`,
+              `  node "${cli}" edit --in 角色.png --in 服装.png --prompt "<怎么改>" --out out.png   # 多图参考`,
+              '',
               '尺寸按需传 --size；端点只认 1024x1024 / 1024x1536 / 1536x1024 时会自动回退到最接近的一档。',
               '不消耗任何 Maker MCP 内置额度。',
             ].join('\n'),
+          }
+        }
+        if (desc.length === 0) {
+          return {
+            kind: 'error',
+            text: '图生图需要一句「怎么改」的描述。例：/taptap-image 改成赛博朋克风 --ref 角色.png',
           }
         }
 
@@ -2271,21 +2326,28 @@ export function apply(ctx, config = {}) {
         // inconsistent — fixed 2026-10-18.)
         const fallback = resolveDownloadDir(home, {}).dir
         const outFile = path.join(fallback, `relay-${Date.now()}.png`)
-        const argv = [cli, '--prompt', desc, '--out', outFile]
         const size = (/(?:--size|-s)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
-        if (size) argv.push('--size', size)
         const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
+        // 有参考图 → edit 子命令（/images/edits）；否则 plain 文生图（/images/generations）。
+        const argv = relayRefs.length > 0
+          ? [cli, 'edit', '--prompt', desc, '--out', outFile]
+          : [cli, '--prompt', desc, '--out', outFile]
+        for (const ref of relayRefs) argv.push('--in', ref)
+        if (size) argv.push('--size', size)
         if (downscale) argv.push('--downscale', downscale)
+        // 用户显式声明的多图能力，透传给 CLI（CLI 自己也会按模型名拦单图模型）。
+        if (/--multi-ref\b/.test(raw)) argv.push('--multi-ref')
+        if (/--single-ref\b/.test(raw)) argv.push('--single-ref')
         try {
           const out = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 300000 })
           const text = (out.stdout ?? '') + (out.stderr ?? '')
-          if (out.status !== 0) return { kind: 'error', text: `中转站生图失败：\n${text.trim()}` }
+          if (out.status !== 0) return { kind: 'error', text: `${relayRefs.length > 0 ? '中转站图生图' : '中转站生图'}失败：\n${text.trim()}` }
           let parsed = {}
           try { parsed = JSON.parse((out.stdout ?? '').trim()) } catch { parsed = {} }
           return {
             kind: 'success',
             text: [
-              `已生成：${(parsed.outputs ?? [outFile])[0]}`,
+              `${relayRefs.length > 0 ? `已按 ${parsed.inputCount ?? relayRefs.length} 张参考图生成` : '已生成'}：${(parsed.outputs ?? [outFile])[0]}`,
               ...(parsed.notes ?? []),
               '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。',
             ].join('\n'),

@@ -46,7 +46,7 @@ import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending } from './paths.js'
-import { downscaleFile, generateImage as relayGenerate } from './taptap-image.mjs'
+import { downscaleFile, generateImage as relayGenerate, editImage as relayEdit } from './taptap-image.mjs'
 import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
 import { resolveAssetDir } from './assets.mjs'
 import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
@@ -1293,6 +1293,17 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
         throw e
       }
       return r
+    }
+    // ⚠️ 中转站：有参考图时必须走 /images/edits（图生图），不能走
+    //    /images/generations（纯文生图）—— 后者**完全不读** in/references，
+    //    参考图会被静默丢弃，用户以为图生图生效了，实际得到的是一张无关新图。
+    //    relayOpts 里带 in（字符串或数组）即判定为图生图。
+    const wantsRefs = relayOpts.in !== undefined || relayOpts.input !== undefined
+      || relayOpts.ref !== undefined || relayOpts.refs !== undefined
+    if (wantsRefs) {
+      const edited = await relayEdit(relayOpts)
+      // editImage 返回 {outputs:[path], ...}，统一成生图通道的形状（saved）。
+      return { ...edited, ok: true, saved: edited.outputs?.[0] ?? edited.saved, via: 'edit' }
     }
     return relayGenerate(relayOpts)
   }
