@@ -22,7 +22,8 @@
     "src",
     "skills",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "THIRD-PARTY-NOTICES.md"
   ],
   "keywords": [
     "dsh",

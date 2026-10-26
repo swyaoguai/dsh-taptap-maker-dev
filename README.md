@@ -434,6 +434,34 @@ node <plugin-dir>/src/taptap-skills-update.mjs
 - **Freesound** — 需要用户自己的 API Key（实测裸请求 401）
 - **OpenGameArt** — 授权混杂，含 **CC-BY-NC 等禁止商用** 的协议
 
+## 开源致谢
+
+本插件整合了第三方开源项目的**方法论与判据**（引擎无关的那部分）。完整来源、
+许可与逐项对应见 [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md)。
+
+### 3AGameFactory（OpenDCAI）· Apache-2.0
+
+感谢 [OpenDCAI/GameFactory-3A](https://github.com/OpenDCAI/GameFactory-3A)
+公开他们的 3A 游戏资产生成框架。我们从中学到并落地了两件事：
+
+| 整合到 | 学到的核心洞见 |
+|---|---|
+| `skills/asset-orientation-qa` | **朝向无法由几何计算得出**：朝 +Z 与朝 −Z 的模型导出后包围盒、节点树、动画完全一致，加载文件分不出来，只能"看"。以及"不要用 gameplay 代码补偿旋转"这条硬规则 |
+| `skills/asset-visual-qa` | **结构检查 ≠ 视觉可用**；**编译通过 / 能启动 / 日志无错 ≠ 验证完成**；以及游戏内复核的完整维度（朝向、附着、穿模、尺度、风格、光照、VFX、可玩性） |
+
+我们**只取其方法论**，不搬运引擎专属代码 —— 它的参考实现面向
+UE5 / Unity / Godot / Blender / three.js，与本插件的 TapTap Maker（UrhoX + Lua）
+API 完全不通用，硬搬会让 agent 调用不存在的接口。
+
+```
+@misc{gamefactory3a,
+  title        = {3AGameFactory: Open-Source 3A Game Generation Skills and Asset Framework},
+  author       = {OpenDCAI},
+  year         = {2026},
+  howpublished = {\url{https://github.com/OpenDCAI/GameFactory-3A}},
+}
+```
+
 ## 诚实限制
 
 使用前请读完这几条，我们不假装它们不存在：
