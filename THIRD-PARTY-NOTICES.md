@@ -51,8 +51,11 @@
 Apache-2.0 要求保留版权声明、许可证文本与修改说明。本仓库：
 
 - 在上表逐项写明来源文件路径与仓库地址；
+- 原样附带上游 `LICENSE` 全文：`third_party/GameFactory-3A/LICENSE`，并纳入 npm 包；
+- 两个改写技能在 frontmatter 明确标注 `thirdPartyLicense: Apache-2.0` 和
+  `thirdPartyModified: true`，同时注明来源；
 - 明确说明是**改写而非原样复制**（已重写为中文并适配 UrhoX+Lua 语境）；
-- 本插件整体仍以其自身 `LICENSE`（MIT）发布；上述被整合的**方法论内容**
-  按 Apache-2.0 的条款使用。
+- 本插件整体仍以其自身 `LICENSE`（MIT）发布；上游许可证文件单独保留，
+  不改变其他原有文件的许可证。实际分发时请一并保留本文件和上游 LICENSE。
 
 如原作者认为某处整合方式不妥，请提 issue，我们会调整或移除。

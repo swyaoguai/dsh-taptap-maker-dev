@@ -35,6 +35,8 @@ console.log('\n[1] 两个整合技能存在且可被发现')
     ok(/^description: .{20,}/m.test(fm), `${dir} 有足够长的 description（供路由匹配）`)
     ok(fm.includes('adapted-from-GameFactory-3A'), `${dir} frontmatter 标注了整合来源`)
     ok(fm.includes('Apache-2.0'), `${dir} frontmatter 标注了许可证`)
+    ok(/^thirdPartyLicense: Apache-2\.0$/m.test(fm), `${dir} 标明第三方许可证字段`)
+    ok(/^thirdPartyModified: true$/m.test(fm), `${dir} 明确标记已修改`)
   }
 }
 
@@ -48,10 +50,16 @@ console.log('\n[2] Apache-2.0 合规：致谢与出处')
   ok(/orientation_review\.md/.test(notices), '逐项指出整合的源文件')
   ok(/改写|重写/.test(notices), '说明是改写而非逐字复制（Apache-2.0 的修改声明）')
   ok(/未采用|不采用|未搬运|不搬运/.test(notices), '说明哪些部分没有采用及原因')
+  ok(fs.existsSync(path.join(root, 'third_party', 'GameFactory-3A', 'LICENSE')),
+    '随仓库保留上游 Apache-2.0 LICENSE 全文')
+  const upstreamLicense = fs.existsSync(path.join(root, 'third_party', 'GameFactory-3A', 'LICENSE'))
+    ? read('third_party/GameFactory-3A/LICENSE') : ''
+  ok(/Apache License[\s\S]*Version 2\.0/.test(upstreamLicense), '上游 LICENSE 内容确实是 Apache-2.0 全文')
 
   // 包发布时必须带上（否则分发出去就没有版权声明）
   const pkg = JSON.parse(read('package.json'))
   ok(pkg.files.includes('THIRD-PARTY-NOTICES.md'), 'package.json files 里包含致谢文件')
+  ok(pkg.files.includes('third_party/GameFactory-3A/LICENSE'), 'package.json files 里包含上游 LICENSE 全文')
 
   // README 里给用户看得见
   const readme = read('README.md')

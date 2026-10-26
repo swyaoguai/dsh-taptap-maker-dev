@@ -2,6 +2,8 @@
 name: asset-orientation-qa
 description: 判断导入模型的朝向与尺度是否正确（+Z/−Z 边界框完全相同，几何算不出来，只能看），并记录到资产元数据而不是用代码补偿旋转。
 origin: adapted-from-GameFactory-3A (Apache-2.0, OpenDCAI)
+thirdPartyLicense: Apache-2.0
+thirdPartyModified: true
 category: art-audio-content
 ---
 

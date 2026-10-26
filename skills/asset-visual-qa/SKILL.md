@@ -2,6 +2,8 @@
 name: asset-visual-qa
 description: 生成/导入的资产在宣布可用前的视觉与运行期复核——结构检查不等于视觉可用，编译通过不等于验证完成；含朝向、附着、穿模、尺度、风格、VFX 的复核清单。
 origin: adapted-from-GameFactory-3A (Apache-2.0, OpenDCAI)
+thirdPartyLicense: Apache-2.0
+thirdPartyModified: true
 category: art-audio-content
 ---
 

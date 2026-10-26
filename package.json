@@ -23,7 +23,8 @@
     "skills",
     "cordis.patch.yml",
     "README.md",
-    "THIRD-PARTY-NOTICES.md"
+    "THIRD-PARTY-NOTICES.md",
+    "third_party/GameFactory-3A/LICENSE"
   ],
   "keywords": [
     "dsh",
