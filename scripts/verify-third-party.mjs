@@ -106,5 +106,39 @@ console.log('\n[5] 没有把引擎专属代码搬进来')
   ok(/taptap-maker/.test(orient + visual), '指向本插件自己的 taptap-maker-* 技能')
 }
 
+console.log('\n[6] 不给出空指引 / 不误导（本轮修复）')
+{
+  const orient = read('skills/asset-orientation-qa/SKILL.md')
+
+  // ❌ 曾经写「查 taptap-maker-core 里的轴向约定」—— 但那个技能里并没有这条，
+  //    等于让 agent 白查一趟。现在必须明确说"本插件没有记录，需要自己实测"。
+  ok(!/查 .{0,20}taptap-maker-core.{0,20}关于 Node 变换/.test(orient), '不再指向不存在的轴向文档')
+  ok(/目前没有记录 UrhoX 的轴向约定/.test(orient), '如实说明本插件没有轴向约定记录')
+  ok(/实测方法/.test(orient), '给出可执行的实测方法（而不是只让 agent 去查）')
+
+  // ❌ 曾经说「写进资产自己的元数据（.meta）」—— 但 .meta 由 Maker 自动维护、
+  //    只含 uuid，手改会被覆盖。必须明确排除 .meta。
+  ok(!/写进\*\*资产自己的元数据\*\*（`\.meta`/.test(orient), '不再建议写进 .meta')
+  ok(/不要写进 \.meta/.test(orient), '明确排除 .meta（引擎自动维护、只含 uuid）')
+  ok(/assets-manifest\.json|GAME_RULES\.md/.test(orient), '给出正确的记录位置')
+
+  // 拿多视角图必须有 Maker 里可执行的办法（原仓库有现成渲染工具，我们没有）
+  ok(/在 TapTap Maker 里怎么拿到这些图/.test(orient), '补了 Maker 语境下的取图办法')
+  ok(/orthoSize/.test(orient), '提醒四个视角要用同一 orthoSize（横向可比）')
+  ok(/外部查看器/.test(orient) && /最终朝向结论必须在 Maker 里复核/.test(orient),
+    '说明外部查看器的轴向可能不同，结论必须回 Maker 复核')
+
+  // 动画名 / Root Motion 不能用来推断朝向（这是原仓库明确点出的坑）
+  ok(/不能用来推断模型朝向|都不能用来推断/.test(orient), '明确动画名/Root Motion 不能推断朝向')
+
+  // 引用的技能必须真实存在（防止写成指向空气的交叉引用）
+  const cited = [...orient.matchAll(/skills\/([a-z0-9-]+)(?=[`\s）)】]|$)/g)].map((m) => m[1])
+  const uniq = [...new Set(cited)]
+  ok(uniq.length > 0, '技能里引用了其它技能')
+  for (const name of uniq) {
+    ok(fs.existsSync(path.join(root, 'skills', name, 'SKILL.md')), `交叉引用的 skills/${name} 真实存在`)
+  }
+}
+
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
