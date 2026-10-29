@@ -2633,7 +2633,7 @@ export function apply(ctx, config = {}) {
               u.credentials ? '' : [
                 '配置方法：设置页 →「生成通道」→「章鱼生图（积分站）」卡，填账号密码点「登录并保存」',
                 '（会先连站点验证，通过才保存；即时生效，无需重开宿主）。',
-                '没有账号：https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3（邀请码 +50 张额度）',
+                '没有账号：https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF（邀请码 +50 张额度）',
                 '⚠️ 不要让用户把密码贴进对话 —— 界面输入框只走本地服务，代填会落进日志。',
                 '',
               ].join('\n'),

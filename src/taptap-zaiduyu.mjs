@@ -586,7 +586,7 @@ export async function main(argv = process.argv.slice(2)) {
         u.script ? null : '脚本缺失：确认 skills/zaiduyu-imagegen/scripts/generate.py 在插件目录里',
         u.credentials ? null : '缺少站点账号：请在设置页「生成通道」→「章鱼生图（积分站）」卡里填账号密码并点「登录并保存」'
           + '（插件会先连站点只读验证，通过才保存，即时生效、无需重开宿主）。\n'
-          + '  没有账号可注册：https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3（邀请码 +50 张额度）\n'
+          + '  没有账号可注册：https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF（邀请码 +50 张额度）\n'
           + '  本通道不提供命令行登录：环境变量只是兼容兜底，且不要把密码写进命令 —— 那会落进对话记录与本机日志。',
         u.python ? null : '未找到 Python 3（脚本只用标准库，无需第三方包）',
       ].filter(Boolean).join('\n'),

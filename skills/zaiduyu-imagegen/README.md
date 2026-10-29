@@ -24,7 +24,7 @@
 
 - 已安装 Codex（桌面版或 CLI）
 - Python 3.10 及以上，命令行中 `python` 可用
-- 一个 `https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3` 账号；使用邀请码可以额外增加 50 张生图额度
+- 一个 `https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF` 账号；使用邀请码可以额外增加 50 张生图额度
 
 ## 安装
 
@@ -54,7 +54,7 @@
 
 脚本不保存凭据，账号密码只从环境变量读取。
 
-还没有账号时，先用浏览器打开注册入口：https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3（使用邀请码可以额外增加 50 张生图额度）。
+还没有账号时，先用浏览器打开注册入口：https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF（使用邀请码可以额外增加 50 张生图额度）。
 
 Windows PowerShell（永久生效，设置后重开终端）：
 

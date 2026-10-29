@@ -1732,7 +1732,7 @@ window.__ModuleLoader__.load({
         info.hasCredentials ? null : h('p', { style: S.hint },
           '还没有账号？注册：',
           h('a', {
-            href: 'https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3',
+            href: 'https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF',
             target: '_blank', rel: 'noopener noreferrer',
             style: { color: 'var(--dsh-accent, #4a9eff)' },
           }, 'pai.zaiduyu.top（用此邀请链接额外 +50 张额度）')),

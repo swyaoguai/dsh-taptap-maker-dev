@@ -95,7 +95,7 @@ IMAGE_MODEL_ID_RE = re.compile(
 CREDENTIAL_HELP = """缺少账号配置：请在自己的终端设置 ZAIDUYU_USER 和 ZAIDUYU_PASS。
 不要把密码粘贴到 AI 对话、命令记录或技能文件。配置步骤见 README.md 的凭据小节。
 Windows 用户级环境变量为明文存储；配置后重启 WorkBuddy / Codex 以刷新宿主环境。
-没有账号可在此注册：https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3
+没有账号可在此注册：https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF
 使用邀请码可以额外增加 50 张生图额度。"""
 
 
