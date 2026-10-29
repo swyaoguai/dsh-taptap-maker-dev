@@ -1,7 +1,8 @@
 # 第三方开源致谢与许可
 
-本插件整合了部分第三方开源项目的**方法论、判据与规范**。感谢这些项目的作者
-公开他们的工作，让本地游戏开发工具链能少走弯路。
+本插件整合了部分第三方开源项目的**方法论、判据与规范**，以及两个**作为服务脚本
+原样分发**的第三方 skill（见下文 zaiduyu-imagegen 与 Stable Audio Open）。
+感谢这些项目的作者公开他们的工作，让本地游戏开发工具链能少走弯路。
 
 整合原则（重要）：
 
@@ -10,6 +11,32 @@
   与 UE5 / Unity / Godot / Blender / three.js 的 API 完全不通用。
   硬搬过来会误导 agent 调用不存在的接口，那比没有更糟。
 - 重写为中文并适配本项目语境，而非逐字复制；因此本仓库对这些内容自负文责。
+
+---
+
+## zaiduyu-imagegen（章鱼多模型生图 skill）
+
+- 来源：他人编写的 Codex Skill（`pai.zaiduyu.top` 积分制多模型生图站的服务脚本），
+  由用户本人提供并要求整合进本插件。
+- 许可证：**上游包内未附带许可证声明**（其 README/SKILL 均未写明）。
+  本插件按用户提供材料的原样分发处理，不对其做再授权；如原作者对分发方式
+  有异议，请提出，我们会调整或移除。
+- 落地：`skills/zaiduyu-imagegen/`（`generate.py` 原样保留，未改动逻辑；
+  仅 `SKILL.md` 的本机安装一节改写为通用集成说明）+ `src/taptap-zaiduyu.mjs`
+  （Node 包装层：Python 探测、凭据检查、输出解析，为本插件自写）。
+- 凭据模型：设置页验证后保存在本机 `$DSH_HOME/taptap-maker-dev/zaiduyu.json`，
+  环境变量 `ZAIDUYU_USER` / `ZAIDUYU_PASS` 只作兼容兜底；运行上游脚本时只注入
+  子进程环境，不进命令行参数、不回显密码、不放入 Maker 工作区。
+
+## Stable Audio Open 1.0（本地音效模型）
+
+- 模型：`stabilityai/stable-audio-open-1.0`（Stability AI）。
+- 许可证：**Stability AI Community License** —— 个人与年营收 < 100 万美元的
+  团队可免费商用；完整条款以用户下载包内的 `LICENSE.md` 为准。
+- **本插件不分发模型权重**：约 5.3GB 权重由用户依 `taptap-sfx guide` 的指引
+  **自行手动下载**（ModelScope / HuggingFace 官方渠道），并且先做硬件体检。
+- 落地：`skills/taptap-maker-local-sfx/scripts/`（sfx_env.py 环境管理 +
+  generate.py 推理脚本，为整合编写）+ `src/taptap-sfx.mjs`（编排与落盘，本插件自写）。
 
 ---
 

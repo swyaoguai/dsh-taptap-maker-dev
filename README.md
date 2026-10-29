@@ -13,7 +13,9 @@
 | **额度红线** | 注入系统守则：非你在对话中明确要求，禁止调用 12 个消耗 Maker 额度的生成工具。设置页有开关，关闭需二次确认，**即时生效无需重启** |
 | **ChatGPT 网页生图（首选）** | 走你自己的 ChatGPT 账号在网页里出图（免费账号即可）。登录一次，之后全自动；支持**多账号轮询**，一个触配额自动换下一个 |
 | **中转站生图（回退）** | OpenAI 兼容 `/images/generations`。填 Base URL / Key / Model，支持「获取模型」自动列出可用模型。尺寸按需传，支持高质量缩小做图标 |
+| **章鱼生图（可选第三通道）** | 整合第三方 skill：`pai.zaiduyu.top` 多模型积分站（gpt-image-2 / Z-image / Banana 等，价格实时读取）。**花的是你自己买的积分**，所以默认排在最后、需要你自己在设置页排序或显式调用；凭据由你在设置页输入并验证后存于本机；环境变量仅作兼容兜底，插件不在对话中代填或回显密码 |
 | **CC0 音效库** | Kenney 九个包共 **706 个音频**（CC0，可商用免署名），首次使用自动下载；本地没有时回落到 Mixkit / 小森平 / 効果音ラボ |
+| **本地音效生成（兜底）** | Stable Audio Open 1.0 在你自己显卡上跑，**零额度、不联网付费**。库里没有合适素材时才用；模型约 5.3GB **需你手动下载**（先体检硬件，插件绝不自动拉大文件） |
 | **完整 BGM** | 自动生成提示词 + 打开 MiniMax Audio 网页；下载后**自动导入**（转格式 + 装进 `assets/audio/bgm/` + 生成 `.meta`） |
 | **BGM 工作台挂件** | 主界面输入框旁的 🎵 挂件：**试听**刚生成的 BGM、**拖波形裁剪**选区间（可加淡入淡出防爆音）、**一键导入**项目；生成完自动亮红点提醒 |
 | **音频转换** | ffmpeg 批量转格式 / 压缩 / 响度归一 / 去静音 / 淡入淡出 / 短音拼循环 |
@@ -389,6 +391,17 @@ node <plugin-dir>/src/taptap-gpt.mjs pool unban --id a2 # 恢复冷却账号
 # 生图回退：中转站（尺寸按需，支持透明底 + 缩小）
 node <plugin-dir>/src/taptap-image.mjs --prompt "蓝色盾牌图标" --out icon.png --transparent --downscale 128x128
 
+# 章鱼生图（积分站，可选通道；先看模型价与余额再决定用哪个模型）
+node <plugin-dir>/src/taptap-zaiduyu.mjs status          # 脚本/Python/账号 三态
+node <plugin-dir>/src/taptap-zaiduyu.mjs models          # 实时模型清单 + 单张积分 + 余额
+node <plugin-dir>/src/taptap-zaiduyu.mjs gen --prompt "小猫赏月" --model gpt-image-2 --ratio 16:9
+# 站点账号在【设置页】登录（无需命令行）：
+#   设置页 → 生成通道 → 「章鱼生图（积分站）」卡 → 填账号密码 → 点「登录并保存」
+#   插件会先连站点做一次只读验证（不扣积分），通过才保存，即时生效、不用重开宿主。
+#   凭据存本机 $DSH_HOME/taptap-maker-dev/zaiduyu.json，密码不回显、不进 Maker 工作区。
+# 兼容：环境变量 ZAIDUYU_USER / ZAIDUYU_PASS 仍可用（文件值优先）。不建议把密码
+#   写进终端命令 —— 那会落进对话记录与本机日志。
+
 # BGM 账号池：添加账号 → 各登录一次 → 额度用完自动轮换
 node <plugin-dir>/src/taptap-bgm-web.mjs login                      # 主账号
 node <plugin-dir>/src/taptap-bgm-web.mjs pool add --id b2 --label "小号"
@@ -399,6 +412,15 @@ node <plugin-dir>/src/taptap-bgm-web.mjs gen --prompt "史诗管弦战斗音乐"
 # 音效：搜索 / 安装 / 查看来源
 node <plugin-dir>/src/taptap-audio.mjs search "金币音效"
 node <plugin-dir>/src/taptap-audio.mjs add "金币音效" --project <maker-project> --out coin.wav
+
+# 本地音效生成（CC0 库没有合适素材时的兜底；零额度，需 NVIDIA 显卡）
+node <plugin-dir>/src/taptap-sfx.mjs check                       # 硬件体检（不够就止步）
+node <plugin-dir>/src/taptap-sfx.mjs guide                       # 打印 5.3GB 模型【手动】下载命令
+node <plugin-dir>/src/taptap-sfx.mjs verify --fast               # 下载后校验（--fast 只比大小）
+node <plugin-dir>/src/taptap-sfx.mjs deps                        # 打印依赖命令；确认后才加 --yes
+node <plugin-dir>/src/taptap-sfx.mjs doctor                      # 装好后体检
+node <plugin-dir>/src/taptap-sfx.mjs gen "coin pickup, bright arcade blip" -s 3 --project <maker-project>
+# 模型权重本插件【绝不自动下载】：先体检、用户同意、用户自己在终端逐条跑 curl。
 node <plugin-dir>/src/taptap-audio.mjs sources
 
 # BGM：生成提示词 + 打开网页（对话里用 /taptap-bgm 即可）

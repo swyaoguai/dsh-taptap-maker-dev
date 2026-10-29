@@ -46,6 +46,10 @@ export const LANE_GROUPS = {
     lanes: [
       { id: 'gptWeb', label: 'ChatGPT 网页生图', kind: 'web', note: '真实浏览器通道，多账号轮换' },
       { id: 'relayImage', label: '中转站生图', kind: 'api', note: 'OpenAI 兼容 /images' },
+      // 章鱼生图：pai.zaiduyu.top 积分制多模型站（第三方 skill 整合）。
+      // 积分是**预付的**（花钱买的），所以它是付费通道：autoFallback 默认关时
+      // 不会自动切到这里，和「不要替用户动用付费通道」的不变量一致。
+      { id: 'zaiduyu', label: '章鱼生图（积分站）', kind: 'api', note: 'pai.zaiduyu.top 多模型，积分制，需站点账号' },
     ],
   },
   video: {
@@ -102,7 +106,7 @@ function defaults() {
   return {
     autoFallback: false,
     groups: {
-      image: { order: defaultOrder('image'), enabled: { gptWeb: true, relayImage: true } },
+      image: { order: defaultOrder('image'), enabled: { gptWeb: true, relayImage: true, zaiduyu: true } },
       video: { order: defaultOrder('video'), enabled: { relay: true, minimax: true, local: true } },
       audio: { order: defaultOrder('audio'), enabled: { bgmWeb: true } },
     },

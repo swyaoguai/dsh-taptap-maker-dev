@@ -35,7 +35,7 @@ import { TaptapSkillProvider } from './src/skills-provider.js'
 import { runUpdate } from './src/taptap-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
 import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
-import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, maskSecret, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, readMinimaxConfigWithSource, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger } from './src/paths.js'
+import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, maskSecret, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, readMinimaxConfigWithSource, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger, zaiduyuConfigPath, readZaiduyuConfigRaw, writeZaiduyuConfigPatch, clearZaiduyuCredentials, resolveZaiduyuCredentials } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
   getJob as getVideoJob, importToMaker, keyJobFrames, nextStepOf, pollJobVideo, saveJob as saveVideoJob,
@@ -64,11 +64,29 @@ const relayReadyForApi = relayReady
 const relayImageLaneEnabled = (home) => {
   try { return isLaneEnabledFor(home, 'image', 'relayImage') } catch { return true }
 }
+/** 章鱼生图（积分站）逐条开关。 */
+const zaiduyuLaneEnabled = (home) => {
+  try { return isLaneEnabledFor(home, 'image', 'zaiduyu') } catch { return true }
+}
+/**
+ * 章鱼生图此刻能不能用 = 脚本在 + 用户自己配了站点凭据（Python 走乐观判断，
+ * 生图时 CLI 再真实探测）。只看**配置**、不看通道开关 —— 界面把「开着没」和
+ * 「配好没」分开显示，混在一起会让用户看不出到底是自己关了还是没配账号。
+ * ⚠️ 必须 probe:false：GET /lanes 是同步路由，真 spawn 探测 python 在没有
+ * python 的机器上会让每次打开设置页都卡十几秒（曾实测过这类路由卡顿）。
+ * 凭据环境变量要宿主重启才生效，圆点读的是当下的真实 env，不做长缓存。
+ */
+const zaiduyuUsableForApi = (home) => {
+  try {
+    return zaiduyuLaneUsable({ dshHome: home, probe: false }).usable
+  } catch { return false }
+}
 
 /** 「开着但还没配」时给界面的一句话 —— 要具体，否则用户不知道该去哪儿填。 */
 const LANE_UNREADY_REASON = {
   gptWeb: '需要先登录 ChatGPT 账号（/taptap-gpt login）',
   relayImage: '需要在下面「中转站生图」填 baseURL / Key / 模型',
+  zaiduyu: '需要在下面「章鱼生图（积分站）」填站点账号并点「登录并保存」（还需本机装有 Python 3）',
   relay: '需要在下面「视频中转站」填地址 / Key / 模型',
   minimax: '需要在下面「MiniMax」填 API Key',
   local: '',
@@ -77,7 +95,13 @@ const LANE_UNREADY_REASON = {
 import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
 import os from 'node:os'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile } from './src/taptap-gpt.mjs'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile, parseSlashGenArgs } from './src/taptap-gpt.mjs'
+import { zaiduyuLaneUsable, generate as zaiduyuGenerate, models as zaiduyuModels, balance as zaiduyuBalance, zaiduyuQuotaHit, loginProbe, parseModelsText, extractGenArgs } from './src/taptap-zaiduyu.mjs'
+import { checkHardwareAsync as sfxCheckHardware, parseGenArgs as splitSfxGenArgs } from './src/taptap-sfx.mjs'
+// /taptap-image 命令层的参数解析用通用消费器（见 src/tokens.mjs）。
+// 这里必须显式 import：node --check 不会发现「函数体内裸用了未导入的名字」，
+// 只会在真请求打到这条命令时才 ReferenceError —— 本轮已踩过三次同类坑。
+import { parseSlashArgs as parseImageSlashArgs } from './src/taptap-image.mjs'
 import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
 export const name = 'taptap-maker-dev'
@@ -141,6 +165,41 @@ export { Config }
 
 const PKG_DIR = fileURLToPath(new URL('./', import.meta.url))
 const BUNDLED_SKILL_DIR = path.join(PKG_DIR, 'skills')
+
+/**
+ * 异步跑一个 CLI 子进程并收集 stdout/stderr。
+ * 为什么单独有它：长任务（本地音效生成可能要几十分钟）如果走 spawnSync，
+ * 会把宿主服务的事件循环整个卡死 —— 设置页所有请求一起挂住，用户看到的是
+ * 「插件把 GUI 弄崩了」。短命令（<30 秒）仍可用 spawnSync，长命令必须用这个。
+ */
+function spawnAsync(bin, args, { timeoutMs = 300000, cwd, env } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(bin, args, { cwd, env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill('SIGKILL') } catch { /* gone */ }
+      resolve({ code: -2, stdout, stderr: `${stderr}\n（超时 ${Math.round(timeoutMs / 1000)} 秒，已终止子进程）` })
+    }, timeoutMs)
+    child.stdout.on('data', (b) => { stdout += b.toString('utf8') })
+    child.stderr.on('data', (b) => { stderr += b.toString('utf8') })
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code: -3, stdout: '', stderr: String(err?.message ?? err) })
+    })
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve({ code: code ?? -4, stdout, stderr })
+    })
+  })
+}
 
 /** The exact Maker MCP tools that spend built-in generation quota. */
 const CREDIT_TOOLS = [
@@ -336,6 +395,12 @@ function policyText(config, gptLaneOn = true) {
       '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
       '不要主动向用户宣传或鼓励添加账号，也不要隐瞒该风险。',
       '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
+      '**可选第三通道：章鱼生图（积分站）**：账号**在设置页里登录**（`/taptap-zaiduyu` 是等价入口；整合第三方 skill，pai.zaiduyu.top 多模型、积分制，不消耗 Maker 内置额度）。',
+      '它花的是用户**自己购买的预付积分**，属于付费通道：不要默认走它、不要替用户挑模型 ——',
+      '要用时先 `/taptap-zaiduyu models` 把模型清单与单张积分展示给用户、由用户选定；',
+      '缺账号时引导用户去设置页「生成通道」→「章鱼生图（积分站）」卡填账号密码并点「登录并保存」（会先验证再落盘、即时生效）；',
+      '**绝不向用户索取明文密码、绝不代填凭据、绝不把密码写进对话或文件** —— 那会落进对话记录与本机日志；',
+      '用户已经贴出明文时，不要用命令代跑配置，提醒他改用设置页输入并事后轮换密码。站点限时积分当天过期，别按总余额做跨天规划。',
       '**通道顺序由用户定**：设置页「生成通道」卡里可以拖拽排序、逐条开关、以及打开「额度不足自动换通道」；',
       '这些设置对三条链路（生图 / 视频 / BGM）统一生效。**不要替用户改顺序或开关**，',
       '也不要假设「网页一定优先」——先读一下当前顺序再决定走哪条。',
@@ -373,6 +438,7 @@ function policyText(config, gptLaneOn = true) {
       '`node "<插件目录>/src/taptap-image.mjs" --prompt "…" --out <文件>`（或 `/taptap-image <描述>`），',
       '或复用项目内已有素材；仍然不要用内置 `generate_image`。',
       '若用户想重新启用网页生图，引导他去设置页「ChatGPT 网页生图」卡打开开关（或 `/taptap-gpt` 里说明），不要自己去改状态。',
+      '需要第三条生图通道时还有**章鱼生图（积分站）**：`/taptap-zaiduyu models` 先看模型价与余额、由用户选模型；花的是用户自购的预付积分，站点账号由用户在设置页「章鱼生图（积分站）」卡里登录保存，绝不代填、绝不要明文密码。',
       '中转站保存位置可用 `--out` 或 `/taptap-gpt dir` 控制的目录约定；中间产物仍放在 `assets/` 之外，裁好后再搬进 `assets/` 并补 `.meta`。',
     ]
   return [
@@ -440,6 +506,16 @@ function policyText(config, gptLaneOn = true) {
     '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
     '     单文件按需下载，绝不整站抓取。',
     '     **未接入**：Freesound（需用户自己的 API Key，裸请求实测 401）、OpenGameArt（授权混杂，含禁商用的 CC-BY-NC）。',
+    '  ①-b **本地音效生成（CC0 库没有合适素材时的兜底，零额度，但需用户先自行装模型）**：',
+    '     - 命令：`/taptap-sfx`（CLI `node "<插件目录>/src/taptap-sfx.mjs" <子命令>`），跑 Stable Audio Open 1.0。',
+    '     - 🛡️ **绝不自动下载模型**（权重约 5.3GB + 依赖约 3GB，怕用户硬件不够）：',
+    '       先 `check` 体检；硬件不达标就**停下**，如实转告并回退到 CC0 库，不要劝用户装。',
+    '       硬件够且用户明确同意部署，才把 `guide`（逐条手动下载命令）交给用户自己跑，',
+    '       下载完 `verify` 校验、`deps --yes` 装依赖、`doctor` 体检。',
+    '     - 生成：`/taptap-sfx gen "<英文描述>" --project <Maker项目目录>`（提示词用英文，模型只用英文数据训练）；',
+    '       带 `--project` 时自动写入 `assets/audio/sfx/` 并补 `.meta`。',
+    '     - 环境没就绪时它会返回 `model_missing` / `venv_missing` / `hardware_insufficient`：',
+    '       按返回的指引如实转达，**不要反复重试、不要替用户下载**。',
     '  ② 完整 BGM——**用户说「要背景音乐/BGM」时走这条**（全程在对话里完成，不要指路设置页）：',
     '     - **需要账号**：生成 BGM 要用用户的 MiniMax 账号登录网页来生成。',
     '       用户说「要 BGM」而尚未登录时，**你直接用 pwsh 执行** `/taptap-bgm login` 对应的',
@@ -593,6 +669,11 @@ async function fetchModelIds(baseURL, apiKey) {
     .map((m) => (typeof m === 'string' ? m : m?.id))
     .filter((id) => typeof id === 'string' && id.length > 0)
   return Array.from(new Set(ids)).sort()
+}
+
+function modelProbeKey(value, saved = '') {
+  const submitted = typeof value === 'string' ? value.trim() : ''
+  return !submitted || submitted === maskSecret(saved) ? saved : submitted
 }
 
 export function apply(ctx, config = {}) {
@@ -916,6 +997,138 @@ export function apply(ctx, config = {}) {
             file: imageConfigPath(home),
           })
         }
+        // ── 章鱼生图（积分站）站点账号：GUI 登录，不用命令行 ──
+        // GET  /zaiduyu            → 状态（账号掩码 + 来源 + 三态），**永不回显密码**
+        // POST /zaiduyu            → 登录并保存：先用表单里这组凭据连站点验证，
+        //                            通过才落盘；失败不保存（除非显式 force）
+        // POST /zaiduyu/balance    → 用已存凭据查积分（只读、不扣费）
+        // POST /zaiduyu/models     → 列模型与单价（只读、不扣费，供用户选模型）
+        if (req.method === 'GET' && sub === 'zaiduyu') {
+          const raw = readZaiduyuConfigRaw(home)
+          const resolved = resolveZaiduyuCredentials(home)
+          const u = zaiduyuLaneUsable({ dshHome: home, probe: false })
+          return sendJson(res, 200, {
+            ok: true,
+            // 账号原样回显：界面要让用户看清「现在登的是哪个号」（手机号/邮箱不是密钥，
+            // 掩码了反而无法确认）。**密码**一律不回显（与 image/video-relay/minimax
+            // 同一约定）；已保存时回掩码串，客户端原样提交回来时 POST 识别为「未修改」。
+            identifier: resolved.identifier || '',
+            password: resolved.source === 'file' ? maskSecret(raw.password ?? '') : '(unset)',
+            hasCredentials: resolved.usable,
+            // 来源必须如实标出来：只靠 env 撑着时，界面不说的话用户以为保存过。
+            source: resolved.source,
+            envShadowed: resolved.envShadowed === true,
+            script: u.script,
+            usable: u.usable,
+            lastVerifiedAt: raw.lastVerifiedAt ?? null,
+            lastIdentifier: raw.lastIdentifier ?? null,
+            file: zaiduyuConfigPath(home),
+          })
+        }
+        if (req.method === 'POST' && sub === 'zaiduyu') {
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          // 清除：删掉本机凭据文件。**不动环境变量** —— 那是用户自己的东西，
+          // 插件无权替他改注册表；但如果凭据其实来自 env，删文件并不会真的退登，
+          // 必须如实说出来，否则用户以为退掉了、下次生图还在用那个号烧积分。
+          if (parsed.clear === true) {
+            const removed = clearZaiduyuCredentials(home)
+            const envStill = Boolean(String(process.env.ZAIDUYU_USER ?? '').trim() && String(process.env.ZAIDUYU_PASS ?? ''))
+            const after = zaiduyuLaneUsable({ dshHome: home, probe: false })
+            return sendJson(res, 200, {
+              ok: true,
+              cleared: removed,
+              ...after,
+              warn: envStill && after.credentials
+                ? '本机文件已清除，但环境变量 ZAIDUYU_USER / ZAIDUYU_PASS 里还有一组凭据在兜底生效：并没有真正退登。要彻底退出请在自己的终端删掉那两个变量并重开宿主。'
+                : undefined,
+            })
+          }
+          // 账号原样比对（GET 就回原文）；只有**密码**是掩码回显，
+          // 整表单原样回传时把掩码串归入「未修改」。
+          const saved = readZaiduyuConfigRaw(home)
+          let identifier = typeof parsed.identifier === 'string' ? parsed.identifier.trim() : ''
+          let password = typeof parsed.password === 'string' ? parsed.password : ''
+          if (password.length > 0 && password === maskSecret(saved.password ?? '')) password = ''
+          const effIdentifier = identifier || String(saved.identifier ?? '')
+          const effPassword = password || String(saved.password ?? '')
+          if (!effIdentifier || !effPassword) {
+            return sendJson(res, 400, { ok: false, error: '账号和密码都要填上（首次配置不能只填一半）' })
+          }
+          // 换了账号却沿用旧密码 → 几乎必然是配错（新账号 + 别人的密码）。
+          // 与其让站点报个含糊的登录失败，不如在这里拦下并说清要重填密码。
+          if (identifier.length > 0 && saved.identifier && identifier !== String(saved.identifier) && password.length === 0) {
+            return sendJson(res, 400, { ok: false, error: '换了账号，请重新填写该账号的密码（不能沿用旧账号的密码）' })
+          }
+          // 验证：以**这一组**凭据去站点跑一次只读的积分查询。
+          // 不验证就存 → 用户点生图时才失败，而且报错含糊；存前多花一次免费
+          // 的只读请求，换来「保存即真的能登录」。
+          const probe = await loginProbe(effIdentifier, effPassword)
+          if (!probe.ok && parsed.force !== true) {
+            // 不落盘：失败的凭据存进去只会让后面每次生图都撞墙。
+            // 但「环境没就绪」和「密码错」必须分开说 —— 把缺 Python 报成
+            // 登录失败，用户会去反复改密码，而真正要做的是装 Python。
+            return sendJson(res, probe.kind === 'environment' ? 503 : 401, {
+              ok: false,
+              verified: false,
+              kind: probe.kind ?? 'auth',
+              error: probe.error ?? '登录验证失败',
+              hint: probe.kind === 'environment'
+                ? '凭据没有验证（本机环境未就绪），本次未保存。按上面提示修好环境后再点一次。'
+                : '未保存。确认账号密码无误后重试；若站点暂时不可达（网络错误），可点「仍要保存（跳过验证）」先存下来，等站点恢复再验证。',
+              network: probe.kind === 'network',
+            })
+          }
+          writeZaiduyuConfigPatch(home, {
+            identifier: effIdentifier,
+            password: effPassword,
+            lastVerifiedAt: probe.ok ? new Date().toISOString() : (saved.lastVerifiedAt ?? null),
+            lastIdentifier: effIdentifier,
+          })
+          return sendJson(res, 200, {
+            ok: true,
+            verified: probe.ok === true,
+            forceSaved: probe.ok !== true && parsed.force === true,
+            // 强制保存时把「为什么被拒」的类型一起回：界面要区分
+            // 「站点连不上，先存着回头再验」与「账号密码被拒绝，存了也没用」。
+            forceKind: probe.ok === true ? undefined : (probe.kind ?? 'auth'),
+            identifier: effIdentifier,
+            balance: probe.balance ?? null,
+            permanent: probe.permanent ?? null,
+            limited: probe.limited ?? null,
+            source: 'file',
+            usable: zaiduyuLaneUsable({ dshHome: home, probe: false }).usable,
+          })
+        }
+        if (req.method === 'POST' && sub === 'zaiduyu/balance') {
+          try {
+            const r = await zaiduyuBalance(home)
+            const num = (/(?:总积分|当前总积分)：\s*([\d.]+)/.exec(r.text) ?? [])[1]
+            const perm = (/永久积分：\s*([\d.]+)/.exec(r.text) ?? [])[1]
+            const limit = (/限时积分：\s*([\d.]+)/.exec(r.text) ?? [])[1]
+            const expiry = (/最近到期：\s*([^\r\n]+)/.exec(r.text) ?? [])[1]
+            return sendJson(res, 200, {
+              ok: r.ok,
+              balance: num ?? null, permanent: perm ?? null, limited: limit ?? null,
+              nextExpiry: expiry ?? null,
+              error: r.ok ? null : r.text.slice(0, 300),
+            })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        if (req.method === 'POST' && sub === 'zaiduyu/models') {
+          try {
+            const r = await zaiduyuModels(home)
+            if (!r.ok) return sendJson(res, 200, { ok: false, error: r.text.slice(0, 300) })
+            // 解析交给模块自己的函数（单一真相源）：留在路由里的正则一旦和
+            // 上游行格式漂移，界面只会显示空表，看不出是格式变了还是没网。
+            return sendJson(res, 200, { ok: true, ...parseModelsText(r.text) })
+          } catch (error) {
+            return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
         // ── 视频中转站（与上面「中转站生图」同一套心智，只是视频是异步任务）──
         // GET  /video-relay   → 当前配置 + Key 类型 + 三个后端可用性
         // POST /video-relay   → 保存（空串=不修改；要真清空得传 clear:true）
@@ -1000,7 +1213,7 @@ export function apply(ctx, config = {}) {
           const probe = normalizeRelayConfig({
             ...saved,
             baseURL: (typeof parsed.baseURL === 'string' && parsed.baseURL.trim()) || saved.baseURL,
-            apiKey: (typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) || saved.apiKey,
+            apiKey: modelProbeKey(parsed.apiKey, saved.apiKey),
           })
           try {
             const models = await relayListModels(probe)
@@ -1050,6 +1263,7 @@ export function apply(ctx, config = {}) {
           const readiness = {
             gptWeb: () => readGptLaneEnabled(home),
             relayImage: () => Boolean(imageCfg.baseURL && imageCfg.apiKey && imageCfg.model),
+            zaiduyu: () => zaiduyuUsableForApi(home),
             relay: () => relayReadyForApi(relayCfg),
             minimax: () => Boolean(mmxKey),
             local: () => true,
@@ -1114,6 +1328,7 @@ export function apply(ctx, config = {}) {
             // imageCfg，而 POST 分支从未定义它 → 保存即 ReferenceError → 500。
             // 用户看到的就是「点了保存没反应」，属于最典型的「设置不生效」。
             relayImage: () => Boolean(imageCfg2.baseURL && imageCfg2.apiKey && imageCfg2.model),
+            zaiduyu: () => zaiduyuUsableForApi(home),
             relay: () => relayReadyForApi(relayCfg),
             minimax: () => Boolean(mmxKey2),
             local: () => true,
@@ -1606,7 +1821,7 @@ export function apply(ctx, config = {}) {
           try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
           const raw = readImageConfigRaw(home)
           const baseURL = (typeof parsed.baseURL === 'string' && parsed.baseURL.trim()) || raw.baseURL || ''
-          const apiKey = (typeof parsed.apiKey === 'string' && parsed.apiKey.trim()) || raw.apiKey || ''
+          const apiKey = modelProbeKey(parsed.apiKey, raw.apiKey || '')
           if (!baseURL || !apiKey) return sendJson(res, 400, { ok: false, error: '缺少 baseURL 或 apiKey' })
           try {
             const models = await fetchModelIds(baseURL, apiKey)
@@ -2132,48 +2347,28 @@ export function apply(ctx, config = {}) {
           }
         }
 
-        const st = gptStatus(home)
-        if (st.laneEnabled === false) {
+        // Account checks belong to the selected web executor. A configured
+        // relay/Zaiduyu lane must not require an unrelated ChatGPT login.
+        // 参数一律走共享解析器（与 /taptap-zaiduyu、/taptap-sfx 同一套语义）。
+        // ⚠️ 旧写法是三条正则：`--ref` 后面漏写值时会把**下一个 flag 名**当成
+        // 参考图吞掉，而那个 flag 的值则漏进提示词 —— 实测
+        // `/taptap-gpt --ref --account a2 画一只猫`：refs=["--account"]
+        // （网页通道真会去上传这个不存在的路径），提示词变成「a2 画一只猫」
+        // （账号 id 混进了发给 ChatGPT 的描述）。现在漏值直接拒绝提交。
+        const genArgs = parseSlashGenArgs(desc)
+        if (genArgs.missing.length > 0) {
           return {
             kind: 'error',
             text: [
-              'ChatGPT 网页生图已在设置里关闭（总开关 OFF），所以不会走这条通道。',
-              '',
-              '要用图片就走中转站：/taptap-image <描述>',
-              '想重新启用网页生图：设置页「ChatGPT 网页生图」卡打开开关，或 /taptap-gpt 里说一声让我帮你打开。',
+              `参数「${genArgs.missing.join('、')}」后面没有值，已停止（不会跑网页生图、不消耗额度）。`,
+              '例：/taptap-gpt 改成水彩风 --ref 角色.png；值带空格时请加引号，或写成 --ref=角色.png。',
             ].join('\n'),
           }
         }
-        if (!st.loggedIn && st.pool.loggedIn === 0) {
-          return {
-            kind: 'error',
-            text: [
-              '还没登录 ChatGPT 网页账号，生图需要用它（走你自己的账号/免费额度，不消耗 Maker 内置额度）。',
-              '',
-              '登录：/taptap-gpt login',
-              '（或先回退到中转站：/taptap-image）',
-            ].join('\n'),
-          }
-        }
-        const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
-        const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
-        // 参考图（图生图）：`--ref <图>` 可重复、也可逗号分隔。
-        // ⚠️ 这些参数必须从 prompt 里剥掉：以前只剥 downscale/account，
-        //    用户写 `/taptap-gpt 改成水彩风 --ref a.png` 时，"--ref a.png"
-        //    会原样混进提示词发给 ChatGPT（模型会把它当成文字要求）。
-        const refs = []
-        for (const m of raw.matchAll(/(?:--ref(?:erence)?s?|-r)\s+(?:"([^"]+)"|(\S+))/g)) {
-          const value = m[1] ?? m[2] ?? ''
-          for (const part of value.split(',')) {
-            const p = part.trim()
-            if (p.length > 0) refs.push(p)
-          }
-        }
-        const prompt = desc
-          .replace(/(?:--downscale|-d)\s+\d+x\d+/g, '')
-          .replace(/(?:--account|-a)\s+\S+/g, '')
-          .replace(/(?:--ref(?:erence)?s?|-r)\s+(?:"[^"]+"|\S+)/g, '')
-          .trim()
+        const downscale = genArgs.downscale || undefined
+        const acct = genArgs.account || undefined
+        const refs = genArgs.refs
+        const prompt = genArgs.prompt
         if (prompt.length === 0) {
           return {
             kind: 'error',
@@ -2201,6 +2396,12 @@ export function apply(ctx, config = {}) {
             ...(refs.length > 1 ? { in: refs } : {}),
           },
           relayReady: () => Boolean(imageCfgNow.baseURL && imageCfgNow.apiKey && imageCfgNow.model) && relayImageLaneEnabled(home),
+          // 章鱼生图（积分站）：模型不指定 → 用脚本回落的站点默认模型，
+          // 预检（单张积分/余额）会随结果回传并如实告诉用户花了多少积分。
+          zaiduyuOpts: {
+            ...(refs.length > 0 ? { references: refs } : {}),
+          },
+          zaiduyuReady: () => zaiduyuUsableForApi(home) && zaiduyuLaneEnabled(home),
         })
         if (!r.ok) {
           const triedList = Array.isArray(r.failures) ? r.failures.map((f) => `  ${f.account ?? '(默认)'}: ${f.error}`).join('\n') : ''
@@ -2230,6 +2431,8 @@ export function apply(ctx, config = {}) {
           text: [
             r.resumed ? `已取回上一次生成好的图（没有重新生成）：${r.saved}` : `已生成：${r.saved}`,
             r.lane === 'relayImage' ? '（网页通道额度不足，已自动切换到中转站出图）' : '',
+            r.lane === 'zaiduyu' ? '（本次由章鱼生图积分站出图，见下方积分预检）' : '',
+            r.lane === 'zaiduyu' && r.preflight ? `积分预检：${r.preflight.model ?? '?'} 单张 ${r.preflight.creditPerImage ?? '?'}｜余额 ${r.preflight.balance ?? '?'}${r.preflight.remaining ? `｜预计剩余 ${r.preflight.remaining}` : ''}` : '',
             r.rotated ? `（自动轮换账号：${(r.tried ?? []).join(' → ')}）` : '',
             ...(r.notes ?? []),
             '',
@@ -2251,7 +2454,11 @@ export function apply(ctx, config = {}) {
 
         if (low === '--config' || low === '-c' || raw === '配置') {
           try {
-            const out = spawnSync(process.execPath, [cli, '--config'], { encoding: 'utf8', timeout: 30000 })
+            const out = await spawnAsync(process.execPath, [cli, '--config'], {
+              timeoutMs: 30000,
+              env: { ...process.env, DSH_HOME: home },
+            })
+            if (out.code !== 0) return { kind: 'error', text: `读取配置失败：${(out.stderr || out.stdout || '').trim()}` }
             return { kind: 'success', text: `中转站（回退）配置：\n${(out.stdout ?? '').trim()}` }
           } catch (error) {
             return { kind: 'error', text: `读取配置失败：${error?.message ?? error}` }
@@ -2288,22 +2495,39 @@ export function apply(ctx, config = {}) {
         }
 
         const descRaw = raw.replace(/^(图片|生图|生成图片|画一张|生成一张)\s*/i, '').trim()
-        // 参考图（图生图）：与 /taptap-gpt 同一套解析，并且必须从提示词里剥掉 ——
-        // 否则 `--ref a.png` 会被当成描述的一部分发给模型。
-        const relayRefs = []
-        for (const m of raw.matchAll(/(?:--ref(?:erence)?s?|-r)\s+(?:"([^"]+)"|(\S+))/g)) {
-          const value = m[1] ?? m[2] ?? ''
-          for (const part of value.split(',')) {
-            const p = part.trim()
-            if (p.length > 0) relayRefs.push(p)
+        // 参数一律走 taptap-image 自己的解析器（flag 表只有一份，见 parseSlashArgs）。
+        // ⚠️ 旧写法有四个实测到的真实后果：
+        //   1. `--transparent` **既不剥掉也不转发** —— 用户写「盾牌图标 --transparent」，
+        //      字面 `--transparent` 被当成描述发给模型，而且**不会要透明底**；
+        //   2. `--size=512x512` 等号连写整段留在提示词里、size 丢失；
+        //   3. `--ref` 漏值时把下一个 flag 名当参考图（`--ref --size 512x512` →
+        //      refs=["--size"]，而 `512x512` 漏进提示词）；
+        //   4. 剥完的提示词里还留着孤立值，用户看不出自己哪里写错了。
+        const relayParsed = parseImageSlashArgs(descRaw)
+        if (relayParsed.missing.length > 0) {
+          return {
+            kind: 'error',
+            text: [
+              `参数「${relayParsed.missing.join('、')}」后面没有值，已停止（不会提交生图请求）。`,
+              '例：/taptap-image 改成赛博朋克风 --ref 角色.png；值带空格请加引号，或写成 --ref=角色.png。',
+            ].join('\n'),
           }
         }
-        const desc = descRaw
-          .replace(/(?:--ref(?:erence)?s?|-r)\s+(?:"[^"]+"|\S+)/g, '')
-          .replace(/(?:--size|-s)\s+\d+x\d+/g, '')
-          .replace(/(?:--downscale|-d)\s+\d+x\d+/g, '')
-          .replace(/(?:--multi-ref|--single-ref)/g, '')
-          .trim()
+        // 尺寸必须是 WxH：这里当场拒绝，而不是把 "foo" 丢给下游去
+        // 「就近吸附」到一个用户没写过的尺寸（静默改参数在花钱的链路上最糟）。
+        for (const [name, value] of [['--size', relayParsed.size], ['--downscale', relayParsed.downscale]]) {
+          if (value && !/^\d+x\d+$/.test(value)) {
+            return {
+              kind: 'error',
+              text: `${name} 需要「宽x高」形式（如 1024x1024），收到「${value}」，未提交（不会扣任何额度）。`,
+            }
+          }
+        }
+        const relayRefs = relayParsed.refs
+        const desc = relayParsed.prompt
+        const size = relayParsed.size || undefined
+        const downscale = relayParsed.downscale || undefined
+        const wantTransparent = relayParsed.transparent === true
         if (desc.length === 0 && relayRefs.length === 0) {
           return {
             kind: 'success',
@@ -2335,8 +2559,6 @@ export function apply(ctx, config = {}) {
         // inconsistent — fixed 2026-10-18.)
         const fallback = resolveDownloadDir(home, {}).dir
         const outFile = path.join(fallback, `relay-${Date.now()}.png`)
-        const size = (/(?:--size|-s)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
-        const downscale = (/(?:--downscale|-d)\s+(\d+x\d+)/.exec(raw) ?? [])[1]
         // 有参考图 → edit 子命令（/images/edits）；否则 plain 文生图（/images/generations）。
         const argv = relayRefs.length > 0
           ? [cli, 'edit', '--prompt', desc, '--out', outFile]
@@ -2344,26 +2566,314 @@ export function apply(ctx, config = {}) {
         for (const ref of relayRefs) argv.push('--in', ref)
         if (size) argv.push('--size', size)
         if (downscale) argv.push('--downscale', downscale)
+        // ⚠️ --transparent 分两种情况，绝不能一律转发：
+        //   文生图（generateImage）读 options.transparent，会真的请求透明背景；
+        //   图生图（editImage）**完全不读它** —— 转发过去就是"用户写了、静默没生效"，
+        //   而他会以为拿到的是透明底。所以 edit 路径下不转发，并如实提示已忽略。
+        let relayTransparentNote = ''
+        if (wantTransparent) {
+          if (relayRefs.length === 0) argv.push('--transparent')
+          else relayTransparentNote = '本次是图生图（有参考图）：中转站编辑接口不支持请求透明背景，已忽略 --transparent。'
+        }
         // 用户显式声明的多图能力，透传给 CLI（CLI 自己也会按模型名拦单图模型）。
-        if (/--multi-ref\b/.test(raw)) argv.push('--multi-ref')
-        if (/--single-ref\b/.test(raw)) argv.push('--single-ref')
+        if (relayParsed.multiRef) argv.push('--multi-ref')
+        if (relayParsed.singleRef) argv.push('--single-ref')
         try {
-          const out = spawnSync(process.execPath, argv, { encoding: 'utf8', timeout: 300000 })
+          const out = await spawnAsync(process.execPath, argv, {
+            timeoutMs: 300000,
+            env: { ...process.env, DSH_HOME: home },
+          })
           const text = (out.stdout ?? '') + (out.stderr ?? '')
-          if (out.status !== 0) return { kind: 'error', text: `${relayRefs.length > 0 ? '中转站图生图' : '中转站生图'}失败：\n${text.trim()}` }
-          let parsed = {}
-          try { parsed = JSON.parse((out.stdout ?? '').trim()) } catch { parsed = {} }
+          if (out.code !== 0) return { kind: 'error', text: `${relayRefs.length > 0 ? '中转站图生图' : '中转站生图'}失败：\n${text.trim()}` }
+          let parsed
+          try { parsed = JSON.parse((out.stdout ?? '').trim()) } catch {
+            return { kind: 'error', text: '生图输出无法解析，结果未知。请先确认上游是否已经生成，不要重复提交。' }
+          }
+          if (!Array.isArray(parsed?.outputs) || typeof parsed.outputs[0] !== 'string' || !parsed.outputs[0]) {
+            return { kind: 'error', text: '生图输出没有有效图片路径。请先确认上游结果，不要重复提交。' }
+          }
           return {
             kind: 'success',
             text: [
-              `${relayRefs.length > 0 ? `已按 ${parsed.inputCount ?? relayRefs.length} 张参考图生成` : '已生成'}：${(parsed.outputs ?? [outFile])[0]}`,
+              `${relayRefs.length > 0 ? `已按 ${parsed.inputCount ?? relayRefs.length} 张参考图生成` : '已生成'}：${parsed.outputs[0]}`,
               ...(parsed.notes ?? []),
+              // 被忽略的参数必须当场说出来：默默吞掉 --transparent 的话，
+              // 用户会拿着不透明的图去找「为什么透明底没生效」。
+              relayTransparentNote,
               '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。',
-            ].join('\n'),
+            ].filter(Boolean).join('\n'),
           }
         } catch (error) {
           return { kind: 'error', text: `调用失败：${error?.message ?? error}` }
         }
+      },
+    })
+
+    // /taptap-zaiduyu —— 章鱼生图（pai.zaiduyu.top 积分站）独立入口。
+    // 守则要求：先 --models 让用户看清单价再选模型；积分是预付的钱，
+    // 不能由 agent 默认走这条、更不能替用户挑高价模型。
+    scoped.commands.register({
+      name: 'taptap-zaiduyu',
+      description: '章鱼生图（积分站 pai.zaiduyu.top）：models 看模型价 / balance 查积分 / gen "<描述>" [--model ID] [--ratio 16:9] [--n 2]（预付积分，先看清再花）',
+      input: { hint: 'models | balance | status | gen "<描述>" [--model <id>] [--ratio …] [--resolution 2K] [--n 1] [--ref 图]' },
+      handler: async (invocation) => {
+        const raw = (invocation?.rawInput ?? '').trim()
+        const low = raw.toLowerCase()
+        if (low === '' || low === 'help' || low === 'status' || low === '状态') {
+          const u = zaiduyuLaneUsable({ dshHome: home })
+          return {
+            kind: 'success',
+            text: [
+              '章鱼生图（pai.zaiduyu.top 积分制多模型站，第三方 skill 整合，不消耗 Maker 内置额度、但花你自己买的积分）：',
+              '',
+              `脚本：${u.script ? '✓ 已随插件分发' : '✗ 缺失'}`,
+              `Python：${u.python ? `✓ ${u.python}` : '✗ 未找到（脚本只用标准库，装 Python 3.10+ 即可）'}`,
+              `站点账号：${u.credentials ? `✓ 已配置（来源：${u.credentialsSource === 'file' ? '设置页保存' : '环境变量'}）${u.identifier ? ` · ${u.identifier}` : ''}` : '✗ 未配置'}`,
+              '',
+              u.credentials ? '' : [
+                '配置方法：设置页 →「生成通道」→「章鱼生图（积分站）」卡，填账号密码点「登录并保存」',
+                '（会先连站点验证，通过才保存；即时生效，无需重开宿主）。',
+                '没有账号：https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3（邀请码 +50 张额度）',
+                '⚠️ 不要让用户把密码贴进对话 —— 界面输入框只走本地服务，代填会落进日志。',
+                '',
+              ].join('\n'),
+              '用法：',
+              '  /taptap-zaiduyu models              模型清单 + 单张积分 + 当前余额（生图前必看）',
+              '  /taptap-zaiduyu gen "小猫赏月" --model gpt-image-2 --ratio 16:9',
+              '  /taptap-zaiduyu balance             查积分（限时积分当天过期，别跨天规划）',
+              '也可作为统一生图链路的一条通道（设置页「生成通道」可排序/开关）。',
+            ].join('\n'),
+          }
+        }
+        if (low === 'models' || low === '模型') {
+          const r = await zaiduyuModels(home)
+          return { kind: r.ok ? 'success' : 'error', text: r.text || '（无输出）' }
+        }
+        if (low === 'balance' || low === '余额' || low === '积分') {
+          const r = await zaiduyuBalance(home)
+          return { kind: r.ok ? 'success' : 'error', text: r.text || '（无输出）' }
+        }
+        const genM = /^(gen|generate|生图|画)\s+(.+)$/.exec(raw)
+        const desc = genM ? genM[2].trim() : raw
+        if (desc.length === 0) {
+          return { kind: 'error', text: '用法：/taptap-zaiduyu gen "<描述>" [--model <id>] [--ratio 16:9] [--resolution 2K] [--n 2] [--ref 图]' }
+        }
+        // 参数一律交给模块自己的解析器（分词 + 完整 flag 表）：
+        // 以前这里是手写的正则剥除清单，漏了 --size / --quality / --description
+        // —— 后果是这些 `--xxx 值` **原样混进中文提示词**发给模型，
+        // 而且解析出来的值也没往下转发，等于用户写了却静默失效。
+        const gen = extractGenArgs(desc)
+        if (gen.prompt.length === 0) {
+          return { kind: 'error', text: '请给一句图片描述（参数之外）。' }
+        }
+        // 写了 flag 却没给值（漏参数 / 漏引号）必须**拒绝提交**：
+        // `--model` 漏值会静默回落到站点默认模型 —— 用户指定了便宜的那个，
+        // 实际扣的是另一个的钱。积分通道里「静默按别的参数出图」比报错糟得多。
+        if (Array.isArray(gen.missing) && gen.missing.length > 0) {
+          return {
+            kind: 'error',
+            text: [
+              `参数「${gen.missing.join('、')}」后面没有值，未提交（不会扣积分）。`,
+              '值本身带空格时要加引号：--model "某个模型"；或直接写成 --model=值。',
+              '也可以先 /taptap-zaiduyu models 看模型清单，再挑一个。',
+            ].join('\n'),
+          }
+        }
+        // --n 必须显式落在 1~12：以前用 Math.min(Math.max(...)) 钳制，
+        // 于是 `--n 99` 静默出 12 张（= 用户没要的 12 倍花费）、`--n -1` 静默出 1 张。
+        let n
+        {
+          const raw = String(gen.n ?? '').trim()
+          if (raw === '') n = undefined
+          else {
+            const v = Number(raw)
+            if (!Number.isInteger(v) || v < 1 || v > 12) {
+              return {
+                kind: 'error',
+                text: `--n 需要 1~12 的整数，收到「${raw}」，未提交（不会扣积分）。`,
+              }
+            }
+            n = v
+          }
+        }
+        if (!zaiduyuLaneEnabled(home)) {
+          return { kind: 'error', text: '「章鱼生图」通道已在设置页「生成通道」卡里关闭。要用就先打开它。' }
+        }
+        try {
+          const r = await zaiduyuGenerate(home, gen.prompt, {
+            model: gen.model || undefined,
+            ratio: gen.ratio || undefined,
+            size: gen.size || undefined,
+            resolution: gen.resolution || undefined,
+            quality: gen.quality || undefined,
+            description: gen.description || undefined,
+            n,
+            references: gen.references,
+          })
+          const pf = r.preflight ?? {}
+          return {
+            kind: 'success',
+            text: [
+              `已生成（章鱼生图）：${r.saved}`,
+              ...(r.outputs && r.outputs.length > 1 ? [`共 ${r.outputs.length} 张：`, ...r.outputs.slice(1).map((p) => `  ${p}`)] : []),
+              pf.model ? `积分预检：模型 ${pf.model}｜单张 ${pf.creditPerImage ?? '?'}｜预计总消耗 ${pf.totalCredits ?? '?'}｜余额 ${pf.balance ?? '?'}${pf.remaining ? `｜预计剩余 ${pf.remaining}` : ''}` : '',
+              pf.route ? `调用接口：${pf.route}（Chat 链路比例可能不被遵守）` : '',
+              '',
+              '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。',
+            ].filter(Boolean).join('\n'),
+          }
+        } catch (err) {
+          return {
+            kind: 'error',
+            text: [
+              `章鱼生图失败：${err?.message ?? err}`,
+              err?.code === 'no_credentials'
+                ? '请到设置页「生成通道」→「章鱼生图（积分站）」卡填账号密码并点「登录并保存」（即时生效）。不要让用户把密码贴进对话。'
+                : '',
+              zaiduyuQuotaHit(err?.message ?? '') ? '这是积分不足：等积分恢复、去站点充值，或换其它生图通道（/taptap-gpt、/taptap-image）。' : '',
+            ].filter(Boolean).join('\n'),
+          }
+        }
+      },
+    })
+
+    // /taptap-sfx —— 本地 Stable Audio Open 音效。
+    // 🛡️ 模型权重（约 5.3GB）**永远不自动下载**：先 check 硬件，够格才让用户
+    // 按 guide 手动下载；gen 在模型/venv/硬件任一不满足时直接拒绝并指路。
+    scoped.commands.register({
+      name: 'taptap-sfx',
+      description: '本地音效生成（Stable Audio Open，零额度）：check 硬件体检 / guide 手动下载指引 / deps 装依赖 / gen "<英文描述>"',
+      input: { hint: 'check | guide | verify [--fast] | deps [--yes] | doctor | gen "<英文描述>" [--project <dir>] [-s 秒] [-n 条数]' },
+      handler: async (invocation) => {
+        const raw = (invocation?.rawInput ?? '').trim()
+        const low = raw.toLowerCase()
+        const cli = path.join(PKG_DIR, 'src', 'taptap-sfx.mjs')
+        if (low === '' || low === 'help' || low === 'status') {
+          return {
+            kind: 'success',
+            text: [
+              '本地音效（Stable Audio Open 1.0）：在自己机器上跑，不消耗任何 Maker 额度、不联网付费。',
+              '',
+              '优先级提醒：先用 CC0 音效库（/taptap-audio），库里没有合适的再走本地生成 ——',
+              '首次部署要**手动**下载约 5.3GB 模型 + 约 3GB 依赖（本插件不会自动下载，怕你硬件不够）。',
+              '',
+              '  /taptap-sfx check    硬件体检（NVIDIA 显卡 + 建议 8GB 显存）',
+              '  /taptap-sfx guide    逐条打印模型手动下载命令（断点续传，可反复跑）',
+              '  /taptap-sfx verify   下载后校验 SHA256',
+              '  /taptap-sfx deps     打印依赖安装命令；加 --yes 才真正安装（约 3GB）',
+              '  /taptap-sfx doctor   装好后体检',
+              '  /taptap-sfx gen "coin pickup, bright arcade blip" --project <项目>   生成并进 assets/audio/sfx（补 .meta）',
+              '',
+              `CLI 等价：node "${cli}" <子命令>`,
+            ].join('\n'),
+          }
+        }
+        const sub = low.split(/\s+/)[0]
+        const extra = []
+        if (/--fast/.test(low)) extra.push('--fast')
+        if (sub === 'deps' && /--yes/.test(low)) extra.push('--yes')
+        if (['check', 'guide', 'verify', 'doctor', 'deps'].includes(sub)) {
+          // 全部走异步：deps --yes 可能要几十分钟、verify 要哈希 5.3GB ——
+          // spawnSync 会把宿主事件循环卡死（设置页一起挂）。
+          const timeout = sub === 'deps' && extra.length > 0 ? 3600000 : sub === 'verify' ? 600000 : 120000
+          const r = await spawnAsync(process.execPath, [cli, sub, ...extra], { timeoutMs: timeout })
+          const text = ((r.stdout ?? '') + (r.stderr ?? '')).trim()
+          return { kind: r.code === 0 ? 'success' : 'error', text: text || `（退出码 ${r.code}）` }
+        }
+        if (sub === 'gen') {
+          const rest = raw.replace(/^gen\s+/i, '').trim()
+          // 用分词器而不是「正则剥 flag」：旧写法只在提示词带引号时才干净，
+          // `gen sword swing -n 2` 会把 `-n 2` 原样混进英文提示词发给模型
+          // （实测漏 flag），`gen --project D:\p whoosh` 更会把整句吞成空提示词
+          // —— 因为那条 --project 正则带着贪婪的 `.*`。
+          const genArgs = splitSfxGenArgs(rest)
+          if (genArgs.prompt.length === 0) {
+            return { kind: 'error', text: '用法：/taptap-sfx gen "<英文音效描述>" [--project <Maker项目目录>] [-s 秒数] [-n 条数]。提示词用英文效果最好。' }
+          }
+          // 漏值（`--seed` 后面没数字）必须拒绝：否则会静默用默认值跑一条
+          // 几分钟到几十分钟的 torch 生成，用户还以为自己指定的参数生效了。
+          // ⚠️ 顺序：**参数校验先于硬件体检** —— 写错了就该当场说清楚，
+          //    不该先花几十秒跑 check 再把「硬件问题」当成失败原因报给人家。
+          if (Array.isArray(genArgs.missing) && genArgs.missing.length > 0) {
+            return {
+              kind: 'error',
+              text: `参数「${genArgs.missing.join('、')}」后面没有值，已停止（不会开始生成）。值带空格请加引号，或写成 --seed=值。`,
+            }
+          }
+          // 硬件门槛先行：不满足就不要开始动辄几分钟的长跑。
+          const hw = await sfxCheckHardwareAsync()
+          if (!hw.ran) {
+            // 体检没能真跑成功（典型是缺 Python）：这**不是**硬件问题。
+            // 混在一起报会让人去做毫无必要的升级，而真正要做的只是装 Python。
+            return {
+              kind: 'error',
+              text: [
+                '本机硬件体检没能执行完成，已停止（不下载、不长跑）。',
+                (hw.text || '').split(/\r?\n/).filter(Boolean).slice(-3).join('\n'),
+                '',
+                '先跑 /taptap-sfx check 看完整输出（多数是本机没有可用的 Python 3）。',
+                '替代：CC0 音效库 /taptap-audio add "<中文描述>" --project <项目>（零成本、装完即用）。',
+              ].filter(Boolean).join('\n'),
+            }
+          }
+          if (!hw.usable) {
+            return {
+              kind: 'error',
+              text: [
+                '本机硬件不适合跑本地音效生成，已停止（不下载、不长跑）。',
+                hw.gpu ? `显卡：${hw.gpu}` : '显卡：未检测到 NVIDIA GPU',
+                hw.verdict ? `结论：${hw.verdict}` : '',
+                '',
+                '替代：CC0 音效库 /taptap-audio add "<中文描述>" --project <项目>（零成本、装完即用）；',
+                '或 /taptap-sfx check 看完整体检（也许只是还没装依赖）。',
+              ].join('\n'),
+            }
+          }
+          const argv = [cli, 'gen', genArgs.prompt]
+          if (genArgs.project) argv.push('--project', genArgs.project)
+          if (genArgs.seconds) argv.push('-s', genArgs.seconds)
+          if (genArgs.variants) argv.push('-n', genArgs.variants)
+          if (genArgs.seed) argv.push('--seed', genArgs.seed)
+          if (genArgs.out) argv.push('--out', genArgs.out)
+          // ⚠️ 解析器摘掉的每个 flag 都必须转发出去，否则用户写了却**静默失效**
+          // （比报错更糟：看起来生效了，实际用的是默认值）。
+          if (genArgs.steps) argv.push('--steps', genArgs.steps)
+          if (genArgs.cfg) argv.push('--cfg', genArgs.cfg)
+          if (genArgs.lowvram === 'force') argv.push('--lowvram')
+          if (genArgs.lowvram === 'off') argv.push('--no-lowvram')
+          try {
+            // ⚠️ 本地生成一条音效可能要几分钟到几十分钟：绝不能用 spawnSync ——
+            //    那会把宿主的事件循环整个卡住（设置页所有请求一起挂）。用异步 spawn。
+            const { code, stdout, stderr } = await spawnAsync(process.execPath, argv, { timeoutMs: 1800000 })
+            let result = null
+            try { result = JSON.parse((stdout ?? '').trim()) } catch { /* fallthrough */ }
+            if (result && result.ok) {
+              return {
+                kind: 'success',
+                text: [
+                  `已本地生成 ${result.generated} 条音效（零额度）：`,
+                  ...result.files.map((f) => `  ${f.file}${f.uuid ? `  uuid=${f.uuid}` : ''}  ${f.kb}KB`),
+                  '',
+                  genArgs.project ? '已写入 assets/audio/sfx/ 并补同名 .meta，Maker 可直接引用。' : '不在项目里跑时落在临时目录，进项目请用 --project 或用 /taptap-audio import。',
+                ].join('\n'),
+              }
+            }
+            const why = result
+              ? `${result.code ?? 'gen_failed'}：${result.error ?? result.hint ?? ''}`
+              : `${stdout ?? ''}\n${stderr ?? ''}`.trim().split(/\r?\n/).slice(-3).join(' / ') || `exit ${code}`
+            return {
+              kind: 'error',
+              text: [
+                `本地生成未完成：${why}`,
+                result && result.code === 'model_missing' ? '模型还没下载：先 /taptap-sfx guide 手动下载（本插件不自动下载），下完 verify。' : '',
+                result && result.code === 'venv_missing' ? '依赖还没装：/taptap-sfx deps 先看，确认后 deps --yes 安装（约 3GB）。' : '',
+              ].filter(Boolean).join('\n'),
+            }
+          } catch (error) {
+            return { kind: 'error', text: `调用失败：${error?.message ?? error}` }
+          }
+        }
+        return { kind: 'error', text: `未知子命令「${sub}」。跑 /taptap-sfx 看用法。` }
       },
     })
 

@@ -53,7 +53,7 @@ for (const host of [SRC, SRC_BGM]) {
 for (const [name, body] of Object.entries(snippets)) {
   const filled = body.replace(/\$\{[^}]*\}/g, 'X')
   const py = wrapper(filled)
-  const file = path.join(os.tmpdir(), `check-${name}.py`)
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-py-snippets-')), `check-${name}.py`)
   fs.writeFileSync(file, py, 'utf8')
   const r = spawnSync('python', ['-m', 'py_compile', file], { encoding: 'utf8' })
   if (r.status === 0) {

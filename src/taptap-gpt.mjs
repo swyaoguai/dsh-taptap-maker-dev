@@ -47,6 +47,8 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending } from './paths.js'
 import { downscaleFile, generateImage as relayGenerate, editImage as relayEdit } from './taptap-image.mjs'
+import { flagOf, looksLikeFlag, splitTokens } from './tokens.mjs'
+import { generate as zaiduyuGenerate, zaiduyuLaneUsable } from './taptap-zaiduyu.mjs'
 import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
 import { resolveAssetDir } from './assets.mjs'
 import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
@@ -1024,7 +1026,9 @@ return result`
   // still productively working on, throwing away a nearly-finished image.
   const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 360000, accountId, sidecar })
   if (!r.ok) {
-    const lostUrl = typeof r.convUrl === 'string' && r.convUrl.length > 0 ? r.convUrl : null
+    const error = r.err ?? r.error ?? 'browser_failed'
+    const lostUrl = [r.convUrl, r.conv_url, r.steps?.conv_url]
+      .find((value) => typeof value === 'string' && value.length > 0) ?? null
     if (lostUrl !== null) {
       // Keep the conversation so the next call can grab the finished image
       // instead of generating a second one.
@@ -1037,13 +1041,14 @@ return result`
       })
       return {
         ok: false,
-        error: r.err,
+        error,
+        steps: r.steps ?? null,
         account: accountId ?? null,
         pendingUrl: lostUrl,
-        hint: `这次没等到图（${r.err}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：taptap-gpt grab --url "${lostUrl}"`,
+        hint: `这次没等到图（${error}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：taptap-gpt grab --url "${lostUrl}"`,
       }
     }
-    return { ok: false, error: r.err, account: accountId ?? null }
+    return { ok: false, error, steps: r.steps ?? null, account: accountId ?? null }
   }
   const steps = r.steps ?? {}
   touchGptAccount(dshHome, accountId ?? '', { lastUsedAt: Date.now() })
@@ -1053,7 +1058,8 @@ return result`
   const convUrl = typeof r.conv_url === 'string' && r.conv_url.length > 0
     ? r.conv_url
     : (typeof steps.conv_url === 'string' && steps.conv_url.length > 0 ? steps.conv_url : null)
-  if (convUrl !== null && steps.saved === undefined) {
+  if (convUrl !== null && steps.saved === undefined
+      && !(typeof r.error === 'string' && r.error.startsWith('quota:'))) {
     writeGptPending(dshHome, {
       url: convUrl,
       prompt,
@@ -1170,32 +1176,61 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     }
   }
   const pool = readGptPool(dshHome)
-  // Auto-resume FIRST: if a previous run left a conversation behind (its image
-  // may have finished after we closed the browser), download that instead of
-  // generating a duplicate. `--no-resume` opts out.
+  // Recover an existing submission before spending another generation. Neither
+  // age nor a failed download proves the original request was rejected.
   if (!noResume) {
     const pending = readGptPending(dshHome)
-    if (pending && Date.now() - pending.at < 30 * 60 * 1000) {
-      const got = await grab(dshHome, {
-        url: pending.url,
-        accountId: pending.accountId || accountId || undefined,
-      })
+    if (pending) {
+      if (String(pending.prompt ?? '').trim() !== String(prompt ?? '').trim()) {
+        return {
+          ok: false,
+          error: 'pending_request',
+          pendingUrl: pending.url,
+          hint: '还有另一条待抓取请求。先用 taptap-gpt grab 取回旧图；确认要开始新请求时才使用 gen --no-resume。',
+          rotated: false,
+          tried: [],
+          failures: [],
+        }
+      }
+      let got
+      try {
+        got = await grab(dshHome, {
+          url: pending.url,
+          accountId: pending.accountId || accountId || undefined,
+          out, downscale, waitMs, dir, projectDir,
+        })
+      } catch (error) {
+        got = { ok: false, error: error?.message ?? String(error) }
+      }
       if (got.ok) {
         return { ...got, resumed: true, rotated: false, tried: [pending.accountId || null] }
       }
-      // Still generating / not ready → fall through to a normal generation.
+      return {
+        ...got,
+        ok: false,
+        error: got.error || 'pending_recovery_failed',
+        pendingUrl: pending.url,
+        hint: got.hint ?? '续抓没有完成，不会重新生成。稍后用 taptap-gpt grab 抓取同一个对话。',
+        rotated: false,
+        tried: [pending.accountId || null],
+        failures: [],
+      }
     }
   }
-  // No pool configured → fall back to the single default profile.
-  if (pool.accounts.length === 0) {
-    const r = await gen(dshHome, prompt, { accountId: undefined, waitMs, out, downscale, size, dir, projectDir, reference, references })
-    return { ...r, rotated: false, tried: [r.account] }
-  }
-  // Rotation OFF means "use this account and stop" — the settings switch has to
-  // actually change behaviour, otherwise a user who turned it off (e.g. to keep
-  // one account's quota intact) still silently gets walked through the pool.
-  if (pool.autoRotate === false) {
+  // A selected web profile must be logged in. This guard belongs here, not
+  // before the unified entry has chosen between GPT, relay and Zaiduyu.
+  if (pool.accounts.length === 0 || pool.autoRotate === false) {
     const only = typeof accountId === 'string' && accountId.length > 0 ? accountId : undefined
+    if (!statusFor(dshHome, only).loggedIn) {
+      return {
+        ok: false,
+        error: 'not_logged_in',
+        hint: only ? `账号未登录：taptap-gpt login --account ${only}` : '还没登录 ChatGPT 网页账号。先运行 taptap-gpt login；不会开始生成。',
+        rotated: false,
+        tried: [],
+        failures: [],
+      }
+    }
     const r = await gen(dshHome, prompt, { accountId: only, waitMs, out, downscale, size, dir, projectDir, reference, references })
     return { ...r, rotated: false, tried: [only ?? null] }
   }
@@ -1231,8 +1266,13 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     // （write_failed 曾漏在名单外：本地磁盘写不动时，池里每个账号都会被白烧一次。）
     if (last?.error === 'no_image' || last?.error === 'download_failed' || last?.error === 'write_failed') break
     if (last?.error === 'cloudflare_challenge' || last?.error === 'not_logged_in') break
+    // Only a confirmed quota rejection permits a new submission. Timeouts,
+    // missing error fields and other unknown results may already be charged.
+    if (!String(last?.error ?? '').startsWith('quota:')) break
   }
-  const lastErr = last?.error ?? 'no usable account (all not logged in)'
+  const lastErr = last
+    ? (last.error ?? 'unknown_generation_result')
+    : 'no usable account (all not logged in)'
   // Give the caller a hint that actually matches how it failed.
   const hints = {
     // The browser window IS open and visible — the human can clear it.
@@ -1242,12 +1282,13 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     no_image: '没有等到新图（可能仍在生成或该账号额度不足）。先确认 pending，再决定是否重试。',
   }
   return {
+    ...last,
     ok: false,
     error: lastErr,
     rotated: tried.length > 1,
     tried,
     failures,
-    hint: hints[lastErr] ?? 'pool: /taptap-gpt pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
+    hint: last?.hint ?? hints[lastErr] ?? 'pool: /taptap-gpt pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
   }
 }
 
@@ -1264,11 +1305,12 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
  *
  * @param {object} relayOpts 传给中转站通道的参数（baseURL/apiKey/prompt/…）
  */
-export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts = {}, relayReady: relayOk = () => false } = {}) {
+export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts = {}, relayReady: relayOk = () => false, zaiduyuOpts = {}, zaiduyuReady: zaiduyuOk = () => false } = {}) {
   const enabled = laneOrder(dshHome, 'image')
   const ready = {
     gptWeb: () => readGptLaneEnabled(dshHome),
     relayImage: () => (typeof relayOk === 'function' ? Boolean(relayOk()) : false),
+    zaiduyu: () => (typeof zaiduyuOk === 'function' ? Boolean(zaiduyuOk()) : false),
   }
   const usable = enabled.filter((id) => {
     try { return ready[id]?.() } catch { return false }
@@ -1294,6 +1336,12 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
       }
       return r
     }
+    // 章鱼生图（积分站）：包装第三方 generate.py，失败抛错进统一回退。
+    // 预检信息（模型/积分/余额）随结果透传，界面与对话里都要如实告诉用户。
+    if (laneId === 'zaiduyu') {
+      const r = await zaiduyuGenerate(dshHome, prompt, zaiduyuOpts)
+      return { ...r, lane: 'zaiduyu' }
+    }
     // ⚠️ 中转站：有参考图时必须走 /images/edits（图生图），不能走
     //    /images/generations（纯文生图）—— 后者**完全不读** in/references，
     //    参考图会被静默丢弃，用户以为图生图生效了，实际得到的是一张无关新图。
@@ -1305,10 +1353,26 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
       // editImage 返回 {outputs:[path], ...}，统一成生图通道的形状（saved）。
       return { ...edited, ok: true, saved: edited.outputs?.[0] ?? edited.saved, via: 'edit' }
     }
-    return relayGenerate(relayOpts)
+    const generated = await relayGenerate(relayOpts)
+    return { ...generated, ok: true, saved: generated.outputs?.[0] ?? generated.saved }
   }
 
-  const result = await runWithFallback(chain, runLane, (err) => err?.message ?? String(err))
+  const safeRunLane = async (laneId) => {
+    try {
+      return await runLane(laneId)
+    } catch (error) {
+      // "autoFallback" is a quota opt-in, not permission to resubmit an
+      // uncertain request through another provider (possibly charging twice).
+      if (error?.quota === true || String(error?.message ?? '').startsWith('quota:')) throw error
+      return {
+        ok: false,
+        error: 'lane_failed',
+        hint: error?.message ?? String(error),
+        ...(error?.preflight ? { preflight: error.preflight } : {}),
+      }
+    }
+  }
+  const result = await runWithFallback(chain, safeRunLane, (err) => err?.message ?? String(err))
   if (result.ok) return { ...result.value, lane: result.lane, rotatedLanes: result.attempts.length > 0 }
 
   const summary = result.attempts.map((a) => `  ${a.lane}：${a.reason}`).join('\n')
@@ -1332,14 +1396,14 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
  * already on the page before the run; `grab` itself accepts the newest large
  * image in the conversation.
  */
-export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 180000 } = {}) {
+export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 180000, dir, projectDir } = {}) {
   const pending = readGptPending(dshHome)
   const target = (typeof url === 'string' && url.length > 0) ? url : pending?.url
   if (typeof target !== 'string' || target.length === 0) {
     return { ok: false, error: 'no_url', hint: '还没有待抓取的对话：先用 gen 生成，或 grab --url <对话链接>。' }
   }
   const account = accountId ?? pending?.accountId ?? undefined
-  const resolved = resolveDownloadDir(dshHome, {})
+  const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const dest = out || path.join(resolved.dir, `gpt-${stamp}.png`)
   fs.mkdirSync(path.dirname(dest), { recursive: true })
@@ -1429,7 +1493,7 @@ result["saved"] = DEST
 return result`
 
   const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 120000, accountId: account })
-  if (!r.ok) return { ok: false, error: r.err, steps: null, url: target }
+  if (!r.ok) return { ok: false, error: r.err ?? r.error ?? 'browser_failed', steps: r.steps ?? null, url: target }
   const steps = r.steps ?? {}
   if (typeof r.error === 'string' && r.error.length > 0 && steps.saved === undefined) {
     // A client-only conversation ("local-chatgpt:…") is NOT persisted by
@@ -1468,18 +1532,107 @@ return result`
   return { ok: true, saved, grabbed: true, url: target, steps, notes }
 }
 
+/**
+ * 解析 `/taptap-gpt <描述> [--ref …] [--downscale …] [--account …]` 的斜杠命令输入。
+ *
+ * 为什么不能用正则剥 flag（旧写法）：`--ref` 后面**漏写值**时，
+ * `(?:--ref)\s+(?:"[^"]+"|\S+)` 会把下一个 flag 名整个当成参考图吞掉，
+ * 而那个 flag 的值则留在提示词里。实测 `--ref --account a2 画一只猫`：
+ *   refs = ["--account"]  ← 一个并不存在的路径，网页通道会真的去上传它
+ *   提示词 = "a2 画一只猫" ← **账号 id 混进了发给 ChatGPT 的描述**
+ * 统一走 flagOf / looksLikeFlag：值看起来像 flag 就报「漏值」，
+ * 由命令层拒绝提交，而不是带着错的参数去跑一条会花额度的链路。
+ *
+ * 斜杠命令对外承诺支持短别名（-r / -d / -a），这里照旧认；
+ * CLI（parseCliArgs）只认长格式 —— 两者的口径在各自文档里写明。
+ */
+export function parseSlashGenArgs(raw) {
+  const out = { prompt: '', refs: [], downscale: '', account: '', missing: [] }
+  const leftovers = []
+  const list = splitTokens(raw) ?? []
+  const pushRefs = (value) => {
+    for (const part of String(value).split(',')) {
+      const p = part.trim()
+      if (p.length > 0) out.refs.push(p)
+    }
+  }
+  const KEYS = {
+    ref: 'REF', refs: 'REF', reference: 'REF', references: 'REF', r: 'REF',
+    downscale: 'DOWNSCALE', d: 'DOWNSCALE',
+    account: 'ACCOUNT', a: 'ACCOUNT',
+  }
+  for (let i = 0; i < list.length; i += 1) {
+    const t = String(list[i])
+    if (t === '--') { leftovers.push(...list.slice(i + 1).map(String)); break }
+    const f = flagOf(t)
+    if (f === null) { leftovers.push(t); continue }
+    const field = KEYS[f.name]
+    if (field === undefined) {
+      // 未知 flag：原样留在提示词里（不猜含义，也不偷偷丢 token）。
+      leftovers.push(t)
+      if (f.inline !== null) leftovers.push(String(f.inline))
+      continue
+    }
+    let value = f.inline
+    if (value === null) {
+      const next = list[i + 1]
+      if (next !== undefined && !looksLikeFlag(next)) { value = String(next); i += 1 }
+    }
+    if (value === null) { out.missing.push(t); continue }
+    if (field === 'REF') { pushRefs(value); continue }
+    if (field === 'DOWNSCALE') { out.downscale = value; continue }
+    if (field === 'ACCOUNT') { out.account = value; continue }
+  }
+  out.prompt = leftovers.join(' ').trim()
+  return out
+}
+
+/**
+ * 解析 gpt CLI 的 flag。参考图类键**必须累积**：
+ * 守则与 --help 都写明「--ref 可重复」，而消费端（gen 分支的
+ * `Array.isArray(v) ? v : [v]`）本来就支持数组 —— 唯独解析端用赋值，
+ * `--ref a --ref b` 只剩 b：**静默丢掉前面的参考图**，用户以为做了多图合成，
+ * 实际得到只带一张图的结果。修法与 taptap-image 的 parseArgs 一致。
+ * 导出是为了让测试能打真实实现（复刻一份解析器等于没测）。
+ */
+export function parseCliArgs(argv) {
+  const REPEATABLE = new Set(['ref', 'refs', 'reference', 'references'])
+  const args = {}
+  const put = (key, value) => {
+    args[key] = args[key] === undefined
+      ? value
+      : (Array.isArray(args[key]) ? [...args[key], value] : [args[key], value])
+  }
+  // 与其余三条链路共用 flagOf / looksLikeFlag（对齐 Python argparse）：
+  // 之前这里靠 normalizeEquals 先展开、再按 `startsWith('--')` 判下一个 token，
+  // 于是 `--ref=-fast` 这类「值看起来像 flag」的写法会被拆坏（等号形式存在的
+  // 意义恰恰是允许这种值），而负数 `-1` 又会被误判成 flag。
+  // 本 CLI 对外只承诺长格式：短开关不在支持面内，原样跳过（与既有行为一致）。
+  const list = argv ?? []
+  for (let i = 1; i < list.length; i += 1) {
+    const t = String(list[i])
+    const f = flagOf(t)
+    if (f === null || !f.raw.startsWith('--')) continue
+    let value
+    if (f.inline !== null) value = f.inline
+    else {
+      const next = list[i + 1]
+      if (next === undefined || looksLikeFlag(next)) value = true
+      else { value = String(next); i += 1 }
+    }
+    // ⚠️ 只有参考图类键累积；其余保持「后者覆盖」：
+    //   `--account a1 --account a2` 若被收成数组，pickGptAccount 拿到的就是
+    //   一个数组而不是 id 字符串，账号轮换会整个坏掉。
+    if (REPEATABLE.has(f.name)) put(f.name, value)
+    else args[f.name] = value
+  }
+  return args
+}
+
 async function main() {
   const argv = process.argv.slice(2)
   const cmd = (argv[0] ?? 'status').toLowerCase()
-  const args = {}
-  for (let i = 1; i < argv.length; i += 1) {
-    const t = argv[i]
-    if (!t.startsWith('--')) continue
-    const key = t.slice(2)
-    const next = argv[i + 1]
-    if (next === undefined || next.startsWith('--')) args[key] = true
-    else { args[key] = next; i += 1 }
-  }
+  const args = parseCliArgs(argv)
   const home = args.dshHome
 
   // Download dir: `dir` (show) | `dir --set <路径>` | `dir --reset`.

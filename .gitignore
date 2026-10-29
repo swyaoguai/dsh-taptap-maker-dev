@@ -2,6 +2,8 @@ node_modules/
 .tmpaudio/
 .tmpconv/
 .tmptest/
+.tmp*/
+__pycache__/
 skills-cache/
 *.tgz
 .DS_Store

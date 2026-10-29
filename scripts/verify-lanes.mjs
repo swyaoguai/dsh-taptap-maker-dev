@@ -35,7 +35,7 @@ console.log('\n[1] 默认值（必须与改造前的实际行为一致）')
   const cfg = readLanes(home)
   ok(cfg.autoFallback === false, '自动回退默认关 —— 不擅自动用用户的付费通道')
   ok(cfg.groups.video.order.join('>') === 'relay>minimax>local', '视频默认顺序 relay > minimax > local', cfg.groups.video.order.join('>'))
-  ok(cfg.groups.image.order.join('>') === 'gptWeb>relayImage', '生图默认顺序 网页 > 中转站', cfg.groups.image.order.join('>'))
+  ok(cfg.groups.image.order.join('>') === 'gptWeb>relayImage>zaiduyu', '生图默认顺序 网页 > 中转站 > 章鱼', cfg.groups.image.order.join('>'))
   ok(GROUPS.every((g) => cfg.groups[g].order.length === LANE_GROUPS[g].lanes.length), '每组通道一个不少')
 }
 
@@ -70,7 +70,7 @@ console.log('\n[3] 脏数据归一化')
   ok(!cfg.groups.video.order.includes('不存在的通道') && !cfg.groups.video.order.includes(42), '未知通道被丢弃')
   ok(cfg.groups.video.order.length === 3, '缺失的通道被补回', cfg.groups.video.order.join('>'))
   ok(cfg.groups.video.order.some((id) => cfg.groups.video.enabled[id]), '脏数据里全 false 也仍保留一条可用')
-  ok(cfg.groups.image.order.length === 2, 'groups.image 为 null 时回落到默认')
+  ok(cfg.groups.image.order.length === 3, 'groups.image 为 null 时回落到默认', cfg.groups.image.order.join('>'))
 
   writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'), '{ 这不是 JSON', 'utf8')
   ok(readLanes(home).groups.video.order.length === 3, '文件损坏时不抛异常，退回默认')
@@ -161,6 +161,13 @@ console.log('\n[7] 逐条开关被命令层尊重 + 统一入口已接线（源�
   const idx = readFileSync(path.join(here, '..', 'index.js'), 'utf8')
   ok(/relayImageLaneEnabled\(home\)/.test(idx), '/taptap-image 入口检查 relayImage 逐条开关')
   ok(/gptGenerateImage\(home, prompt/.test(idx), '/taptap-gpt 生图走统一入口 generateImage（含 autoFallback 回退）')
+
+  // 章鱼生图（积分站）接入统一入口：ready 判断 + 命令层开关都要算数，
+  // 否则就是「设置页能排它、实际永远走不到」（历史上 relay 回退踩过同样的坑）。
+  ok(/zaiduyu: \(\) =>/.test(gpt), 'generateImage 的 ready 表里有 zaiduyu')
+  ok(/laneId === 'zaiduyu'/.test(gpt), 'generateImage 的分派里有 zaiduyu 分支')
+  ok(/zaiduyuReady/.test(idx) && /zaiduyuLaneEnabled\(home\)/.test(idx), '/taptap-gpt 入口传了 zaiduyu 就绪判断与逐条开关')
+  ok(/zaiduyu: '需要在下面「章鱼生图/.test(idx), '未配置时给界面一句「去哪儿填账号」')
 }
 
 try { rmSync(scratch, { recursive: true, force: true }) } catch { /* ignore */ }

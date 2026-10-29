@@ -230,7 +230,15 @@ console.log('\n[4] 通道优先级 / 开关路由')
   ok(!jv.includes('不存在的'), '未知通道被丢弃', jv.join(','))
   ok(jv.length === 3, '缺失通道被补回', jv.join(','))
   ok(junk2.json.groups.video.lanes.some((l) => l.enabled), '不会全关（保留一条，避免锁死）')
-  ok(Array.isArray(junk2.json.groups.image.lanes) && junk2.json.groups.image.lanes.length === 2, 'image 组为 null 时回落到默认')
+  ok(Array.isArray(junk2.json.groups.image.lanes) && junk2.json.groups.image.lanes.length === 3, 'image 组为 null 时回落到默认（含章鱼通道）', junk2.json.groups.image.lanes.map((l) => l.id).join(','))
+
+  // 章鱼生图（积分站）通道：默认排最后、没配凭据时状态点为「未配置」并给出可执行指引。
+  const img = (await req('GET', 'lanes')).json.groups.image.lanes
+  const za = img.find((l) => l.id === 'zaiduyu')
+  ok(Boolean(za), 'image 组含 zaiduyu 通道')
+  ok(img[img.length - 1].id === 'zaiduyu', '章鱼通道默认在最后（不抢网页/中转站的优先位）', img.map((l) => l.id).join('>'))
+  ok(za.ready === false, '未配站点凭据时 zaiduyu 状态点为「未配置」')
+  ok(/章鱼生图|登录并保存/.test(za.reason || ''), '未配置时指引去设置页填账号并登录保存')
 }
 
 console.log('\n[5] 素材落点随项目（GET /lanes 与 /asset-dirs 都返回真实路径）')

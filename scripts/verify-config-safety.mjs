@@ -19,6 +19,7 @@ import {
   readGptDownloadDir, readImageConfigRaw, readJson, readMinimaxConfigRaw,
   readMinimaxConfigWithSource, resolveImageConfig, resolveMinimaxConfig,
   writeGptDownloadDir, writeImageConfigPatch, writeJson, writeMinimaxConfigPatch,
+  maskSecret, readZaiduyuConfigRaw, writeZaiduyuConfigPatch, clearZaiduyuCredentials, resolveZaiduyuCredentials,
 } from '../src/paths.js'
 
 let passed = 0
@@ -201,6 +202,67 @@ console.log('\n[8] 版本升级迁移：music.json → minimax.json（升级不�
   writeJson(legacy, { apiKey: 'sk-legacy-key', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
   writeMinimaxConfigPatch(home, { apiKey: 'sk-legacy-key', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
   ok(readMinimaxConfigRaw(home).apiKey === 'sk-legacy-key', '迁移后 minimax.json 可读到旧 Key（规则等价验证）')
+}
+
+console.log('\n[9] 章鱼生图站点账号：优先级 / 半截不算数 / 空串不抹密码')
+{
+  // 凭据改成设置页 GUI 登录后，这条链成了「保存即能用」的地基：
+  //   - 文件优先、env 兜底（并把 env 遮蔽如实报出来，否则会误判成没保存）；
+  //   - **半截凭据（只有账号没有密码）必须算不可用** —— 否则会把只有账号的
+  //     半成品注入子进程，撞出「登录失败」这种含糊报错（实测过这类坑）；
+  //   - 密码空串 = 不修改：表单不回显密码，只改账号时密码字段必然为空，
+  //     当值写回去就是把用户密码抹掉（image.json 历史上正是这么坏的）。
+  const home = path.join(scratch, 'z1')
+  const savedEnv = { ZAIDUYU_USER: process.env.ZAIDUYU_USER, ZAIDUYU_PASS: process.env.ZAIDUYU_PASS }
+  try {
+    process.env.ZAIDUYU_USER = 'env_user'
+    process.env.ZAIDUYU_PASS = 'env_pass'
+    writeZaiduyuConfigPatch(home, { identifier: 'phone_111', password: 'pw_secret_222' })
+    const r = resolveZaiduyuCredentials(home)
+    ok(r.source === 'file' && r.identifier === 'phone_111' && r.password === 'pw_secret_222', 'zaiduyu：文件凭据压过环境变量')
+    ok(r.usable === true && r.envShadowed === true, 'zaiduyu：env 里也有凭据时如实标 envShadowed（否则会误判成没生效）')
+
+    // 只填账号没填密码 → 不可用，但 identifier 仍可回给界面显示「填了一半」
+    const half = path.join(scratch, 'z2')
+    writeZaiduyuConfigPatch(half, { identifier: 'only_user' })
+    delete process.env.ZAIDUYU_USER
+    delete process.env.ZAIDUYU_PASS
+    const r2 = resolveZaiduyuCredentials(half)
+    ok(r2.usable === false && r2.source === 'none', 'zaiduyu：半截凭据算不可用（不拿它去登录）')
+    ok(r2.identifier === 'only_user', 'zaiduyu：不可用时仍回显已填的账号，界面能指出缺哪一半')
+
+    // env 里只有 USER 没有 PASS 同样不可用
+    process.env.ZAIDUYU_USER = 'eu'
+    const r3 = resolveZaiduyuCredentials(path.join(scratch, 'z-empty'))
+    ok(r3.usable === false && r3.source === 'none', 'zaiduyu：env 缺密码也算不可用')
+    delete process.env.ZAIDUYU_USER
+
+    // 只改账号、密码留空 → 旧密码必须保住
+    writeZaiduyuConfigPatch(home, { identifier: 'other_user', password: '' })
+    ok(readZaiduyuConfigRaw(home).password === 'pw_secret_222', 'zaiduyu：空密码 = 不修改（只改账号不抹密码）')
+    ok(readZaiduyuConfigRaw(home).identifier === 'other_user', 'zaiduyu：账号照常更新')
+
+    // 掩码不外泄明文；清除后彻底不可用
+    const masked = maskSecret('pw_secret_222')
+    ok(masked !== 'pw_secret_222' && !masked.includes('secret'), 'zaiduyu：maskSecret 不回显密码明文')
+    ok(clearZaiduyuCredentials(home) === true, 'zaiduyu：清除返回 true（确实删了文件）')
+    ok(resolveZaiduyuCredentials(home).usable === false, 'zaiduyu：清除后不可用')
+    ok(clearZaiduyuCredentials(home) === false, 'zaiduyu：重复清除返回 false（本来就没有）')
+
+    // 密码绝不进命令行参数（argv 会进进程列表/日志）—— 只能走子进程 env。
+    const zsrc = fs.readFileSync(new URL('../src/taptap-zaiduyu.mjs', import.meta.url), 'utf8')
+    const genBody = /export async function generate[\s\S]*?\n\}\n/.exec(zsrc)?.[0] ?? ''
+    ok(!/--(password|pass|user|identifier)\b/.test(genBody), 'zaiduyu：不往生图参数里塞账号或密码')
+    ok(/childEnv\.ZAIDUYU_PASS\s*=/.test(zsrc), 'zaiduyu：凭据通过子进程 env 注入')
+    // 登录验证必须显式接管凭据并剥掉继承值，否则旧 env 会替新账号作弊
+    ok(/delete childEnv\.ZAIDUYU_USER/.test(zsrc) && /delete childEnv\.ZAIDUYU_PASS/.test(zsrc),
+      'zaiduyu：显式凭据时剥掉继承的 env（验证的就是表单里那一组）')
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
 }
 
 fs.rmSync(scratch, { recursive: true, force: true })

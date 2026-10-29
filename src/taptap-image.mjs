@@ -36,26 +36,80 @@ import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveImageConfig, maskSecret, imageConfigPath, resolveDshHome } from './paths.js'
+import { flagOf, looksLikeFlag, consumeFlags, splitTokens, flagValue, flagList } from './tokens.mjs'
 
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024'])
 
-function parseArgs(argv) {
+/**
+ * 解析 `/taptap-image <描述> [--ref …] [--size …] [--transparent …]` 的斜杠命令输入。
+ *
+ * 为什么不能用正则剥 flag（旧写法）：flag 表是人工维护的白名单，漏一个就是
+ * 「合法参数没人认领」。实测过的真实后果：
+ *   - `--transparent` **既不剥掉也不转发**：用户写「盾牌图标 --transparent」，
+ *     字面 `--transparent` 被当成画面描述发给模型，而且**不会要透明底**
+ *     （本模块的 generateImage 本来就支持 transparent 参数）；
+ *   - `--size=512x512` 等号连写整段留在提示词里、size 值丢失；
+ *   - `--ref` 漏值时把下一个 flag 名当参考图（`--ref --size 512x512` →
+ *     refs=["--size"]，而 `512x512` 漏进提示词）。
+ * 现在统一走 tokens.mjs 的 consumeFlags：flag 语义只有一份，加参数只改这张表。
+ *
+ * 导出以便测试直接打真实实现（在测试里复刻一份 spec 表等于没测）。
+ */
+export function parseSlashArgs(raw) {
+  const res = consumeFlags(splitTokens(raw), {
+    ref: { into: 'refs', list: true },
+    refs: { into: 'refs', list: true },
+    reference: { into: 'refs', list: true },
+    references: { into: 'refs', list: true },
+    r: { into: 'refs', list: true },
+    size: { into: 'size' },
+    s: { into: 'size' },
+    downscale: { into: 'downscale' },
+    d: { into: 'downscale' },
+    transparent: { into: 'transparent', kind: 'bool' },
+    'multi-ref': { into: 'multiRef', kind: 'bool' },
+    'single-ref': { into: 'singleRef', kind: 'bool' },
+    // --prompt 的值并进提示词（只丢 flag 名，不丢整段）。
+    prompt: { into: '@rest' },
+  })
+  return {
+    prompt: res.prompt,
+    refs: flagList(res, 'refs'),
+    size: flagValue(res, 'size'),
+    downscale: flagValue(res, 'downscale'),
+    transparent: res.bools.transparent === true,
+    multiRef: res.bools['multi-ref'] === true,
+    singleRef: res.bools['single-ref'] === true,
+    missing: res.missing,
+  }
+}
+
+/** 导出以便测试直接打真实实现（复刻一份解析器等于没测）。 */
+export function parseArgs(argv) {
+  // 用 tokens.mjs 的 flagOf / looksLikeFlag（对齐 Python argparse），与
+  // taptap-gpt / taptap-sfx / taptap-zaiduyu 同一套语义。之前各写一套判断
+  // （`startsWith('--')` / `startsWith('-')` / 正则），同一句话在不同链路上
+  // 结果不同 —— 属于最难查的一类 bug。本 CLI 对外只承诺长格式，短开关照旧忽略。
   const args = { _: [] }
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (!token.startsWith('--')) { args._.push(token); continue }
-    const key = token.slice(2)
-    const next = argv[i + 1]
-    if (next === undefined || next.startsWith('--')) {
-      // 重复出现的开关（--in a.png --in b.png）收成数组；单次仍是字符串，
-      // 保持既有调用方（resolveImageConfig 读 args.apiKey 等）不受影响。
-      args[key] = args[key] === undefined ? true : (Array.isArray(args[key]) ? [...args[key], true] : [args[key], true])
-    } else {
-      args[key] = args[key] === undefined
-        ? next
-        : (Array.isArray(args[key]) ? [...args[key], next] : [args[key], next])
-      i += 1
-    }
+  const list = argv ?? []
+  const put = (key, value) => {
+    // 重复出现的键收成数组（`--in a.png --in b.png`）；单次仍是字符串，
+    // 保持既有调用方（resolveImageConfig 读 args.apiKey 等）不受影响。
+    args[key] = args[key] === undefined
+      ? value
+      : (Array.isArray(args[key]) ? [...args[key], value] : [args[key], value])
+  }
+  for (let i = 0; i < list.length; i += 1) {
+    const token = String(list[i])
+    if (token === '--') { args._.push(...list.slice(i + 1).map(String)); break }
+    const f = flagOf(token)
+    if (f === null) { args._.push(token); continue }
+    // 短开关不在本 CLI 的支持面内：原样当位置参数，不猜它的含义。
+    if (!f.raw.startsWith('--')) { args._.push(token); continue }
+    if (f.inline !== null) { put(f.name, f.inline); continue }
+    const next = list[i + 1]
+    if (next === undefined || looksLikeFlag(next)) put(f.name, true)
+    else { put(f.name, String(next)); i += 1 }
   }
   return args
 }

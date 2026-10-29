@@ -1,0 +1,8 @@
+interface:
+  display_name: "Zaiduyu 多模型生图"
+  short_description: "选模型看积分再出图，支持文生图与图片编辑"
+  brand_color: "#8B5CF6"
+  default_prompt: "Use $zaiduyu-imagegen to generate an image: a cat walking on the moon. List available models with their credit cost and my balance first."
+
+policy:
+  allow_implicit_invocation: true

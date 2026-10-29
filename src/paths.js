@@ -66,6 +66,103 @@ export function defaultCacheDir(dshHome) {
   return path.join(dataDir(dshHome), 'skills-cache')
 }
 
+/* ------------------------------------------------------------------------- *
+ * ZAIDUYU（章鱼生图积分站）站点账号
+ *
+ * 与 image.json / minimax.json 同一套隐私规则：凭据只写在
+ * $DSH_HOME/taptap-maker-dev/ 下，**绝不落在会自动提交的 Maker 工作区里**。
+ *
+ * 为什么不是环境变量：上游 skill 原版要求用户 `SetEnvironmentVariable`，
+ * 但那对普通用户既难（要开终端、要重开宿主）又危险（命令会落进对话记录、
+ * 工具日志和本机 audit-log，等于把密码抄进一堆日志文件）。现在改成设置页
+ * 表单 + 一键「登录并保存」，只有真正调脚本时才把凭据注入**子进程 env**
+ * （不进 argv —— argv 会进进程列表与任何命令日志）。
+ * ------------------------------------------------------------------------- */
+
+/** Path to the zaiduyu site-credential file (zaiduyu.json). */
+export function zaiduyuConfigPath(dshHome) {
+  return path.join(dataDir(dshHome), 'zaiduyu.json')
+}
+
+/** Read the raw zaiduyu config ({identifier, password}), tolerant. */
+export function readZaiduyuConfigRaw(dshHome) {
+  return readJson(zaiduyuConfigPath(dshHome)) ?? {}
+}
+
+/**
+ * Merge a {identifier,password} patch. 空字符串 = 不修改（与 image/minimax 同
+ * 约定 —— 表单不回显密码，用户只改账号时密码字段必然是空的）。
+ * 真要清空请用 clearZaiduyuCredentials。
+ */
+export function writeZaiduyuConfigPatch(dshHome, patch = {}) {
+  const file = zaiduyuConfigPath(dshHome)
+  const merged = { ...(readJson(file) ?? {}) }
+  if (typeof patch.identifier === 'string' && patch.identifier.trim() !== '') {
+    merged.identifier = patch.identifier.trim()
+  }
+  if (typeof patch.password === 'string' && patch.password !== '') {
+    merged.password = patch.password
+  }
+  // 验证元数据一并写：分两次写会留下「第二次覆盖掉并发请求改动」的窗口，
+  // 而这两个字段本来就属于同一次保存动作。只存时间戳与账号，
+  // **绝不写余额、Cookie 或任何站点返回的数据**。
+  if (typeof patch.lastVerifiedAt === 'string') merged.lastVerifiedAt = patch.lastVerifiedAt
+  if (typeof patch.lastIdentifier === 'string') merged.lastIdentifier = patch.lastIdentifier
+  if (typeof merged._comment !== 'string') {
+    merged._comment = '章鱼生图（pai.zaiduyu.top）站点账号。此文件在 $DSH_HOME 下，不在任何 Maker 工作区内；密码不回显给界面，只在本机读取。'
+  }
+  writeJson(file, merged)
+  return merged
+}
+
+/** Delete stored credentials; returns whether something was removed. */
+export function clearZaiduyuCredentials(dshHome) {
+  const file = zaiduyuConfigPath(dshHome)
+  try {
+    if (!fs.existsSync(file)) return false
+    fs.rmSync(file, { force: true })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Effective zaiduyu credentials with precedence:
+ *   设置页 zaiduyu.json  >  env (ZAIDUYU_USER / ZAIDUYU_PASS)
+ * `source` 必须如实回给界面：历史上 MiniMax 那张卡因为没亮出「生效的 Key
+ * 其实来自 env」，用户以为保存过就万事大吉，升级后 env 没了才发现是空的。
+ * 缺**任一半**（账号或密码）都算不可用，而不是拼出半截凭据去登录。
+ */
+export function resolveZaiduyuCredentials(dshHome) {
+  const fromFile = readZaiduyuConfigRaw(dshHome)
+  const fileOk = Boolean(fromFile.identifier && fromFile.password)
+  const envUser = String(process.env.ZAIDUYU_USER ?? '').trim()
+  const envPass = String(process.env.ZAIDUYU_PASS ?? '')
+  const envOk = Boolean(envUser && envPass)
+  if (fileOk) {
+    return {
+      identifier: String(fromFile.identifier).trim(),
+      password: String(fromFile.password),
+      source: 'file',
+      usable: true,
+      envShadowed: envOk,
+    }
+  }
+  if (envOk) {
+    return { identifier: envUser, password: envPass, source: 'env', usable: true, envShadowed: false }
+  }
+  return {
+    // 不可用时仍把**已填的账号**回出去（文件优先，其次 env）：界面要能指出
+    // 「账号是 X，缺的是密码」，全空会让用户以为刚才填的没存上。
+    identifier: String(fromFile.identifier ?? '') || envUser,
+    password: '',
+    source: 'none',
+    usable: false,
+    envShadowed: false,
+  }
+}
+
 /** Path to the user's disabled-skills list ({ disabled: [name, ...] }). */
 export function skillsDisabledPath(dshHome) {
   return path.join(dataDir(dshHome), 'skills-disabled.json')

@@ -1548,6 +1548,248 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 章鱼生图（pai.zaiduyu.top 积分站）站点账号 —— 在设置页里登录，不用命令行。
+     *
+     * 为什么把凭据收进设置页而不是环境变量：上游 skill 原版要求
+     * `SetEnvironmentVariable`，那对普通用户既难用（开终端、改完要重开宿主）
+     * 又危险（命令会原样落进对话记录、工具日志与本机 audit-log，等于把密码
+     * 抄进一堆日志文件）。表单里的密码只在提交那一次进内存 → 后端只读验证
+     * → 通过才落盘；GET 永不回显密码，密码框也不会被渲染进可读的界面状态。
+     *
+     * 「登录并保存」是**验证过才保存**：存一组登不进去的凭据，只会让后面每次
+     * 生图都撞墙、且报错含糊。验证用的是站点自己的只读积分查询 —— 不扣积分、
+     * 不签到、不生图。
+     */
+    function ZaiduyuAccount() {
+      const [info, setInfo] = useState(null) // null | 'error' | status
+      const [form, setForm] = useState({ identifier: '', password: '' })
+      const [busy, setBusy] = useState('')
+      const [err, setErr] = useState('')
+      const [note, setNote] = useState('')
+      const [warnNote, setWarnNote] = useState('')
+      const [balance, setBalance] = useState(null)
+      const [models, setModels] = useState(null) // null | 'loading' | 'error' | [ {model,credits,route} ]
+
+      const load = useCallback(() => {
+        fetch(`${API_BASE}/zaiduyu`, { headers: { accept: 'application/json' } })
+          .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
+          .then((j) => {
+            setInfo(j)
+            // 账号回填（不是密钥，看得见才知道登的是哪个号）；密码**绝不回填**。
+            setForm((f) => ({ ...f, identifier: j.identifier || f.identifier }))
+            if (j.hasCredentials) {
+              fetch(`${API_BASE}/zaiduyu/balance`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+                .then((r) => r.json()).then((b) => { if (b && b.ok) setBalance(b) }).catch(() => { /* 余额拉不到不影响主流程 */ })
+            }
+          })
+          .catch(() => setInfo('error'))
+      }, [])
+      useEffect(() => { load() }, [load])
+
+      const set = useCallback((k, v) => setForm((f) => ({ ...f, [k]: v })), [])
+
+      /** 提交登录（可选 force = 站点不可达时仍要保存）。 */
+      const login = useCallback((force) => {
+        setBusy('login'); setErr(''); setNote('')
+        fetch(`${API_BASE}/zaiduyu`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ ...form, force: force === true }),
+        })
+          .then((r) => r.json().then((j) => ({ status: r.status, j })).catch(() => ({ status: 0, j: { error: '响应解析失败' } })))
+          .then(({ status, j }) => {
+            if (j.ok) {
+              setNote(j.forceSaved
+                // 跳过验证分两种：站点连不上（先存着，回头再验是合理的），
+                // 和**凭据本身被站点拒绝**（存下来基本没用，只会让后面每次
+                // 生图都撞墙）。混成一句「站点恢复后再验」会误导后者。
+                ? (j.forceKind === 'auth'
+                  ? '已保存，但站点明确拒绝了这组账号密码（多半是打错了）。现在还不能生图——请核对后重新点「登录并保存」。'
+                  : '已保存（跳过了验证）。站点/环境恢复后请再点一次「重新验证并保存」确认能登进去。')
+                : `登录验证通过 ✓ 已保存${j.balance ? `（当前积分 ${j.balance}）` : ''}`)
+              // 保存成功后清掉表单里的密码：内存里少留一份是一份。
+              setForm((f) => ({ ...f, password: '' }))
+              setBalance(null)
+              load()
+              return
+            }
+            // 失败按类型分开说：把「没装 Python」报成「登录失败」，
+            // 用户会去反复改密码，而真正该修的是环境。
+            const kind = j.kind || (status === 503 ? 'environment' : 'auth')
+            const head = kind === 'environment' ? '本机环境未就绪，未验证：'
+              : kind === 'network' ? '站点连不上（未保存）：'
+                : '账号或密码不对（未保存）：'
+            setErr(`${head}${j.error || '未知原因'}`)
+            if (kind === 'network' && status === 401) setNote('如果是站点临时抽风，可以点「仍要保存（跳过验证）」先把凭据存下来。')
+          })
+          .catch(() => setErr('请求失败：宿主 web 服务未就绪'))
+          .finally(() => setBusy(''))
+      }, [form, load])
+
+      const checkBalance = useCallback(() => {
+        setBusy('balance'); setErr('')
+        fetch(`${API_BASE}/zaiduyu/balance`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+          .then((r) => r.json())
+          .then((j) => {
+            if (j.ok) setBalance(j)
+            else setErr(`查积分失败：${j.error || '未知原因'}`)
+          })
+          .catch(() => setErr('请求失败：宿主 web 服务未就绪'))
+          .finally(() => setBusy(''))
+      }, [])
+
+      /** 价目表：生图前必须先看清每个模型花多少积分，再决定用哪个。 */
+      const loadModels = useCallback(() => {
+        setModels('loading'); setErr('')
+        fetch(`${API_BASE}/zaiduyu/models`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+          .then((r) => r.json())
+          .then((j) => {
+            if (j.ok && Array.isArray(j.models)) setModels(j.models)
+            else { setModels('error'); setErr(`列模型失败：${j.error || '未知原因'}`) }
+          })
+          .catch(() => { setModels('error'); setErr('请求失败：宿主 web 服务未就绪') })
+      }, [])
+
+      const clearCreds = useCallback(() => {
+        setBusy('clear'); setErr(''); setNote('')
+        fetch(`${API_BASE}/zaiduyu`, {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ clear: true }),
+        })
+          .then((r) => r.json())
+          .then((j) => {
+            if (j.ok) {
+              // env 里还有一组时删文件并不等于退登 —— 后端会带 warn，
+              // 必须用警示色原样显示，不能混进绿色的「成功」文案里。
+              if (j.warn) { setWarnNote(`已清除本机文件，但：${j.warn}`) } else { setWarnNote(''); setNote('本机保存的站点账号已清除') }
+              setBalance(null); setModels(null); load()
+            } else setErr(`清除失败：${j.error || '未知原因'}`)
+          })
+          .catch(() => setErr('请求失败：宿主 web 服务未就绪'))
+          .finally(() => setBusy(''))
+      }, [load])
+
+      if (info === null) {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, '章鱼生图（积分站 · 多模型）'),
+          h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
+      }
+      if (info === 'error') {
+        return h('div', { style: S.card },
+          h('h2', { style: S.cardTitle }, '章鱼生图（积分站 · 多模型）'),
+          h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+            '宿主 web 服务未就绪，暂时读不到站点账号状态。'))
+      }
+
+      const verifiedText = info.lastVerifiedAt
+        ? `上次验证成功：${String(info.lastVerifiedAt).slice(0, 16).replace('T', ' ')}（账号 ${info.lastIdentifier || '?'}）`
+        : '还没有验证成功过'
+
+      return h('div', { style: S.card },
+        h('div', { style: S.rowBetween },
+          h('h2', { style: S.cardTitle }, '章鱼生图（积分站 · 多模型）'),
+          info.hasCredentials
+            ? h('span', { style: S.pill }, info.source === 'env' ? '凭据来自环境变量' : '已保存 ✓')
+            : h('span', { style: S.offPill }, '未配置账号')),
+        h('p', { style: { ...S.sub, marginTop: 0 } },
+          '第三方积分站：gpt-image-2 / Z-image / Banana 等多模型，价格从站点实时读取。',
+          h('br'),
+          '花的是',
+          h('strong', null, '你自己购买的积分'),
+          '，所以它在通道列表里默认排最后、不会被自动切到 —— 想用就在「生成通道」里排序，或直接在对话里说「用章鱼生图画…」。',
+          h('br'),
+          '本卡只存站点账号；',
+          h('strong', null, '密码不会回显'),
+          '，只写进本机 ',
+          h('span', { style: S.codeInline }, 'zaiduyu.json'),
+          '（在 $DSH_HOME 下，不进 Maker 工作区、不进包）。'),
+
+        // 三态：脚本 / 凭据 / 上次验证。哪一格没就绪就照着修，不用猜。
+        h('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap', margin: '8px 0 4px' } },
+          h(StatusChip, { on: info.script === true, label: '脚本', title: info.script ? 'generate.py 已随插件分发' : '缺少 skills/zaiduyu-imagegen/scripts/generate.py' }),
+          h(StatusChip, { on: info.hasCredentials, label: '站点账号', title: info.hasCredentials ? `来源：${info.source}` : '还没配置，或只填了一半' })),
+        h('p', { style: S.hint }, verifiedText),
+        info.source === 'env'
+          ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+            '⚠ 当前生效的凭据来自环境变量 ZAIDUYU_USER / ZAIDUYU_PASS，本机文件里没有保存。在这里保存后文件优先生效。')
+          : null,
+        info.envShadowed
+          ? h('p', { style: S.hint }, '另注：环境变量里也有一组凭据；文件值优先，env 只是兜底。')
+          : null,
+        // 余额只在有凭据后显示，且如实区分永久/限时 —— 限时积分当天就清零，
+        // 按总余额做跨天规划会把用户坑了。
+        balance
+          ? h('p', { style: { ...S.sub, margin: '6px 0 0' } },
+            `积分：总 ${balance.balance ?? '?'}｜永久 ${balance.permanent ?? '?'}｜限时 ${balance.limited ?? '?'}`,
+            balance.nextExpiry && balance.nextExpiry !== '暂无信息' ? h('span', { style: S.hint }, `（最近到期 ${balance.nextExpiry}，限时部分不用就归零）`) : null)
+          : null,
+
+        h(LabeledInput, {
+          label: '站点账号（手机号 / 邮箱）', value: form.identifier, onChange: (v) => set('identifier', v),
+          placeholder: '你注册 pai.zaiduyu.top 用的账号',
+          hint: '账号密码都填好后点「登录并保存」：插件会先连站点做一次只读验证（不扣积分），通过才保存。',
+        }),
+        // 注册入口做成可点链接：一长串带 # 的 URL 写成纯文本，用户既点不动
+        // 也不好复制（# 之后的 fragment 手抄极易漏）。
+        info.hasCredentials ? null : h('p', { style: S.hint },
+          '还没有账号？注册：',
+          h('a', {
+            href: 'https://pai.zaiduyu.top/#/auth?ref=3E848A69E0F3',
+            target: '_blank', rel: 'noopener noreferrer',
+            style: { color: 'var(--dsh-accent, #4a9eff)' },
+          }, 'pai.zaiduyu.top（用此邀请链接额外 +50 张额度）')),
+        h(LabeledInput, {
+          label: '密码（留空 = 不修改已保存的密码）', value: form.password, onChange: (v) => set('password', v), secret: true,
+          placeholder: info.hasCredentials ? '已保存（留空保持不变）' : '填写站点密码',
+          hint: '只在提交那一次进入内存；已保存的密码不回显，换密码直接粘新的。',
+        }),
+        h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
+          '⚠️ 不要把密码贴进 AI 对话或让模型代跑命令 —— 那会落进对话记录与本机日志。这个输入框只走本地服务。'),
+
+        h('div', { style: S.bar },
+          h('button', {
+            // ⚠️ 已保存过凭据时密码框是空的（永不回显），此时「留空 = 用已存密码」
+            // 是合法提交：按钮不能再拿 form.password 非空当条件，否则用户想
+            // 「用已存的号重新验证一次」或只换个账号都点不动。
+            style: S.btn, disabled: busy !== '' || !(form.identifier || (info.identifier || '')) || (!form.password && !info.hasCredentials),
+            onClick: () => login(false),
+          }, busy === 'login' ? '登录验证中…' : (info.hasCredentials && !form.password ? '重新验证并保存' : '登录并保存')),
+          h('button', {
+            style: S.ghostBtn, disabled: busy !== '' || (!form.password && !info.hasCredentials),
+            onClick: () => login(true),
+            title: '站点连不上时仍可先保存凭据（不验证）',
+          }, '仍要保存（跳过验证）'),
+          h('button', { style: S.ghostBtn, disabled: busy !== '' || !info.hasCredentials, onClick: checkBalance },
+            busy === 'balance' ? '查询中…' : '查积分'),
+          h('button', { style: S.ghostBtn, disabled: busy !== '' || !info.hasCredentials || models === 'loading', onClick: loadModels },
+            models === 'loading' ? '读取中…' : '看模型价目'),
+          info.hasCredentials && info.source === 'file'
+            ? h('button', { style: S.ghostBtn, disabled: busy !== '', onClick: clearCreds },
+              busy === 'clear' ? '清除中…' : '清除账号')
+            : null,
+          note ? h('span', { style: S.ok }, note) : null),
+
+        err ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, err) : null,
+        // 「已清除但 env 还在兜底」这类警告不能混进绿色的成功文案里 ——
+        // 用户会只看到「已清除」四个字，以为真退登了。
+        warnNote ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, `⚠️ ${warnNote}`) : null,
+
+        Array.isArray(models)
+          ? h('div', { style: { marginTop: 10 } },
+            h('div', { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } },
+              `模型价目（共 ${models.length} 个，站点实时；未标价 ≠ 免费）`),
+            h('div', { style: S.scrollBox },
+              ...models.map((m) => h('div', {
+                key: m.model,
+                style: { display: 'flex', gap: 10, alignItems: 'baseline', fontSize: 12, padding: '3px 6px', borderBottom: '1px solid var(--dsh-border, rgba(128,128,128,0.15))' },
+              },
+                h('span', { style: { ...S.codeInline, flex: '0 0 auto' } }, m.model),
+                h('span', { style: { minWidth: 90 } }, m.credits || '未标价'),
+                h('span', { style: { opacity: 0.6, flex: 1 } }, m.route || '')))))
+          : null,
+        models === 'error' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, '价目读取失败，可点「看模型价目」重试。') : null,
+      )
+    }
+
+    /**
      * 通道优先级 + 各通道开关。
      *
      * 这是「走哪条 / 额度不够时换不换」的唯一权威界面：底层三条链路
@@ -2039,7 +2281,7 @@ window.__ModuleLoader__.load({
     function TaptapMakerSettings() {
       const [group, setGroup] = useState('render')
       const groups = [
-        { id: 'render', icon: '🎨', label: '生成通道', desc: '优先级 / 开关与各通道 Key', count: 5 },
+        { id: 'render', icon: '🎨', label: '生成通道', desc: '优先级 / 开关与各通道 Key', count: 6 },
         { id: 'audio', icon: '🔊', label: '音频素材', desc: '音效库与 BGM 账号', count: 2 },
         { id: 'govern', icon: '🛡️', label: '治理与工具', desc: '额度红线、skills', count: 2 },
         { id: 'about', icon: 'ℹ️', label: '关于', desc: '版本与更新检查', count: 1 },
@@ -2063,6 +2305,7 @@ window.__ModuleLoader__.load({
           h(LanePriorityCard),
           h(GptAccount),
           h(ImageConfig),
+          h(ZaiduyuAccount),
           h(VideoConfig),
         ),
 

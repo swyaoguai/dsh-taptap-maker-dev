@@ -1,0 +1,3 @@
+# Python bytecode is runtime cache, not distributable skill source.
+**/__pycache__/
+**/*.py[cod]

@@ -14,6 +14,8 @@
     "taptap-image": "./src/taptap-image.mjs",
     "taptap-audio": "./src/taptap-audio.mjs",
     "taptap-gpt": "./src/taptap-gpt.mjs",
+    "taptap-zaiduyu": "./src/taptap-zaiduyu.mjs",
+    "taptap-sfx": "./src/taptap-sfx.mjs",
     "taptap-skills-update": "./src/taptap-skills-update.mjs"
   },
   "files": [
