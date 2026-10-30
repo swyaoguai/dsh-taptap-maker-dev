@@ -35,7 +35,9 @@ import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { resolveDshHome, resolveZaiduyuCredentials } from './paths.js'
 import { resolveAssetDir } from './assets.mjs'
+import { readZaiduyuPreferences, resolveZaiduyuModel } from './zaiduyu-preferences.mjs'
 import { splitTokens, flagOf, looksLikeFlag } from './tokens.mjs'
+import { assertReferenceOutputIsSeparate, prepareReferenceImages, publicReferencePreparation } from './reference-image-preparation.mjs'
 
 const PKG_DIR = path.dirname(fileURLToPath(import.meta.url))
 
@@ -238,96 +240,151 @@ export function zaiduyuQuotaHit(text) {
   return /积分不足|余额不足|当前总积分不足|额度不足|积分已用完/.test(String(text ?? ''))
 }
 
+/** HTTP409 / worker failures must not invalidate already saved credentials. */
+export function classifyZaiduyuFailure(text) {
+  const message = String(text ?? '')
+  const httpStatus = Number(/HTTP\s*[:：]?\s*(\d{3})/i.exec(message)?.[1]) || null
+  const result = { code: 'upstream_error', kind: 'service', requiresLogin: false, httpStatus, phase: 'generation', submitted: true }
+  if (/缺少.*(?:账号|凭据)|ZAIDUYU_USER|ZAIDUYU_PASS/.test(message)) {
+    return { ...result, code: 'no_credentials', kind: 'input', requiresLogin: true, phase: 'preflight', submitted: false }
+  }
+  const ticketProblem = /服务器.*票据|compute.*ticket|X-Qx-Compute-Ticket/i.test(message)
+  if (ticketProblem) return { ...result, code: 'server_allocation_required', phase: 'allocation', submitted: !/未提交生成/.test(message) }
+  const imageContext = /图片(?:生成|编辑)|生成节点/.test(message)
+  const authentication = (httpStatus === 401 && !imageContext) || ((httpStatus === 401 || httpStatus === 403 || (httpStatus === null && /登录失败/.test(message)))
+    && /账号或密码|密码错误|登录.*(?:失效|过期)/i.test(message))
+    || ((httpStatus === 403 || (httpStatus === null && /登录失败/.test(message))) && !imageContext && /authentication_required|认证失败|未登录/i.test(message))
+  if (authentication) return { ...result, code: 'authentication_failed', kind: 'auth', requiresLogin: true, phase: 'authentication', submitted: false }
+  if (/服务器分配|服务器.*票据|获取服务器分配/.test(message)) {
+    return { ...result, code: 'server_allocation_required', phase: 'allocation', submitted: !/未提交生成/.test(message) }
+  }
+  if (/结果.*(?:未知|无法确认|未确认)|仍在服务端|可能仍在|不要盲目重跑|未自动重投/.test(message)) {
+    return { ...result, code: 'result_unknown', kind: 'network' }
+  }
+  if (/网络请求失败|网络连接中断|超时|timed? ?out|unreachable|getaddrinfo|Connection/i.test(message)) {
+    return { ...result, code: 'network_error', kind: 'network' }
+  }
+  if (/缺少账号配置|Traceback|ImportError|未找到可用的 Python|脚本缺失|找不到脚本/.test(message)) {
+    return { ...result, code: 'environment_error', kind: 'environment', phase: 'preflight', submitted: false }
+  }
+  if (/未找到模型|没有(?:这个|该|可用).*模型|模型.*(?:已停用|不存在|不唯一)|未指定生图模型/.test(message)) {
+    return { ...result, code: 'model_unavailable', kind: 'input', phase: 'preflight', submitted: false }
+  }
+  if (zaiduyuQuotaHit(message) && (httpStatus === null || [400, 402, 403, 429].includes(httpStatus))) {
+    return { ...result, code: 'quota_exhausted', kind: 'quota' }
+  }
+  return result
+}
+
 /**
  * 生成（文生图 / 参考图编辑）。形状对齐 generateImage 统一入口：
  * 失败时抛 Error（让 runWithFallback 记下原因、能往下换通道）。
  */
 export async function generate(dshHome, prompt, {
   model, ratio, size, resolution, quality, n, references = [], out, description, projectDir, timeoutMs,
+  referenceCacheDir, referenceMaxEdge, referenceMaxBytes, referenceMaxTotalBytes,
 } = {}) {
-  const status = zaiduyuLaneUsable({ dshHome })
-  // ⚠️ 参数校验必须在环境/凭据校验**之前**：用户写错 `--n 99` 时，
-  //    先报「请先登录」会让人去配凭据、配完才发现还是错 —— 白折腾一轮。
-  //    输入本身不合法就该当场说清楚，跟本机有没有 Python、有没有账号无关。
-  // 1) 值不能是 `true`：`--model` 漏写值时 parseArgs 给的是布尔 true，
-  //    而 String(true) === "true" 会被当成**模型名**提交给上游（实测）。
-  //    站点认不出这个模型时可能报错、也可能回落到默认模型 —— 后者等于
-  //    用户指定了便宜模型、实际按另一个计费，积分通道里这比直接失败糟得多。
-  const truthy = (v) => v === true || v === 'true'
-  for (const [name, value] of [['--model', model], ['--ratio', ratio], ['--size', size],
-    ['--resolution', resolution], ['--quality', quality], ['--description', description]]) {
-    if (truthy(value)) {
-      const e = new Error(`参数 ${name} 后面没有值（收到「true」）。值带空格请加引号，或写成 ${name}=值。`)
-      e.code = 'missing_value'
+  let referencePreparation
+  const notes = []
+  let dispatched = false
+  try {
+    // Bad values must fail before environment/credential probes, not silently
+    // select another model or clamp the number of paid generations.
+    const truthy = (v) => v === true || v === 'true'
+    for (const [name, value] of [['--model', model], ['--ratio', ratio], ['--size', size],
+      ['--resolution', resolution], ['--quality', quality], ['--description', description], ['--n', n], ['--out', out]]) {
+      if (truthy(value)) {
+        const e = new Error(`参数 ${name} 后面没有值（收到「true」）。值带空格请加引号，或写成 ${name}=值。`)
+        e.code = 'missing_value'
+        throw e
+      }
+    }
+    if (n !== undefined) {
+      const v = (typeof n === 'number' || (typeof n === 'string' && n.trim() !== '')) ? Number(n) : NaN
+      if (!Number.isInteger(v) || v < 1 || v > 12) {
+        const e = new Error(`张数需要 1~12 的整数，收到「${n}」，未提交（不会扣积分）。`)
+        e.code = 'invalid_count'
+        throw e
+      }
+    }
+    const resolveTarget = () => {
+      const dir = resolveAssetDir(dshHome, 'image', { projectDir })
+      const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+      return out || path.join(dir.dir, `zaiduyu-${stamp}.png`)
+    }
+    const referencePaths = Array.isArray(references) ? references : [references]
+    let target
+    let uploadPaths = []
+    if (referencePaths.length > 0) {
+      target = resolveTarget()
+      // Protect originals before replacing argv refs with immutable snapshots.
+      assertReferenceOutputIsSeparate(target, referencePaths)
+      const prepared = await prepareReferenceImages(referencePaths, {
+        lane: 'zaiduyu', dshHome,
+        cacheDir: referenceCacheDir,
+        maxEdge: referenceMaxEdge,
+        maxBytes: referenceMaxBytes,
+        maxTotalBytes: referenceMaxTotalBytes,
+      })
+      referencePreparation = publicReferencePreparation(prepared)
+      notes.push(...prepared.notes)
+      uploadPaths = prepared.items.map((item) => item.uploadPath)
+      assertReferenceOutputIsSeparate(target, uploadPaths)
+    }
+
+    model = resolveZaiduyuModel(dshHome, model)
+    const status = zaiduyuLaneUsable({ dshHome })
+    if (!status.script) throw new Error(`章鱼生图脚本缺失：${zaiduyuScriptPath()}`)
+    if (status.python === null) throw new Error('未找到可用的 Python 3，章鱼生图通道不可用（脚本只用标准库，装 python 3.10+ 即可）')
+    if (!status.credentials) {
+      const e = new Error('章鱼生图缺少站点账号：请在设置页「章鱼生图（积分站）」卡里填写账号密码，点「登录并保存」验证通过后即可使用。')
+      e.code = 'no_credentials'
+      e.requiresLogin = true
+      e.phase = 'preflight'
+      e.submitted = false
       throw e
     }
-  }
-  // 2) --n 必须显式落在 1~12：静默钳制会让 `--n 99` 出 12 张（= 12 倍花费）
-  //    而用户以为只出 1 张。写错了就拒绝提交，不要替他改参数。
-  if (n !== undefined && n !== null && n !== '' && n !== true) {
-    const v = Number(n)
-    if (!Number.isInteger(v) || v < 1 || v > 12) {
-      const e = new Error(`张数需要 1~12 的整数，收到「${n}」，未提交（不会扣积分）。`)
-      e.code = 'invalid_count'
+    target ??= resolveTarget()
+
+    const argv = []
+    if (typeof prompt === 'string' && prompt.length > 0) argv.push('--prompt', prompt)
+    if (model) argv.push('--model', String(model))
+    // Keep the existing ratio > size > resolution selection semantics.
+    if (ratio) argv.push('--ratio', String(ratio))
+    else if (size) argv.push('--size', String(size))
+    else if (resolution) argv.push('--resolution', String(resolution))
+    if (quality) argv.push('--quality', String(quality))
+    if (n && Number(n) > 1) argv.push('--n', String(n))
+    if (description) argv.push('--description', String(description).slice(0, 10))
+    // Python still validates MIME/dimensions/limits (and deduplicates content) as
+    // defense in depth. Only the prepared canonical upload paths reach it.
+    for (const ref of uploadPaths) argv.push('--image', ref)
+    argv.push('--out', target)
+
+    dispatched = true
+    const r = await runZaiduyu(argv, { timeoutMs, dshHome })
+    const preflight = parsePreflight(r.stderr)
+    const savedLines = r.stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && fs.existsSync(l))
+    if (r.code !== 0 || savedLines.length === 0) {
+      const reason = (r.stderr || '').trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' / ')
+        || (r.code === 0 ? '生成未返回图片，结果无法确认；不要自动重投' : `exit ${r.code}`)
+      const e = new Error(reason)
+      Object.assign(e, classifyZaiduyuFailure(reason))
+      e.preflight = preflight
+      e.quota = e.code === 'quota_exhausted'
       throw e
     }
-  }
-
-  if (!status.script) throw new Error(`章鱼生图脚本缺失：${zaiduyuScriptPath()}`)
-  if (status.python === null) throw new Error('未找到可用的 Python 3，章鱼生图通道不可用（脚本只用标准库，装 python 3.10+ 即可）')
-  if (!status.credentials) {
-    const e = new Error('章鱼生图缺少站点账号：请在设置页「章鱼生图（积分站）」卡里填写账号密码，点「登录并保存」验证通过后即可使用。')
-    e.code = 'no_credentials'
-    throw e
-  }
-
-  // 落点对齐其它生图通道：<项目>/sucai/images/，避免污染工程与 C 盘。
-  const dir = resolveAssetDir(dshHome, 'image', { projectDir })
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const target = out || path.join(dir.dir, `zaiduyu-${stamp}.png`)
-
-  const argv = []
-  if (typeof prompt === 'string' && prompt.length > 0) argv.push('--prompt', prompt)
-  if (model) argv.push('--model', String(model))
-  // --ratio / --size / --resolution 三选一，尊重调用方的显式冲突检查：
-  // 优先 ratio，其次 size，最后 resolution。
-  if (ratio) argv.push('--ratio', String(ratio))
-  else if (size) argv.push('--size', String(size))
-  else if (resolution) argv.push('--resolution', String(resolution))
-  if (quality) argv.push('--quality', String(quality))
-  if (n && Number(n) > 1) argv.push('--n', String(n))
-  if (description) argv.push('--description', String(description).slice(0, 10))
-  // 上游 --image 是 `action=append, nargs='+'`：重复传或空格分隔都收。
-  // ⚠️ 先校验存在性：调用方可能是 CLI 之外的 agent，传进来的路径完全可能写错。
-  // 带着不存在的图提交，会白等一轮网络往返再收到上游含糊的报错。
-  // 路径要先按上游的规则展开 `~`（Python 用 Path.expanduser()）——
-  // 直接 fs.existsSync('~/Desktop/a.png') 永远为 false，会把**合法输入误杀**。
-  const missing = references.filter((r) => !fs.existsSync(expandUser(String(r))))
-  if (missing.length > 0) {
-    const e = new Error(`参考图不存在：${missing.join('、')}`)
-    e.code = 'missing_reference'
-    throw e
-  }
-  for (const ref of references) argv.push('--image', String(ref))
-  argv.push('--out', target)
-
-  const r = await runZaiduyu(argv, { timeoutMs, dshHome })
-  const preflight = parsePreflight(r.stderr)
-  const savedLines = r.stdout.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0 && fs.existsSync(l))
-
-  if (r.code !== 0 || savedLines.length === 0) {
-    const reason = (r.stderr || '').trim().split(/\r?\n/).filter(Boolean).slice(-3).join(' / ') || `exit ${r.code}`
-    const e = new Error(reason)
-    e.preflight = preflight
-    if (zaiduyuQuotaHit(r.stderr)) e.quota = true
-    throw e
-  }
-  return {
-    ok: true,
-    saved: savedLines[0],
-    outputs: savedLines,
-    via: 'zaiduyu',
-    preflight,
+    return {
+      ok: true, saved: savedLines[0], outputs: savedLines, via: 'zaiduyu', preflight,
+      ...(referencePreparation ? { referencePreparation, notes } : {}),
+    }
+  } catch (error) {
+    error.phase ??= dispatched ? 'generation' : 'preflight'
+    error.submitted ??= dispatched
+    error.requiresLogin ??= false
+    if (referencePreparation) error.referencePreparation = referencePreparation
+    if (referencePreparation || error.notes) error.notes = [...notes, ...(error.notes ?? [])]
+    throw error
   }
 }
 
@@ -360,8 +417,8 @@ export async function balance(dshHome) {
   return { ok: r.code === 0, text: (r.stdout || r.stderr || '').trim() }
 }
 export async function plan(prompt, opts = {}) {
-  const argv = ['--plan']
-  if (opts.model) argv.push('--model', String(opts.model))
+  const model = resolveZaiduyuModel(opts.dshHome, opts.model)
+  const argv = ['--plan', '--model', model]
   if (typeof prompt === 'string' && prompt.length > 0) argv.push('--prompt', prompt)
   const r = await runZaiduyu(argv, { timeoutMs: 60000, dshHome: opts.dshHome })
   return { ok: r.code === 0, text: (r.stdout + r.stderr).trim(), preflight: parsePreflight(r.stderr) }
@@ -403,11 +460,8 @@ export async function loginProbe(identifier, password) {
     const line = (r.stderr || r.stdout || '').trim().split(/\r?\n/).filter(Boolean).pop() ?? `退出码 ${r.code}`
     // 上游缺凭据时会 SystemExit 打印配置指引（退出码 1）。显式接管凭据后
     // 不该再走到那支，真走到了说明注入没生效 —— 归为环境问题而不是骗用户改密码。
-    const low = line
-    let kind = 'auth'
-    if (/网络请求失败|网络连接中断|超时|timed? ?out|unreachable|getaddrinfo|Connection/i.test(low)) kind = 'network'
-    else if (/缺少账号配置|ZAIDUYU_USER|Traceback|ImportError|未找到可用的 Python/i.test(low)) kind = 'environment'
-    return { ok: false, kind, error: low.slice(0, 300), raw: text.slice(0, 600) }
+    const failure = classifyZaiduyuFailure(line)
+    return { ok: false, ...failure, error: line.slice(0, 300) }
   }
   const balance = (/(?:总积分|当前总积分)：\s*([\d.]+)/.exec(text) ?? [])[1]
   const permanent = (/永久积分：\s*([\d.]+)/.exec(text) ?? [])[1]
@@ -507,7 +561,7 @@ export function extractGenArgs(text) {
       const next = list[i + 1]
       if (next !== undefined && !looksLikeFlag(next)) { value = String(next); i += 1 }
     }
-    if (value === null) {
+    if (value === null || (['model', 'n'].includes(field) && String(value).trim() === '')) {
       // 写了 flag 却没给值（漏参数 / 漏引号）：**必须报告**，不能装没事。
       // 这条链路是积分制 —— 例如 `--model` 漏值会静默回落到站点默认模型，
       // 用户指定的便宜模型没生效、积分照扣（比报错更糟的失败模式）。
@@ -581,6 +635,7 @@ export async function main(argv = process.argv.slice(2)) {
       ok: true,
       lane: 'zaiduyu',
       skillDir: zaiduyuSkillDir(),
+      defaultModel: readZaiduyuPreferences(home).defaultModel,
       ...u,
       hint: u.usable ? '' : [
         u.script ? null : '脚本缺失：确认 skills/zaiduyu-imagegen/scripts/generate.py 在插件目录里',
@@ -619,12 +674,18 @@ export async function main(argv = process.argv.slice(2)) {
     try {
       const r = await generate(home, args.prompt, {
         model: args.model, ratio: args.ratio, size: args.size, resolution: args.resolution,
-        quality: args.quality, n: args.n ? Number(args.n) : undefined,
+        quality: args.quality, n: args.n,
         references: refs, out: args.out, description: args.description,
       })
       process.stdout.write(`${JSON.stringify(r, null, 2)}\n`)
     } catch (err) {
-      process.stdout.write(`${JSON.stringify({ ok: false, error: String(err?.message ?? err), ...(err?.preflight ? { preflight: err.preflight } : {}) }, null, 2)}\n`)
+      process.stdout.write(`${JSON.stringify({
+        ok: false, error: String(err?.message ?? err), code: err?.code, kind: err?.kind,
+        phase: err?.phase, submitted: err?.submitted, requiresLogin: err?.requiresLogin === true,
+        ...(err?.preflight ? { preflight: err.preflight } : {}),
+        ...(err?.referencePreparation ? { referencePreparation: err.referencePreparation } : {}),
+        ...(err?.notes ? { notes: err.notes } : {}),
+      }, null, 2)}\n`)
       process.exitCode = 1
     }
     return

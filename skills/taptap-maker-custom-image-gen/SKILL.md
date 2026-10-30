@@ -117,6 +117,16 @@ node "<plugin>/src/taptap-image.mjs" edit --in "角色.png,服装.png" --prompt 
 node "<plugin>/src/taptap-gpt.mjs" gen --prompt "把这个角色改成水彩风格" --ref 角色.png --out 输出.png
 ```
 
+### 上传前的本地参考图保护
+
+插件入口会先完整解码参考图，按通道做尺寸/体积预处理，再把不可变快照送进浏览器/API；不是再次生图，不消耗生成额度。网页默认 2048px、单张 1 MiB / 整组 8 MiB；中转站默认 2048px、4 / 16 MiB 且保持 PNG 兼容；章鱼插件入口默认 3072px、2 / 16 MiB。它们是本地优化目标，不是 HTTP 服务器限额。
+
+- 小图不重新编码；扩展名按真实 MIME 规范化。保留比例、透明度，规范 EXIF 朝向；不覆盖原图，拒绝与原图同文件的输出路径。
+- 缓存位于 `$DSH_HOME/taptap-maker-dev/reference-images/ref-upload-v2/`，不放游戏 `assets/`、不需要 `.meta`；按内容+策略复用，完整发布，不自动删除。
+- 本机需可用 Python Pillow 或 ImageMagick；未就绪、坏图、动画、超时、压缩后仍超预算时返回 `phase: preflight, submitted: false`。**不要因此重登、重新提交、切换付费通道或直接上传未经处理原图**；如实告知本地原因。
+- 成功/后续错误的 `referencePreparation` 和 `notes` 用于说明处理前后体积、格式、尺寸及缓存情况；不要把输出 `--downscale` 当成上传前压缩。
+- 当前设置中的通道顺序/开关和本次明确模型优先；本节不授权调整它们。整段对话 JSON 过大造成的 `413`、上游 `model_not_found` 不在此修复范围。
+
 **多图参考不是所有模型都支持**（这是最容易踩的坑）：
 
 | 情况 | 行为 |

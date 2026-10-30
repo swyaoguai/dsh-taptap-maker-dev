@@ -102,10 +102,12 @@ Windows 用户级环境变量为明文存储；配置后重启 WorkBuddy / Codex
 class ApiError(RuntimeError):
     """网站接口返回错误时使用的可读异常。"""
 
-    def __init__(self, message: str, status: int = 0, *, uncertain: bool = False) -> None:
+    def __init__(self, message: str, status: int = 0, *, uncertain: bool = False, phase: str | None = None, submitted: bool | None = None) -> None:
         super().__init__(message)
         self.status = status
         self.uncertain = uncertain
+        self.phase = phase
+        self.submitted = submitted
 
 
 class PartialGenerationError(ApiError):
@@ -480,6 +482,79 @@ def _image_headers(
     return headers
 
 
+def _image_request(
+    cookie: str,
+    url: str,
+    body: bytes,
+    model_id: str,
+    config: dict[str, Any],
+    content_type: str,
+    timeout: float,
+    retries: int,
+    context: str,
+) -> tuple[int, bytes, email.message.Message]:
+    """Match the site's compute-route handshake; never resend a paid POST.
+
+    Public app/page frontend (checked 2026-10-30) allocates /api/compute-route
+    before provider POSTs. A 409 here is NOT proof that credentials expired.
+    No Cookie/API credential may cross from the site to its allocated worker.
+    """
+    if not _same_origin(url):
+        raise ApiError("图片接口不是站点同源地址，已停止", phase="allocation", submitted=False)
+    parts = urllib.parse.urlsplit(url)
+    path = parts.path + (f"?{parts.query}" if parts.query else "")
+    if len(path) > 2048 or any(c in path for c in ("%", "\\", " ", "\r", "\n", "#")):
+        raise ApiError("图片分配路径无效，未提交生成", phase="allocation", submitted=False)
+    request_id = f"image-{uuid.uuid4()}"
+    payload = {"requestId": request_id, "path": path, "model": model_id}
+    try:
+        status, allocation_body, _ = _request_with_retry(
+            "POST", f"{BASE}/api/compute-route", _json_body(payload),
+            _authorized_headers(cookie, "application/json"),
+            min(timeout, 15.0), 0, "服务器分配",
+        )
+    except ApiError as exc:
+        raise ApiError(
+            "服务器分配响应未确认，未提交生成；请检查网络，不要把它当成未登录。",
+            exc.status, phase="allocation", submitted=False,
+        ) from exc
+    if not 200 <= status < 300:
+        raise ApiError(
+            f"服务器分配失败（HTTP {status}），未提交生成：{_error_message(allocation_body, '站点服务器分配暂不可用')}",
+            status, phase="allocation", submitted=False,
+        )
+    try:
+        allocation = json.loads(allocation_body.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        # Do not echo raw dispatch JSON: it can contain a signed ticket.
+        raise ApiError("服务器分配返回无效 JSON，未提交生成", phase="allocation", submitted=False) from exc
+    if not isinstance(allocation, dict):
+        raise ApiError("服务器分配返回无效，未提交生成", phase="allocation", submitted=False)
+    request_headers = _image_headers(cookie, model_id, config, content_type, request_id)
+    target = url
+    if allocation.get("enabled") is not False:
+        ticket, origin = allocation.get("ticket"), allocation.get("origin")
+        if (not isinstance(ticket, str) or not ticket or ticket != ticket.strip()
+                or len(ticket) > 16384 or any(ord(c) < 32 or ord(c) >= 127 for c in ticket)):
+            raise ApiError("服务器分配票据无效，未提交生成", phase="allocation", submitted=False)
+        try:
+            if not isinstance(origin, str) or any(c in origin for c in ("?", "#")):
+                raise ApiError("服务器地址无效")
+            _validate_public_url(origin)
+            worker = urllib.parse.urlsplit(origin)
+            if worker.path not in {"", "/"} or worker.query or worker.fragment:
+                raise ApiError("服务器地址必须是不带路径的 HTTPS origin")
+            target = f"{worker.scheme}://{worker.netloc}{path}"
+        except (ApiError, ValueError) as exc:
+            raise ApiError("服务器分配地址无效，未提交生成", phase="allocation", submitted=False) from exc
+        request_headers = {key: value for key, value in request_headers.items() if key.lower() not in SENSITIVE_HEADERS}
+        request_headers["X-Qx-Compute-Ticket"] = ticket
+        request_headers["X-Qx-Request-Id"] = request_id
+    # Even X-Qx-Route-Retry is not permission to resubmit an ambiguous paid job.
+    # Preserve the ID, but issue exactly one generation/edit POST.
+    return _request_with_retry("POST", target, body, request_headers, timeout, retries, context)
+
+
 def openai_image_url(config: dict[str, Any], model_id: str, operation: str) -> str:
     entry = _route_entry(config, model_id, operation)
     # Current site custom routes use the image wrapper for both Chat and Images wire formats.
@@ -595,17 +670,7 @@ def resolve_model(catalog: list[dict[str, Any]], requested: str | None, config: 
             available = ", ".join(item["model"] for item in matches)
             raise SystemExit(f"模型名称不唯一：{requested}，匹配到：{available}")
     else:
-        preferred = str(config.get("defaultModel") or "").strip()
-        for candidate in (preferred, DEFAULT_MODEL):
-            if not candidate:
-                continue
-            matches = [item for item in catalog if item["model"].casefold() == candidate.casefold()]
-            if matches:
-                break
-        if not matches:
-            matches = [item for item in catalog if item.get("enabled") is not False]
-        if not matches:
-            raise SystemExit("站点当前没有启用的生图模型")
+        raise SystemExit("未指定生图模型：请用 --model 传入用户选择的模型；插件设置页保存的默认模型会由包装层自动传入，脚本不会替用户挑选站点默认或第一项模型。")
     chosen = matches[0]
     if chosen.get("enabled") is False:
         raise SystemExit(f"模型 {chosen['model']} 当前已停用，请用 --models 查看可用模型。")
@@ -1013,10 +1078,9 @@ def _direct_generate_batch(
 ) -> list[bytes]:
     model_id = str(payload["model"])
     url = openai_image_url(config, model_id, "generation")
-    status, body, _ = _request_with_retry(
-        "POST", url, _json_body(payload),
-        _image_headers(cookie, model_id, config, "application/json", f"image-{uuid.uuid4()}"),
-        timeout, retries, "图片生成"
+    status, body, _ = _image_request(
+        cookie, url, _json_body(payload), model_id, config,
+        "application/json", timeout, retries, "图片生成",
     )
     return extract_images(_checked_response(status, body, "图片生成"), cookie, timeout)
 
@@ -1294,10 +1358,9 @@ def _edit_request_once(
         field = "image" if len(references) == 1 else "image[]"
         body, headers_content_type = _multipart(fields, [(field, reference) for reference in references])
     url = openai_image_url(config, model_id, "edit")
-    status, response_body, _ = _request_with_retry(
-        "POST", url, body,
-        _image_headers(cookie, model_id, config, headers_content_type, f"image-{uuid.uuid4()}"),
-        timeout, retries, "图片编辑"
+    status, response_body, _ = _image_request(
+        cookie, url, body, model_id, config, headers_content_type,
+        timeout, retries, "图片编辑",
     )
     return extract_images(_checked_response(status, response_body, "图片编辑"), cookie, timeout)
 
@@ -1624,6 +1687,8 @@ def main() -> None:
             _dt.date.fromisoformat(args.makeup)
         except ValueError:
             raise SystemExit("--makeup 需要 YYYY-MM-DD 格式的日期。") from None
+    if not any((args.models, args.balance, args.history, args.checkin, args.makeup)) and not str(args.model or "").strip():
+        raise SystemExit("请指定 --model，或通过插件包装层使用已保存的默认模型；本次未登录、未提交生成。")
     cookie = login(args.timeout)
     if args.balance or args.history:
         credits = get_credits(cookie, args.timeout, args.retries)
@@ -1669,21 +1734,12 @@ def main() -> None:
             args.quality,
         )
         route_kind = image_route_kind(config, model_id, "generation")
-        # 站点已下线异步任务接口（/api/image-jobs 返回 409，提示改为直接请求上游），
-        # 因此图片链路默认直接走同步接口；--async 才尝试旧异步任务，失败自动回退同步。
+        # Explicit --async is a legacy request. A failed submission/poll may
+        # describe a running job, so never fall through to a second paid POST.
         if route_kind == "chat" or not args.use_async:
             images = direct_generate(cookie, payload, args.n, args.timeout, args.retries, config)
         else:
-            try:
-                images = async_generate(cookie, payload, args.n, args.timeout, args.retries, config)
-            except ApiError as exc:
-                if exc.status not in ASYNC_FALLBACK_STATUSES:
-                    raise
-                print(
-                    f"异步任务接口不可用（HTTP {exc.status}），自动回退同步生图接口。",
-                    file=sys.stderr,
-                )
-                images = direct_generate(cookie, payload, args.n, args.timeout, args.retries, config)
+            images = async_generate(cookie, payload, args.n, args.timeout, args.retries, config)
     for path in save_images(images, args.out, args.description or args.prompt):
         print(path)
 

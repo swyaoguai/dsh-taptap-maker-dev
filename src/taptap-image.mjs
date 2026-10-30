@@ -37,6 +37,12 @@ import { spawnSync } from 'node:child_process'
 import { pathToFileURL } from 'node:url'
 import { resolveImageConfig, maskSecret, imageConfigPath, resolveDshHome } from './paths.js'
 import { flagOf, looksLikeFlag, consumeFlags, splitTokens, flagValue, flagList } from './tokens.mjs'
+import {
+  assertReferenceOutputIsSeparate,
+  expandReferencePath,
+  prepareReferenceImages,
+  publicReferencePreparation,
+} from './reference-image-preparation.mjs'
 
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024'])
 
@@ -141,7 +147,7 @@ function collectInputs(args) {
   const seen = new Set()
   const out = []
   for (const p of raw) {
-    const abs = path.resolve(p)
+    const abs = expandReferencePath(p)
     if (seen.has(abs)) continue
     seen.add(abs)
     out.push(abs)
@@ -237,6 +243,34 @@ export async function generateImage(options) {
   let size = String(options.size || cfg.size || '1024x1024').trim()
   let background = options.transparent === true || options.transparent === 'true' ? 'transparent' : undefined
   const n = Number(options.n || cfg.n || 1)
+  // This endpoint is still text-to-image. Declared inputs do not change that
+  // route, but none of its actual output/backup paths may overwrite them.
+  const referencePaths = collectInputs(options)
+  const assertTargetSeparate = (target) => {
+    if (referencePaths.length === 0) return
+    assertReferenceOutputIsSeparate(target, referencePaths)
+    if (options.downscale) {
+      const ext = path.extname(target)
+      assertReferenceOutputIsSeparate(target.replace(/(\.[a-z0-9]+)?$/i, `.full${ext || '.png'}`), referencePaths)
+    }
+  }
+  try {
+    if (referencePaths.length > 0) {
+      const count = Number.isSafeInteger(n) && n > 1 ? n : 1
+      // Bound local alias checks rather than hanging on a huge requested n.
+      // Reject explicitly; never silently clamp the number of paid images.
+      if (count > 4096) {
+        throw Object.assign(new Error('参考图输出保护无法预检超过 4096 个输出路径；请减少本次 --n，未提交生成。'),
+          { code: 'reference_output_count_unbounded', kind: 'input' })
+      }
+      for (let index = 0; index < count; index += 1) {
+        assertTargetSeparate(n === 1 ? options.out : options.out.replace(/(\.[a-z0-9]+)?$/i, `_${index + 1}$1`))
+      }
+    }
+  } catch (error) {
+    Object.assign(error, { phase: 'preflight', submitted: false, requiresLogin: false })
+    throw error
+  }
   const url = `${cfg.baseURL.replace(/\/$/, '')}/images/generations`
   const maxAttempts = 7
   let snapped = false
@@ -280,6 +314,16 @@ export async function generateImage(options) {
       if (items.length === 0) throw new Error('endpoint returned no image data')
       const outputs = []
       const notes = []
+      // Also validate the response's real output count before writing anything;
+      // an upstream can return more images than the requested n.
+      for (let index = 0; index < items.length; index += 1) {
+        try {
+          assertTargetSeparate(n === 1 ? options.out : options.out.replace(/(\.[a-z0-9]+)?$/i, `_${index + 1}$1`))
+        } catch (error) {
+          Object.assign(error, { phase: 'postprocess', submitted: true, requiresLogin: false })
+          throw error
+        }
+      }
       for (let index = 0; index < items.length; index += 1) {
         const item = items[index]
         const target = n === 1
@@ -355,9 +399,12 @@ export async function generateImage(options) {
  * @returns {Promise<{outputs: string[], size: string, model: string, notes: string[]}>}
  */
 export async function editImage(options) {
+  const inputError = (message, code) => Object.assign(new Error(message), {
+    code, kind: 'input', phase: 'preflight', submitted: false, requiresLogin: false,
+  })
   const cfg = resolveImageConfig(options)
   if (cfg.baseURL.length === 0 || cfg.apiKey.length === 0 || cfg.model.length === 0) {
-    throw new Error(
+    throw inputError(
       `custom image endpoint not configured. Set baseURL / apiKey / model in ${imageConfigPath(options.dshHome)} `
       + '(or TAPTAP_IMAGE_BASE_URL / TAPTAP_IMAGE_API_KEY / TAPTAP_IMAGE_MODEL env). Run with --config to inspect.',
     )
@@ -365,16 +412,20 @@ export async function editImage(options) {
   // 多图参考：--in 可重复 / 逗号分隔，或 --refs。
   const inputPaths = collectInputs(options)
   if (inputPaths.length === 0) {
-    throw new Error(
+    throw inputError(
       '没有输入图：用 --in <原图>（可重复：--in a.png --in b.png，或逗号分隔）\n'
       + '（editImage 需要至少一张参考图）',
     )
   }
   for (const p of inputPaths) {
-    if (!fs.existsSync(p)) throw new Error(`--in 文件不存在：${p}`)
+    if (!fs.existsSync(p)) throw inputError(`--in 文件不存在：${p}`, 'missing_reference')
   }
   const out = String(options.out ?? '')
-  if (out.length === 0) throw new Error('editImage 需要 --out <输出文件>')
+  if (out.length === 0) throw inputError('editImage 需要 --out <输出文件>')
+  // Protect every original, including refs deliberately skipped by --single-ref.
+  // edit writes only out (it does not downscale or create numbered outputs).
+  try { assertReferenceOutputIsSeparate(out, inputPaths) }
+  catch (error) { error.requiresLogin = false; throw error }
   const size = String(options.size || '').trim()
   const url = `${cfg.baseURL.replace(/\/$/, '')}/images/edits`
   const notes = []
@@ -390,7 +441,7 @@ export async function editImage(options) {
       usePaths = inputPaths.slice(0, 1)
       notes.push(`模型声明为单图（--single-ref）：只传第 1 张，忽略其余 ${inputPaths.length - 1} 张`)
     } else if (options['multi-ref'] !== true && looksSingleImageModel(cfg.model)) {
-      throw new Error(
+      throw inputError(
         `模型「${cfg.model}」看起来只支持单图参考，但你传了 ${inputPaths.length} 张。\n\n`
         + '可选做法：\n'
         + '  · 只传一张：--in <最重要的那张>\n'
@@ -401,13 +452,35 @@ export async function editImage(options) {
     }
   }
 
+  // Prepare the actual selected refs before submitting. Let the helper resolve
+  // explicit > env > lane defaults; relayImage favours PNG compatibility.
+  let prepared
+  try {
+    prepared = await prepareReferenceImages(usePaths, {
+      lane: 'relayImage',
+      dshHome: options.dshHome,
+      cacheDir: options.referenceCacheDir,
+      maxEdge: options.referenceMaxEdge,
+      maxBytes: options.referenceMaxBytes,
+      maxTotalBytes: options.referenceMaxTotalBytes,
+    })
+  } catch (error) {
+    Object.assign(error, { phase: 'preflight', submitted: false, requiresLogin: false })
+    error.notes = [...notes, ...(error.notes ?? [])]
+    throw error
+  }
+  const uploadItems = prepared.items
+  const referencePreparation = publicReferencePreparation(prepared)
+  notes.push(...prepared.notes)
+  let submitted = false
+
   const attempt = async (useJsonB64) => {
     let response
     try {
       if (useJsonB64) {
         // JSON 形态：单图用 image，多图用 image 数组（各家的习惯字段名不一，
         // 这里同时提供 image / images 两个键，让宽松的实现至少能认一个）。
-        const b64s = usePaths.map((p) => `data:image/png;base64,${fs.readFileSync(p).toString('base64')}`)
+        const b64s = uploadItems.map((item) => `data:${item.mime};base64,${fs.readFileSync(item.uploadPath).toString('base64')}`)
         const payload = {
           model: cfg.model,
           prompt: options.prompt,
@@ -415,6 +488,7 @@ export async function editImage(options) {
           image: b64s.length === 1 ? b64s[0] : b64s,
           ...(b64s.length > 1 ? { images: b64s } : {}),
         }
+        submitted = true
         response = await fetch(url, {
           method: 'POST',
           headers: { Authorization: `Bearer ${cfg.apiKey}`, 'Content-Type': 'application/json' },
@@ -429,10 +503,15 @@ export async function editImage(options) {
         if (size) form.append('size', size)
         // OpenAI 标准多图形态：重复的 `image[]` 字段。
         // 单图时仍用 `image`（老实现/老模型只认这个，改成 image[] 会破坏兼容）。
-        const field = usePaths.length === 1 ? 'image' : 'image[]'
-        for (const p of usePaths) {
-          form.append(field, new Blob([fs.readFileSync(p)], { type: 'image/png' }), path.basename(p))
+        const field = uploadItems.length === 1 ? 'image' : 'image[]'
+        for (const item of uploadItems) {
+          form.append(
+            field,
+            new Blob([fs.readFileSync(item.uploadPath)], { type: item.mime }),
+            path.basename(item.uploadPath),
+          )
         }
+        submitted = true
         response = await fetch(url, {
           method: 'POST',
           headers: { Authorization: `Bearer ${cfg.apiKey}` },
@@ -441,6 +520,9 @@ export async function editImage(options) {
         })
       }
     } catch (error) {
+      // A cached-file read can fail before fetch. Do not call that an unknown
+      // remote submission or hint that the caller needs to log in again.
+      if (!submitted) throw error
       const detail = error?.message ?? String(error)
       throw new Error(
         `连接 ${url} 失败：${detail}\n`
@@ -480,26 +562,37 @@ export async function editImage(options) {
       outputs,
       size: size || '(endpoint default)',
       model: cfg.model,
-      inputCount: usePaths.length,
+      inputCount: uploadItems.length,
+      referencePreparation,
       notes,
     }
   }
 
-  // 1) multipart（OpenAI 标准形态）
-  const first = await attempt(false)
-  if (first.ok) return first
-  // 2) 只有 400 且正文**明确指向请求体格式**时才换 JSON+b64 再试一次。
-  //    条件不能宽：业务错误（prompt 违规、参数非法）正文里常含 "image"，
-  //    按它回退等于多发一次注定失败的请求（烧用户的钱）。
-  const bodyFormatRejected = first.status === 400
-    && /multipart|form-data|content-type|use json|json body|base64|unexpected content/i.test(first.text)
-  if (bodyFormatRejected) {
-    notes.push('multipart 被拒（400 格式问题），已改用 JSON+base64 重试')
-    const second = await attempt(true)
-    if (second.ok) return second
-    throw new Error(`image edit endpoint HTTP ${second.status}: ${String(second.text).slice(0, 300)}`)
+  try {
+    // Also protect the immutable upload cache if an explicit output names it.
+    assertReferenceOutputIsSeparate(out, uploadItems.map((item) => item.uploadPath))
+    // 1) multipart（OpenAI 标准形态）
+    const first = await attempt(false)
+    if (first.ok) return first
+    // 2) 只有 400 且正文**明确指向请求体格式**时才换 JSON+b64 再试一次。
+    //    业务错误（prompt 违规、参数非法）不能触发格式回退。
+    const bodyFormatRejected = first.status === 400
+      && /multipart|form-data|content-type|use json|json body|base64|unexpected content/i.test(first.text)
+    if (bodyFormatRejected) {
+      notes.push('multipart 被拒（400 格式问题），已改用 JSON+base64 重试')
+      const second = await attempt(true)
+      if (second.ok) return second
+      throw new Error(`image edit endpoint HTTP ${second.status}: ${String(second.text).slice(0, 300)}`)
+    }
+    throw new Error(`image edit endpoint HTTP ${first.status}: ${String(first.text).slice(0, 300)}`)
+  } catch (error) {
+    error.referencePreparation = referencePreparation
+    error.notes = [...notes]
+    error.phase ??= submitted ? 'generation' : 'preflight'
+    error.submitted ??= submitted
+    error.requiresLogin ??= false
+    throw error
   }
-  throw new Error(`image edit endpoint HTTP ${first.status}: ${String(first.text).slice(0, 300)}`)
 }
 
 async function main() {
@@ -547,6 +640,16 @@ async function main() {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((error) => {
     process.stderr.write(`${error?.message ?? String(error)}\n`)
+    // Keep the existing stderr/exit contract, while exposing reference audit to
+    // CLI consumers even when preparation or a later request/output step fails.
+    if (error?.referencePreparation || error?.phase === 'preflight') {
+      process.stdout.write(`${JSON.stringify({
+        ok: false, error: error?.message ?? String(error), code: error?.code, kind: error?.kind,
+        phase: error?.phase, submitted: error?.submitted, requiresLogin: error?.requiresLogin === true,
+        ...(error?.referencePreparation ? { referencePreparation: error.referencePreparation } : {}),
+        ...(error?.notes ? { notes: error.notes } : {}),
+      }, null, 2)}\n`)
+    }
     process.exitCode = 1
   })
 }

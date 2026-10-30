@@ -6,6 +6,16 @@
 守住「不花冤枉钱」的额度红线，接入可更新的游戏开发 skills，并提供**自建的图片 / 音效 / BGM 素材通道**——
 全部走你自己的 Key 或 CC0 素材库，不消耗任何 Maker MCP 内置额度。
 
+## 章鱼默认模型与免费素材优先
+
+设置页 →「生成通道」→「章鱼生图（积分站）」：点「模型价目」，选定模型后点「保存默认模型」。**模型单独保存，不重新登录、不提交账号密码、不改通道顺序或开关。** 后续调用按「本次明确模型 > 已保存默认」执行，不每次重问；没有默认或模型失效时安全停止，绝不使用站点默认/第一项或替你改模型。原始 Python 脚本必须传 `--model`；插件包装层会自动传入你选过的默认。
+
+HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录**。插件先执行站点的服务器分配握手，再向分配节点提交一次请求，站点 Cookie/凭据不传给节点；分配失败不会提交生图。超时/结果未知、旧异步错误不自动重投；低余额提醒不会把未知结果误判为额度拒绝。实际费用与任务状态以站点为准。
+
+找素材先查六个优先来源，但**优先来源不是免费/版权白名单**：[GameUI](https://gameui.net/)、[Interface In Game](https://interfaceingame.com/)、[enotsixlm UI Kits](https://enotsixlm.github.io/game-ui-kits/)、[LemoUI](https://lemooui.com/)、[Pixlab24](https://pixlab24.com/)、[Kenney](https://kenney.nl/assets)。Kenney 的用户输入 `/games` 是游戏目录，免费资产应查 `/assets`；参考站截图不能直接切图，MIT 代码与字体另查许可。只用逐项已核实零成本、原作者授权、商用/修改/游戏分发和通知/依赖条件的素材；不明、付费、NC/ND、盗取或有已知争议的素材停用。
+
+详细规则与证据见[免费素材 skill](<skills/taptap-maker-free-assets/SKILL.md>)，只读目录见 `GET /api/taptap-maker-dev/asset-sources`。不会自动爬站、登录、下载、生成或改用户配置。如果运行实例仍是旧版，请重载插件或重启 DSH 后使用新界面；已保存的章鱼凭据独立保留，无需重填。
+
 ## 你会得到什么
 
 | 能力 | 说明 |
@@ -311,6 +321,38 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
   不依赖当前工作目录。
 - **老作业自动搬迁**：改造前建在 `$DSH_HOME/…/video-jobs/<id>/` 的作业，在首次
   访问时自动搬到项目下的 `sucai/video/`，已生成的视频和帧不会失联。
+
+## 参考图上传前处理（本地、零生成额度）
+
+通过插件的网页、中转站或章鱼图片入口传参考图时，先完整解码校验，再按需要缩放/转码；处理完成才进入浏览器/API 提交。不是再次生图，不调用 Maker 内置生成工具。
+
+| 通道 | 默认最长边 | 单张 / 整组上传字节目标 | 需要转码时 |
+|---|---:|---:|---|
+| ChatGPT 网页 | 2048 px | 1 / 8 MiB | WebP |
+| 中转站图片编辑 | 2048 px | 4 / 16 MiB | PNG，兼容只接受 PNG 的编辑端点 |
+| 章鱼插件入口 | 3072 px | 2 / 16 MiB | WebP |
+
+- 这些是**本地优化目标，不是服务商承诺的 HTTP 限额**。多图会共同分配总量预算；默认最多 16 张。不符合预算则停止，不偷偷少传参考图。
+- 保留比例、不放大，处理 EXIF 朝向并验证实际透明度。默认单张最多 3200 万像素，防止小体积压缩图在解码/旋转时占用过多内存；这不是操作系统级内存上限。损坏文件、动画参考图及超出安全像素限制的图片会在提交前拒绝；动画请自行导出所需静态帧。
+- 已满足要求的静态图不重新编码；文件扩展名按真实格式规范化。上传使用已校验字节的独立快照，**不再重新读取可能已改变的原图**。
+- 缓存在 `$DSH_HOME/taptap-maker-dev/reference-images/ref-upload-v2/`，不进入游戏 `assets/`。按内容与处理策略寻址，完整写入后才发布；不覆盖/删除原图或旧缓存。损坏缓存会报错并保留现场。完成标记与临时文件保留，不自动清理；跨进程竞争失败的临时文件可能是独立副本，因此缓存会占用额外磁盘空间，清理需用户另行同意。
+- 本地需要 **Python 3 + Pillow（支持 WebP）或 ImageMagick** 来完整解码校验；不会自动安装。已有 `TAPTAP_PY` / `PYTHON` 可指定解释器，`TAPTAP_IMAGE_MAGICK` 可指定 ImageMagick。找不到可用处理器、处理超时或体积无法达标时，返回 `phase: preflight, submitted: false`，不会拿未处理原图继续上传、重登或换付费通道。
+- 可用 `TAPTAP_IMAGE_REF_MAX_EDGE`、`TAPTAP_IMAGE_REF_MAX_BYTES`、`TAPTAP_IMAGE_REF_MAX_TOTAL_BYTES` 调整本地目标（字节单位），`TAPTAP_IMAGE_REFERENCE_CACHE` 调整缓存目录。程序调用的显式参数优先于环境变量，环境变量优先于通道默认值；不会改动已选模型和通道顺序。
+- 结果中的 `referencePreparation` / `notes` 给出处理前后大小、尺寸、MIME、SHA-256、透明度、处理器版本和缓存命中情况，不公开本地完整路径。`--out` 及派生输出若与任一原参考图同路径、符号链接或硬链接指向同一文件，会被拒绝。
+
+**范围**：只处理插件图片入口的参考图，不压缩生成结果（输出缩小仍由 `--downscale` 负责），也不修改 DSH 主对话的完整 JSON 请求。不能据此保证消除所有 `413`，更不能修复上游 `503 model_not_found`。直接运行章鱼原始 Python 脚本仍只有其原有校验/体积上限，不经过这层预处理；其按内容去重参考图的既有规则不变。
+
+实现：[共享预处理](<src/reference-image-preparation.mjs>) · [Pillow 解码器](<src/reference-image-codec.py>)。
+
+离线验证（完整格式测试需本机已有 Node 与支持 WebP/AVIF 的 Pillow；可用当前终端的 `TAPTAP_PY` 指定 Python，不自动安装）：
+
+```powershell
+node --test scripts/verify-reference-image-preparation.mjs scripts/verify-reference-image-processors.mjs scripts/verify-reference-image-integration.mjs scripts/verify-reference-image-host.mjs
+python -B scripts/verify-reference-image-codec.py
+python -B scripts/verify-reference-image-diagnostics.py
+```
+
+这些测试真实解码/压缩本地构造的图片；浏览器、图片 API、站点账号与 ImageMagick 进程边界使用模拟，不发送付费请求。包含真实导入中转站函数后检查 multipart / JSON 上传字节的用例。测试临时目录也保留、不清理；不是对当前在线站点的实测。
 
 ## 配置
 

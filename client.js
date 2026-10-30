@@ -1569,18 +1569,19 @@ window.__ModuleLoader__.load({
       const [warnNote, setWarnNote] = useState('')
       const [balance, setBalance] = useState(null)
       const [models, setModels] = useState(null) // null | 'loading' | 'error' | [ {model,credits,route} ]
+      const [modelDraft, setModelDraft] = useState('')
+      const [modelSaving, setModelSaving] = useState(false)
+      const [modelNote, setModelNote] = useState('')
+      const [modelErr, setModelErr] = useState('')
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/zaiduyu`, { headers: { accept: 'application/json' } })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
           .then((j) => {
             setInfo(j)
-            // 账号回填（不是密钥，看得见才知道登的是哪个号）；密码**绝不回填**。
+            // 账号回填；密码绝不回填。默认模型独立于凭据，不触发登录或查余额。
             setForm((f) => ({ ...f, identifier: j.identifier || f.identifier }))
-            if (j.hasCredentials) {
-              fetch(`${API_BASE}/zaiduyu/balance`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
-                .then((r) => r.json()).then((b) => { if (b && b.ok) setBalance(b) }).catch(() => { /* 余额拉不到不影响主流程 */ })
-            }
+            setModelDraft(typeof j.defaultModel === 'string' ? j.defaultModel : '')
           })
           .catch(() => setInfo('error'))
       }, [])
@@ -1649,6 +1650,33 @@ window.__ModuleLoader__.load({
           .catch(() => { setModels('error'); setErr('请求失败：宿主 web 服务未就绪') })
       }, [])
 
+      /** 只保存默认模型：不发送账号密码，也不登录、查余额或触发生图。 */
+      const saveDefaultModel = useCallback(() => {
+        if (modelSaving || busy !== '') return
+        if (typeof modelDraft !== 'string' || modelDraft.length > 200 || /[\u0000-\u001f\u007f-\u009f]/.test(modelDraft)) {
+          setModelErr('默认模型保存失败：模型 ID 不合法。')
+          return
+        }
+        const chosen = modelDraft.trim() // 空值明确表示清空偏好，不是选站点默认。
+        setModelSaving(true); setModelErr(''); setModelNote('')
+        fetch(`${API_BASE}/zaiduyu/settings`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ defaultModel: chosen }),
+        })
+          .then((r) => r.json().then((j) => ({ ok: r.ok, j })).catch(() => ({ ok: false, j: { error: '响应解析失败' } })))
+          .then(({ ok, j }) => {
+            if (!ok || !j.ok || j.defaultModel !== chosen) {
+              setModelErr(`默认模型保存失败：${j.error || '服务器未确认所选模型，请重试保存。'}`)
+              return
+            }
+            setInfo((previous) => ({ ...previous, defaultModel: chosen }))
+            setModelDraft(chosen)
+            setModelNote(chosen ? `已保存默认模型：${chosen}` : '默认模型已清空；下次需明确选择模型，不会自动选择。')
+          })
+          .catch(() => setModelErr('默认模型保存失败：宿主 web 服务未就绪。'))
+          .finally(() => setModelSaving(false))
+      }, [modelDraft, modelSaving, busy])
+
       const clearCreds = useCallback(() => {
         setBusy('clear'); setErr(''); setNote('')
         fetch(`${API_BASE}/zaiduyu`, {
@@ -1682,6 +1710,13 @@ window.__ModuleLoader__.load({
       const verifiedText = info.lastVerifiedAt
         ? `上次验证成功：${String(info.lastVerifiedAt).slice(0, 16).replace('T', ' ')}（账号 ${info.lastIdentifier || '?'}）`
         : '还没有验证成功过'
+      const savedDefault = typeof info.defaultModel === 'string' ? info.defaultModel : ''
+      const modelChoices = Array.isArray(models)
+        ? Array.from(new Map(models.filter((m) => typeof m?.model === 'string' && m.model.trim() !== '' && m.model.length <= 200 && !/[\u0000-\u001f\u007f-\u009f]/.test(m.model)).map((m) => [m.model, m])).values())
+        : []
+      const unavailableModel = (m) => m?.enabled === false || /已停用|已禁用/.test(typeof m?.route === 'string' ? m.route : '')
+      const draftChoice = modelChoices.find((m) => m.model === modelDraft)
+      const missingDraft = modelDraft !== '' && !draftChoice
 
       return h('div', { style: S.card },
         h('div', { style: S.rowBetween },
@@ -1696,7 +1731,7 @@ window.__ModuleLoader__.load({
           h('strong', null, '你自己购买的积分'),
           '，所以它在通道列表里默认排最后、不会被自动切到 —— 想用就在「生成通道」里排序，或直接在对话里说「用章鱼生图画…」。',
           h('br'),
-          '本卡只存站点账号；',
+          '本卡分别保存站点账号和默认模型；',
           h('strong', null, '密码不会回显'),
           '，只写进本机 ',
           h('span', { style: S.codeInline }, 'zaiduyu.json'),
@@ -1771,6 +1806,34 @@ window.__ModuleLoader__.load({
         // 「已清除但 env 还在兜底」这类警告不能混进绿色的成功文案里 ——
         // 用户会只看到「已清除」四个字，以为真退登了。
         warnNote ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, `⚠️ ${warnNote}`) : null,
+
+        h('div', { style: { ...S.row, marginTop: 12 } },
+          h('label', { style: S.label, htmlFor: 'zaiduyu-default-model' }, '默认生图模型（只保存你的选择）'),
+          h('select', {
+            id: 'zaiduyu-default-model', 'aria-label': '章鱼默认生图模型',
+            style: S.input, value: modelDraft, disabled: modelSaving || busy !== '',
+            onChange: (e) => { setModelDraft(e.target.value); setModelErr(''); setModelNote('') },
+          },
+          h('option', { value: '' }, '不设置默认模型（保存空值可清空偏好）'),
+          missingDraft ? h('option', { value: modelDraft, disabled: true },
+            `${modelDraft} · ${Array.isArray(models) ? '未在当前价目中找到（不会自动替换）' : '未标价（尚未读取价目）'}`) : null,
+          ...modelChoices.map((m) => h('option', { key: m.model, value: m.model, disabled: unavailableModel(m) },
+            `${m.model} · ${m.credits || '未标价'}${m.route ? ` · ${m.route}` : ''}${m.enabled === false && !/已停用|已禁用/.test(m.route || '') ? ' · 已停用' : ''}`))),
+          h('p', { style: S.hint },
+            savedDefault ? `当前默认模型：${savedDefault}` : '默认模型尚未设置；没有显式模型时将停止，不会替你选择。'),
+          h('p', { style: S.hint }, '选择并保存一次后，后续章鱼生图会复用这个选择，无需每次询问；单次指定的模型优先。模型不可用时会停止，不会自动换模型。'),
+          h('p', { style: S.hint }, '模型价目只在你点「看模型价目」时读取；未标价不代表免费。默认模型偏好与账号分开保存，清空偏好不会退出账号。'),
+          Array.isArray(models) && missingDraft
+            ? h('p', { style: S.warn }, '所选模型未在当前价目中找到，请核对或手动选择；不会自动替换。')
+            : null,
+          unavailableModel(draftChoice) ? h('p', { style: S.warn }, '所选模型已停用，请手动选择其他模型；不会自动替换。') : null,
+          h('div', { style: S.bar },
+            h('button', {
+              style: S.btn, disabled: modelSaving || busy !== '' || modelDraft === savedDefault || unavailableModel(draftChoice),
+              onClick: saveDefaultModel,
+            }, modelSaving ? '保存默认模型中…' : '保存默认模型'),
+            modelNote ? h('span', { style: S.ok }, modelNote) : null),
+          modelErr ? h('p', { style: S.warn }, modelErr) : null),
 
         Array.isArray(models)
           ? h('div', { style: { marginTop: 10 } },

@@ -53,6 +53,7 @@ import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } f
 import { resolveAssetDir } from './assets.mjs'
 import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
 import { focusBrowserWindow } from './win-focus.mjs'
+import { assertReferenceOutputIsSeparate, expandReferencePath, prepareReferenceImages, publicReferencePreparation } from './reference-image-preparation.mjs'
 
 export const GPT_URL = 'https://chatgpt.com/'
 
@@ -522,46 +523,62 @@ return result`
  * ⚠️ 网页通道**不支持指定 size**：尺寸由 ChatGPT 决定，给了 size 也只能如实
  * 告知"已忽略、请下载后自行裁切"，绝不假装生效（假参数比缺功能更坑）。
  */
-export async function gen(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, dir, projectDir, reference, references } = {}) {
+export async function gen(dshHome, prompt, {
+  accountId, waitMs = 300000, out, downscale, size, dir, projectDir, reference, references,
+  referenceCacheDir, referenceMaxEdge, referenceMaxBytes, referenceMaxTotalBytes,
+} = {}) {
   // Master switch: when the lane is off, refuse honestly instead of opening a
   // browser. The relay lane (taptap-image) is the documented fallback.
   if (!readGptLaneEnabled(dshHome)) {
     return { ok: false, error: 'lane_disabled', hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。' }
   }
-  // 参考图：接受数组 / 逗号分隔 / 单值，统一成绝对路径。
-  const referencePaths = (() => {
+  let referencePreparation
+  const notes = []
+  let browserStarted = false
+  try {
+    // Keep invalid explicit entries for the preparer's validation instead of
+    // silently converting an invalid reference request into text-to-image.
     const raw = []
-    for (const v of [references, reference]) {
-      if (Array.isArray(v)) raw.push(...v)
-      else if (typeof v === 'string' && v.trim().length > 0) raw.push(...v.split(','))
+    for (const value of [references, reference]) {
+      if (Array.isArray(value)) raw.push(...value)
+      else if (typeof value === 'string' && value.trim().length > 0) raw.push(...value.split(','))
+      else if (value !== undefined && value !== null && value !== '') raw.push(value)
     }
-    const abs = raw.map((p) => String(p).trim()).filter((p) => p.length > 0).map((p) => path.resolve(p))
-    const missing = abs.filter((p) => !fs.existsSync(p))
-    return { list: Array.from(new Set(abs)), missing }
-  })()
-  if (referencePaths.missing.length > 0) {
-    return {
-      ok: false,
-      error: 'reference_missing',
-      hint: `参考图不存在：${referencePaths.missing.join('、')}`,
+    const referencePaths = Array.from(new Set(raw.map((value) =>
+      typeof value === 'string' && value.trim() ? expandReferencePath(value.trim()) : value)))
+    // No-reference calls keep their existing behavior and need no upload cache.
+    const prepared = referencePaths.length > 0 ? await prepareReferenceImages(referencePaths, {
+      lane: 'gptWeb', dshHome,
+      cacheDir: referenceCacheDir,
+      maxEdge: referenceMaxEdge,
+      maxBytes: referenceMaxBytes,
+      maxTotalBytes: referenceMaxTotalBytes,
+    }) : null
+    const refs = prepared ? prepared.items.map((item) => item.uploadPath) : []
+    if (prepared) {
+      referencePreparation = publicReferencePreparation(prepared)
+      notes.push(...prepared.notes)
     }
-  }
-  const refs = referencePaths.list
-  const prof = accountId ? gptAccountProfileDir(dshHome, accountId) : gptProfileDir(dshHome)
-  // Follow the project by default; --dir / config override it.
-  const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
-  const dl = resolved.dir
-  // Unique per run so a retry never collides with a previous download.
-  const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
-  const dest = out || path.join(dl, `gpt-${stamp}.png`)
-  fs.mkdirSync(path.dirname(dest), { recursive: true })
-  // Sidecar: the snippet drops the conversation URL here the moment it exists.
-  // A timeout kills python (SIGKILL) before it can print its result, so without
-  // this the most common failure — "still generating when we gave up" — lost the
-  // URL and the only recovery left was regenerating (burning a generation).
-  const sidecar = path.join(os.tmpdir(), `gptconv-${process.pid}-${Date.now()}.txt`)
+    const protectedPaths = [...referencePaths, ...refs]
+    const guardOutput = (target) => {
+      if (protectedPaths.length === 0) return
+      assertReferenceOutputIsSeparate(target, protectedPaths)
+      if (downscale) {
+        const ext = path.extname(target)
+        assertReferenceOutputIsSeparate(target.replace(/(\.[a-z0-9]+)?$/i, `.full${ext || '.png'}`), protectedPaths)
+      }
+    }
+    // Follow the project by default; --dir / config override it.
+    const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
+    const dl = resolved.dir
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
+    const dest = out || path.join(dl, `gpt-${stamp}.png`)
+    guardOutput(dest)
+    fs.mkdirSync(path.dirname(dest), { recursive: true })
+    // The sidecar preserves the conversation URL if the browser times out.
+    const sidecar = path.join(os.tmpdir(), `gptconv-${process.pid}-${Date.now()}.txt`)
 
-  const snippet = `import time, os
+    const snippet = `import time, os
 steps = {}
 DL = ${pyStr(dl)}
 DEST = ${pyStr(dest)}
@@ -662,7 +679,10 @@ if box is None:
     # Keep a screenshot so the failure can be diagnosed without guessing.
     try:
         shot = os.path.join(DL, "failed-%d.png" % int(time.time()))
-        pg.screenshot(path=shot)
+        # A diagnostic name can also be an existing reference; never overwrite it.
+        shot_bytes = pg.screenshot()
+        with open(shot, "xb") as handle:
+            handle.write(shot_bytes)
         steps["screenshot"] = shot
     except Exception:
         pass
@@ -1020,124 +1040,104 @@ result["steps"] = steps
 result["saved"] = DEST
 return result`
 
-  // The python side keeps waiting past the soft deadline while the page still
-  // says "generating" (hard cap = soft + 300s). The node watchdog must therefore
-  // sit ABOVE that cap — at waitMs+120s it always killed a run that python was
-  // still productively working on, throwing away a nearly-finished image.
-  const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 360000, accountId, sidecar })
-  if (!r.ok) {
-    const error = r.err ?? r.error ?? 'browser_failed'
-    const lostUrl = [r.convUrl, r.conv_url, r.steps?.conv_url]
-      .find((value) => typeof value === 'string' && value.length > 0) ?? null
-    if (lostUrl !== null) {
-      // Keep the conversation so the next call can grab the finished image
-      // instead of generating a second one.
+    // The watchdog remains above Python's soft deadline + 300s hard cap.
+    browserStarted = true
+    const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 360000, accountId, sidecar })
+    if (!r.ok) {
+      const error = r.err ?? r.error ?? 'browser_failed'
+      const lostUrl = [r.convUrl, r.conv_url, r.steps?.conv_url]
+        .find((value) => typeof value === 'string' && value.length > 0) ?? null
+      if (lostUrl !== null) {
+        // Keep the conversation for recovery, never resubmit to recover a file.
+        writeGptPending(dshHome, {
+          url: lostUrl, prompt, accountId: accountId ?? '', at: Date.now(), state: 'generating',
+        })
+        return {
+          ok: false, error, steps: r.steps ?? null, account: accountId ?? null,
+          pendingUrl: lostUrl, referencePreparation, notes,
+          hint: `这次没等到图（${error}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：taptap-gpt grab --url "${lostUrl}"`,
+        }
+      }
+      return { ok: false, error, steps: r.steps ?? null, account: accountId ?? null, referencePreparation, notes }
+    }
+    const steps = r.steps ?? {}
+    touchGptAccount(dshHome, accountId ?? '', { lastUsedAt: Date.now() })
+    const convUrl = typeof r.conv_url === 'string' && r.conv_url.length > 0
+      ? r.conv_url
+      : (typeof steps.conv_url === 'string' && steps.conv_url.length > 0 ? steps.conv_url : null)
+    if (convUrl !== null && steps.saved === undefined
+        && !(typeof r.error === 'string' && r.error.startsWith('quota:'))) {
       writeGptPending(dshHome, {
-        url: lostUrl,
-        prompt,
-        accountId: accountId ?? '',
-        at: Date.now(),
-        state: 'generating',
+        url: convUrl, prompt, accountId: accountId ?? '', at: Date.now(),
+        state: r.error ? 'generating' : 'done',
       })
+    }
+    // Only a confirmed quota signal marks the account for the existing rotation.
+    const isQuota = typeof r.error === 'string' && r.error.startsWith('quota:')
+    if (isQuota && accountId) {
+      touchGptAccount(dshHome, accountId, { status: 'cooling', note: r.error })
+    }
+    if (typeof r.error === 'string' && r.error.length > 0 && !isQuota) {
       return {
-        ok: false,
-        error,
-        steps: r.steps ?? null,
-        account: accountId ?? null,
-        pendingUrl: lostUrl,
-        hint: `这次没等到图（${error}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：taptap-gpt grab --url "${lostUrl}"`,
+        ok: false, error: r.error, steps, account: accountId ?? null,
+        referencePreparation, notes, pendingUrl: convUrl,
+        hint: convUrl !== null
+          ? `这张图可能还在生成：稍后用 grab 抓取同一个对话即可（不用重新生成，省额度）：taptap-gpt grab --url "${convUrl}"`
+          : undefined,
       }
     }
-    return { ok: false, error, steps: r.steps ?? null, account: accountId ?? null }
-  }
-  const steps = r.steps ?? {}
-  touchGptAccount(dshHome, accountId ?? '', { lastUsedAt: Date.now() })
-  // Record the conversation as soon as we know it: if this run ends up timing
-  // out, the NEXT run can download the finished image from here instead of
-  // generating a duplicate (which silently burns one generation).
-  const convUrl = typeof r.conv_url === 'string' && r.conv_url.length > 0
-    ? r.conv_url
-    : (typeof steps.conv_url === 'string' && steps.conv_url.length > 0 ? steps.conv_url : null)
-  if (convUrl !== null && steps.saved === undefined
-      && !(typeof r.error === 'string' && r.error.startsWith('quota:'))) {
-    writeGptPending(dshHome, {
-      url: convUrl,
-      prompt,
-      accountId: accountId ?? '',
-      at: Date.now(),
-      state: r.error ? 'generating' : 'done',
-    })
-  }
-  // A quota signal means this account is spent for now: mark it and let the
-  // caller rotate. `banned` would be permanent; `cooling` keeps it in the pool.
-  const isQuota = typeof r.error === 'string' && r.error.startsWith('quota:')
-  if (isQuota && accountId) {
-    touchGptAccount(dshHome, accountId, { status: 'cooling', note: r.error })
-  }
-  if (typeof r.error === 'string' && r.error.length > 0 && !isQuota) {
+    if (steps.saved === undefined) {
+      return { ok: false, error: r.error ?? 'no file saved', steps, account: accountId ?? null, pendingUrl: convUrl, referencePreparation, notes }
+    }
+    clearGptPending(dshHome)
+
+    // Guard both the actual downloaded path and its optional .full backup.
+    let saved = steps.saved
+    guardOutput(saved)
+    if (downscale) {
+      const ext = path.extname(saved)
+      const full = saved.replace(/(\.[a-z0-9]+)?$/i, `.full${ext || '.png'}`)
+      fs.copyFileSync(saved, full)
+      const res = downscaleFile(full, saved, downscale)
+      if (res.ok) notes.push(`downscaled → ${downscale} via ${res.tool} (full kept: ${full})`)
+      else { fs.rmSync(full, { force: true }); notes.push(res.hint) }
+    }
+    if (out && saved !== out) {
+      guardOutput(out)
+      fs.mkdirSync(path.dirname(out), { recursive: true })
+      fs.copyFileSync(saved, out)
+      saved = out
+    }
+    // The web app controls the rendered dimensions; size is never a guarantee.
+    if (typeof size === 'string' && size.trim().length > 0) {
+      notes.push(
+        `网页通道不支持指定尺寸：--size ${size} 已忽略（实际尺寸由 ChatGPT 决定）。`
+        + '需要特定比例/尺寸请下载后用 --downscale 或图像工具裁切。'
+        + '（要精确控制尺寸请走中转站 taptap-image --size）',
+      )
+    }
+    if (refs.length > 0) notes.push(`图生图：已随提示词上传 ${refs.length} 张参考图（网页通道）`)
+    return {
+      ok: true, saved, bytes: steps.bytes ?? null,
+      size: null, requestedSize: size ?? null, referenceCount: refs.length,
+      referencePreparation, steps, account: accountId ?? null, notes,
+      downloadDir: dl, dirSource: resolved.source, projectDir: resolved.projectDir,
+    }
+  } catch (error) {
+    // Includes preparation, output setup, browser exceptions and post-download
+    // I/O. Once prepared, its audit must survive every subsequent failure.
     return {
       ok: false,
-      error: r.error,
-      steps,
+      error: error?.code ?? (browserStarted ? 'browser_failed' : 'reference_preprocess_failed'),
+      hint: error?.message ?? String(error),
+      kind: error?.kind,
+      phase: browserStarted ? 'generation' : 'preflight',
+      submitted: browserStarted,
+      requiresLogin: false,
       account: accountId ?? null,
-      // Tell the caller how to recover the image WITHOUT regenerating.
-      pendingUrl: convUrl,
-      hint: convUrl !== null
-        ? `这张图可能还在生成：稍后用 grab 抓取同一个对话即可（不用重新生成，省额度）：taptap-gpt grab --url "${convUrl}"`
-        : undefined,
+      referencePreparation: referencePreparation ?? error?.referencePreparation,
+      notes: [...notes, ...(error?.notes ?? [])],
     }
-  }
-  if (steps.saved === undefined) {
-    return { ok: false, error: r.error ?? 'no file saved', steps, account: accountId ?? null, pendingUrl: convUrl }
-  }
-  // Downloaded successfully → the pending record has served its purpose.
-  clearGptPending(dshHome)
-
-  // Optional downscale for small assets (icons / UI): keep the full render.
-  let saved = steps.saved
-  const notes = []
-  if (downscale) {
-    const ext = path.extname(saved)
-    const full = saved.replace(/(\.[a-z0-9]+)?$/i, `.full${ext || '.png'}`)
-    fs.copyFileSync(saved, full)
-    const res = downscaleFile(full, saved, downscale)
-    if (res.ok) notes.push(`downscaled → ${downscale} via ${res.tool} (full kept: ${full})`)
-    else { fs.rmSync(full, { force: true }); notes.push(res.hint) }
-  }
-  if (out && saved !== out) {
-    fs.mkdirSync(path.dirname(out), { recursive: true })
-    fs.copyFileSync(saved, out)
-    saved = out
-  }
-  // 网页通道的尺寸限制必须如实说：size 参数在这里**不生效**。
-  // 以前它只被原样回显到返回值里，用户看到 size: "128x128" 以为生效了，
-  // 实际拿到的是 ChatGPT 自己定的分辨率 —— 假参数比没有参数更坑人。
-  if (typeof size === 'string' && size.trim().length > 0) {
-    notes.push(
-      `网页通道不支持指定尺寸：--size ${size} 已忽略（实际尺寸由 ChatGPT 决定）。`
-      + '需要特定比例/尺寸请下载后用 --downscale 或图像工具裁切。'
-      + '（要精确控制尺寸请走中转站 taptap-image --size）',
-    )
-  }
-  if (refs.length > 0) {
-    notes.push(`图生图：已随提示词上传 ${refs.length} 张参考图（网页通道）`)
-  }
-  return {
-    ok: true,
-    saved,
-    bytes: steps.bytes ?? null,
-    // ⚠️ 网页通道不保证尺寸：这里如实返回 null 而不是把用户传的 size 原样回显，
-    //    否则调用方会把「用户想要的值」当成「实际得到的值」再往下传。
-    size: null,
-    requestedSize: size ?? null,
-    referenceCount: refs.length,
-    steps,
-    account: accountId ?? null,
-    notes,
-    // Where it landed and why — so the caller can tell the user the real path.
-    downloadDir: dl,
-    dirSource: resolved.source, // project | config | flag | default
-    projectDir: resolved.projectDir,
   }
 }
 
@@ -1149,7 +1149,10 @@ return result`
  * ToS and risks bans. The user asked for this explicitly (2026-10) and owns the
  * risk; we do NOT hide it and we do NOT retry a banned account.
  */
-export async function generateWithRotation(dshHome, prompt, { accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir, noResume = false, reference, references } = {}) {
+export async function generateWithRotation(dshHome, prompt, {
+  accountId, waitMs = 300000, out, downscale, size, maxAccounts = 4, dir, projectDir, noResume = false,
+  reference, references, referenceCacheDir, referenceMaxEdge, referenceMaxBytes, referenceMaxTotalBytes,
+} = {}) {
   // Master switch first: never open a browser for a lane the user turned off.
   if (!readGptLaneEnabled(dshHome)) {
     return {
@@ -1197,7 +1200,7 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
         got = await grab(dshHome, {
           url: pending.url,
           accountId: pending.accountId || accountId || undefined,
-          out, downscale, waitMs, dir, projectDir,
+          out, downscale, waitMs, dir, projectDir, reference, references,
         })
       } catch (error) {
         got = { ok: false, error: error?.message ?? String(error) }
@@ -1231,7 +1234,10 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
         failures: [],
       }
     }
-    const r = await gen(dshHome, prompt, { accountId: only, waitMs, out, downscale, size, dir, projectDir, reference, references })
+    const r = await gen(dshHome, prompt, {
+      accountId: only, waitMs, out, downscale, size, dir, projectDir, reference, references,
+      referenceCacheDir, referenceMaxEdge, referenceMaxBytes, referenceMaxTotalBytes,
+    })
     return { ...r, rotated: false, tried: [only ?? null] }
   }
   const tried = []
@@ -1249,7 +1255,10 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
       continue
     }
     tried.push(acct.id)
-    last = await gen(dshHome, prompt, { accountId: acct.id, waitMs, out, downscale, size, dir, projectDir, reference, references })
+    last = await gen(dshHome, prompt, {
+      accountId: acct.id, waitMs, out, downscale, size, dir, projectDir, reference, references,
+      referenceCacheDir, referenceMaxEdge, referenceMaxBytes, referenceMaxTotalBytes,
+    })
     if (last.ok) return { ...last, rotated: tried.length > 1, tried, failures }
     skip.add(acct.id)
     // Always carry a concrete reason + the step log: a bare `{account}` told us
@@ -1264,6 +1273,9 @@ export async function generateWithRotation(dshHome, prompt, { accountId, waitMs 
     // `write_failed` / `download_failed` 同属「图**已经生成**了，只是没落到本地」：
     // 换账号重跑 = 再花一份配额去生成一张已经存在的图。必须一起停下。
     // （write_failed 曾漏在名单外：本地磁盘写不动时，池里每个账号都会被白烧一次。）
+    // Input/preparation errors cannot be fixed by spending another account's
+    // quota, even if an input filename/error message contains "quota:".
+    if (last?.phase === 'preflight' || last?.kind === 'input') break
     if (last?.error === 'no_image' || last?.error === 'download_failed' || last?.error === 'write_failed') break
     if (last?.error === 'cloudflare_challenge' || last?.error === 'not_logged_in') break
     // Only a confirmed quota rejection permits a new submission. Timeouts,
@@ -1329,7 +1341,8 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
     if (laneId === 'gptWeb') {
       const r = await generateWithRotation(dshHome, prompt, gptOpts)
       // 把「额度用光」翻译成统一信号，好让下一条通道知道自己该接手了。
-      if (!r.ok && typeof r.error === 'string' && r.error.startsWith('quota:')) {
+      if (!r.ok && r.phase !== 'preflight' && r.kind !== 'input'
+          && typeof r.error === 'string' && r.error.startsWith('quota:')) {
         const e = new Error(`quota:${r.error.slice(6)}`)
         e.laneError = r
         throw e
@@ -1357,18 +1370,35 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
     return { ...generated, ok: true, saved: generated.outputs?.[0] ?? generated.saved }
   }
 
+  let lastReferenceAudit = {}
   const safeRunLane = async (laneId) => {
+    if (zaiduyuOpts.model !== undefined && laneId !== 'zaiduyu') {
+      return { ok: false, error: 'model_lane_mismatch', kind: 'input', requiresLogin: false, phase: 'preflight', submitted: false,
+        hint: '本次 --model 是章鱼参数，但当前可用通道不是章鱼；不会忽略指定模型、改通道顺序或提交。请用 /taptap-zaiduyu 直接调用，或由你决定配置。' }
+    }
     try {
       return await runLane(laneId)
     } catch (error) {
-      // "autoFallback" is a quota opt-in, not permission to resubmit an
-      // uncertain request through another provider (possibly charging twice).
-      if (error?.quota === true || String(error?.message ?? '').startsWith('quota:')) throw error
+      const failure = error?.laneError ?? error
+      if (failure?.referencePreparation) {
+        lastReferenceAudit = { referencePreparation: failure.referencePreparation, notes: failure.notes ?? [] }
+      }
+      // Quota opt-in never authorizes retrying bad references or an uncertain
+      // submission. Preflight takes precedence over quota-looking input text.
+      if (failure?.phase !== 'preflight' && failure?.kind !== 'input'
+          && (error?.quota === true || String(error?.message ?? '').startsWith('quota:'))) throw error
       return {
         ok: false,
-        error: 'lane_failed',
+        error: error?.code ?? 'lane_failed',
         hint: error?.message ?? String(error),
+        kind: error?.kind,
+        requiresLogin: error?.requiresLogin === true,
+        phase: error?.phase,
+        submitted: error?.submitted,
+        httpStatus: error?.httpStatus,
         ...(error?.preflight ? { preflight: error.preflight } : {}),
+        ...(failure?.referencePreparation ? { referencePreparation: failure.referencePreparation } : {}),
+        ...(failure?.notes ? { notes: failure.notes } : {}),
       }
     }
   }
@@ -1382,6 +1412,7 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
     lane: null,
     hint: `所有生图通道都没成功：\n${summary}\n（可在设置页调整「生图通道优先级」与各通道开关）`,
     attempts: result.attempts,
+    ...lastReferenceAudit,
   }
 }
 
@@ -1396,7 +1427,7 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
  * already on the page before the run; `grab` itself accepts the newest large
  * image in the conversation.
  */
-export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 180000, dir, projectDir } = {}) {
+export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 180000, dir, projectDir, reference, references } = {}) {
   const pending = readGptPending(dshHome)
   const target = (typeof url === 'string' && url.length > 0) ? url : pending?.url
   if (typeof target !== 'string' || target.length === 0) {
@@ -1406,6 +1437,25 @@ export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 1
   const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const dest = out || path.join(resolved.dir, `gpt-${stamp}.png`)
+  // Auto-resume downloads instead of uploading refs, but its output/backup must
+  // still not overwrite originals supplied to the current request.
+  const referencePaths = []
+  for (const value of [references, reference]) {
+    if (Array.isArray(value)) referencePaths.push(...value)
+    else if (typeof value === 'string' && value.trim()) referencePaths.push(...value.split(',').map((p) => p.trim()))
+  }
+  if (referencePaths.length > 0) {
+    try {
+      assertReferenceOutputIsSeparate(dest, referencePaths)
+      if (downscale) {
+        const ext = path.extname(dest)
+        assertReferenceOutputIsSeparate(dest.replace(/(\.[a-z0-9]+)?$/i, `.full${ext || '.png'}`), referencePaths)
+      }
+    } catch (error) {
+      return { ok: false, error: error?.code ?? 'reference_output_alias', hint: error?.message ?? String(error),
+        phase: 'preflight', submitted: false, requiresLogin: false, url: target }
+    }
+  }
   fs.mkdirSync(path.dirname(dest), { recursive: true })
 
   const snippet = `import time, os, base64 as _b64
@@ -1560,6 +1610,7 @@ export function parseSlashGenArgs(raw) {
     ref: 'REF', refs: 'REF', reference: 'REF', references: 'REF', r: 'REF',
     downscale: 'DOWNSCALE', d: 'DOWNSCALE',
     account: 'ACCOUNT', a: 'ACCOUNT',
+    model: 'MODEL', m: 'MODEL',
   }
   for (let i = 0; i < list.length; i += 1) {
     const t = String(list[i])
@@ -1578,7 +1629,8 @@ export function parseSlashGenArgs(raw) {
       const next = list[i + 1]
       if (next !== undefined && !looksLikeFlag(next)) { value = String(next); i += 1 }
     }
-    if (value === null) { out.missing.push(t); continue }
+    if (value === null || (field === 'MODEL' && value.trim() === '')) { out.missing.push(t); continue }
+    if (field === 'MODEL') { out.model = value; continue }
     if (field === 'REF') { pushRefs(value); continue }
     if (field === 'DOWNSCALE') { out.downscale = value; continue }
     if (field === 'ACCOUNT') { out.account = value; continue }
