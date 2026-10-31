@@ -66,7 +66,7 @@ function actualHost({ dirty = true } = {}) {
   function innerControl(id) {
     return { id, tagName: 'BUTTON', hidden: false, inert: false, disabled: false, tabIndex: 0,
       ownerDocument: innerDocument, parentElement: null, getAttribute: () => null,
-      getClientRects: () => [{}], matches: () => true, closest: () => null,
+      getClientRects: () => [{}], matches: () => false, closest: () => null,
       focus() { hostDocument.activeElement = frameDom; innerDocument.activeElement = this },
     }
   }
