@@ -2414,10 +2414,10 @@ window.__ModuleLoader__.load({
           ref: opener, type: 'button', 'aria-label': '打开 UI 工作台', title: 'UI 工作台：编辑、浏览器预览、版本保存、Maker 审阅包（零生成额度）',
           onClick: () => setOpen(true), style: { ...S.btn, padding: '6px 10px', fontSize: 12, background: 'var(--dsh-panel-bg, rgba(128,128,128,0.12))', color: 'inherit' },
         }, '▦ UI'),
-        open ? h('div', { ref: dialog, tabIndex: -1, role: 'dialog', 'aria-modal': true, 'aria-label': 'UI 工作台 · 插件侧', style: { position: 'fixed', inset: 12, zIndex: 10000, display: 'flex', flexDirection: 'column', background: 'var(--dsh-panel-bg, #141b20)', color: 'var(--dsh-text, #e4ece8)', border: '1px solid var(--dsh-border, #35453e)', borderRadius: 12, boxShadow: '0 20px 100px rgba(0,0,0,.65)', overflow: 'hidden' } },
-          h('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 14px', flex: '0 0 auto', borderBottom: '1px solid var(--dsh-border, #35453e)' } },
-            h('div', null, h('strong', null, 'UI 工作台'), h('span', { style: { fontSize: 11, opacity: .7, marginLeft: 12 } }, '隔离版本 · 审阅包，不导入游戏 / 不构建 / 未 native 验收')),
-            h('button', { type: 'button', 'aria-label': '关闭 UI 工作台', onClick: requestClose, style: { ...S.btn, padding: '5px 10px', background: 'transparent', color: 'inherit' } }, '关闭 ×')),
+        open ? h('div', { ref: dialog, tabIndex: -1, role: 'dialog', 'aria-modal': true, 'aria-label': 'UI 工作台 · 插件侧', style: { position: 'fixed', top: 'max(64px, env(safe-area-inset-top, 0px))', right: 12, bottom: 12, left: 12, zIndex: 10000, display: 'flex', flexDirection: 'column', background: '#18241f', color: '#edf5ef', border: '1px solid #526d60', borderRadius: 10, boxShadow: '0 20px 100px rgba(0,0,0,.65)', overflow: 'hidden' } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', flex: '0 0 auto', borderBottom: '1px solid #526d60' } },
+            h('button', { type: 'button', 'aria-label': '关闭 UI 工作台', onClick: requestClose, style: { ...S.btn, minWidth: 88, minHeight: 44, flexShrink: 0, padding: '9px 12px', fontSize: 14, border: '1px solid #759589', background: '#274236', color: '#edf5ef' } }, '× 关闭工作台'),
+            h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 12px', minWidth: 0, lineHeight: 1.5 } }, h('strong', { style: { fontSize: 15 } }, 'UI 工作台'), h('span', { style: { fontSize: 12, color: '#b7cec1', overflowWrap: 'anywhere' } }, '隔离版本 · 审阅包，不导入游戏 / 不构建 / 未 native 验收'))),
           h('iframe', { ref: frame, src: `${API_BASE}/ui/workbench`, title: 'UI 工作台：独立静态 UI 编辑与预览', sandbox: 'allow-scripts allow-same-origin allow-downloads allow-modals', onLoad: frameLoaded, style: { width: '100%', minHeight: 0, flex: '1 1 auto', border: 0 } })) : null)
     }
 

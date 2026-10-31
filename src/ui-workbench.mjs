@@ -9,6 +9,39 @@ export const VIEWPORT_PRESETS = Object.freeze([
   Object.freeze({ id: '844x390', width: 844, height: 390, label: '横屏' }),
   Object.freeze({ id: '390x844', width: 390, height: 844, label: '竖屏' }),
 ])
+/* Onboarding is UI-only: reading/navigating it never changes a document,
+ * starts a provider, selects a game, or invokes a save/export API. */
+export const ONBOARDING_KEY = 'taptap-maker-dev.ui-onboarding.v1'
+export const ONBOARDING_STEPS = Object.freeze([
+  Object.freeze({ target: 'preview-host', title: '先体验一份 UI 草稿', action: '定位画布', description: '初次打开会看到“营地补给”样例，可以直接编辑和体验。它不是游戏工程；未保存前只存在本次工作台里。' }),
+  Object.freeze({ target: 'property-form', title: '选中文字，改一处试试', action: '定位属性面板', description: '点击画布中的文字或左侧节点，在右侧修改文字、颜色和字号。修改会实时显示；ID 和父节点保持只读。' }),
+  Object.freeze({ target: 'mode-interact', title: '切换交互，看看按钮效果', action: '定位交互切换', description: '编辑模式只选节点；切到“交互”才能试按钮等有限动作。试用不会自动保存文档，也不会运行 Maker 游戏。' }),
+  Object.freeze({ target: 'save-workspace', title: '满意后，再保存新版本', action: '定位保存按钮', description: '自行点击“保存新版本”才会写到独立 UI 工作区，旧版本不覆盖。Maker 预检和审阅包是可选后续步骤，不会自动导入或构建游戏。' }),
+])
+export function createOnboardingGuide({ storage } = {}) {
+  const listeners = new Set()
+  let remembered = false
+  try { remembered = ['completed', 'skipped'].includes(storage?.getItem(ONBOARDING_KEY)) } catch { /* private/blocked storage: keep the guide usable */ }
+  let visible = !remembered; let index = 0
+  const getState = () => ({ visible, index, count: ONBOARDING_STEPS.length, step: ONBOARDING_STEPS[index], remembered })
+  const emit = () => { for (const listener of listeners) listener(getState()) }
+  function finish(value) {
+    if (!visible) return false
+    remembered = false
+    try { if (storage?.setItem) { storage.setItem(ONBOARDING_KEY, value); remembered = true } } catch { /* preference failure never blocks the workbench */ }
+    visible = false; emit(); return true
+  }
+  return {
+    getState,
+    subscribe(listener) { listeners.add(listener); listener(getState()); return () => listeners.delete(listener) },
+    start() { index = 0; visible = true; emit() },
+    next() { if (!visible) return false; if (index === ONBOARDING_STEPS.length - 1) return finish('completed'); index++; emit(); return true },
+    back() { if (!visible || index === 0) return false; index--; emit(); return true },
+    skip() { return finish('skipped') },
+    dismiss() { if (!visible) return false; visible = false; emit(); return true },
+  }
+}
+
 const ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
 const forbiddenIds = new Set(['constructor', 'prototype', '__proto__'])
 const clone = value => structuredClone(value)
@@ -447,40 +480,30 @@ function hierarchy(document) {
   visit(null, 0); return ordered
 }
 
-/** Read only the same-origin parent's theme. No configuration or theme writes. */
+/** Read only host theme identity, never unrelated host color/token fragments. */
 export function connectHostTheme(browser, dom) {
   const root = dom.documentElement; const observers = []; const cleanups = []
-  const tokens = ['--dsh-border', '--dsh-input-bg', '--dsh-code-bg', '--dsh-accent', '--dsh-success', '--dsh-warn', '--dsh-danger']
-  const luminance = color => {
-    const match = /rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(color ?? '')
-    return match ? (.2126 * Number(match[1]) + .7152 * Number(match[2]) + .0722 * Number(match[3])) / 255 : null
-  }
+  const media = browser.matchMedia?.('(prefers-color-scheme: dark)')
+  const validTheme = value => ['light', 'dark'].includes(value) ? value : null
   function sync() {
+    let theme = null
     try {
-      if (browser.parent === browser) { root.removeAttribute('data-theme'); return }
-      const parent = browser.parent; const parentDom = parent.document
-      const sources = []
-      let ancestor = browser.frameElement
-      while (ancestor) { sources.push(ancestor); ancestor = ancestor.parentElement }
-      sources.push(parentDom.body, parentDom.documentElement)
-      let bg = ''; let fg = ''
-      const styles = sources.filter(Boolean).map(element => parent.getComputedStyle(element))
-      for (const style of styles) {
-        if (!bg && style.backgroundColor && !['transparent', 'rgba(0, 0, 0, 0)'].includes(style.backgroundColor)) bg = style.backgroundColor
-        if (!fg && style.color) fg = style.color
+      if (browser.parent !== browser) {
+        const parent = browser.parent; const parentDom = parent.document
+        const sources = [parentDom.documentElement, parentDom.body].filter(Boolean)
+        let ancestor = browser.frameElement
+        while (ancestor) { sources.push(ancestor); ancestor = ancestor.parentElement }
+        for (const element of sources) {
+          theme = validTheme(element.dataset?.theme) ?? validTheme(element.dataset?.colorScheme)
+          if (theme) break
+        }
+        if (!theme) for (const element of sources) {
+          theme = validTheme(parent.getComputedStyle(element).colorScheme)
+          if (theme) break
+        }
       }
-      for (const token of tokens) {
-        const value = styles.map(style => style.getPropertyValue(token).trim()).find(Boolean)
-        if (value) root.style.setProperty(token, value); else root.style.removeProperty(token)
-      }
-      const bgLum = luminance(bg); const fgLum = luminance(fg)
-      const declared = parentDom.documentElement.dataset.theme ?? parent.getComputedStyle(parentDom.documentElement).colorScheme
-      const light = declared === 'light' || (declared !== 'dark' && (bgLum !== null ? bgLum > .55 : fgLum !== null ? fgLum < .5 : !browser.matchMedia('(prefers-color-scheme: dark)').matches))
-      root.dataset.theme = light ? 'light' : 'dark'
-      if (bgLum !== null) root.style.setProperty('--wb-bg', bg)
-      if (fgLum !== null && bgLum !== null && Math.abs(fgLum - bgLum) > .35) root.style.setProperty('--wb-fg', fg)
-      else root.style.removeProperty('--wb-fg')
-    } catch { /* Cross-origin embedding cannot read parent; use paired CSS fallback. */ }
+    } catch { /* Cross-origin/unavailable parent: OS still selects a paired palette. */ }
+    root.dataset.theme = theme ?? (media?.matches ? 'dark' : 'light')
   }
   sync()
   try {
@@ -490,7 +513,6 @@ export function connectHostTheme(browser, dom) {
       observers.push(observer)
     }
   } catch { /* Theme access is optional, not an API readiness signal. */ }
-  const media = browser.matchMedia?.('(prefers-color-scheme: dark)')
   media?.addEventListener?.('change', sync); cleanups.push(() => media?.removeEventListener?.('change', sync))
   return () => { for (const observer of observers) observer.disconnect(); for (const cleanup of cleanups) cleanup() }
 }
@@ -649,6 +671,48 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
     }
     fitPreview()
   }
+  // Optional markup keeps test/embedded hosts backward compatible. The guide
+  // only points at real controls; even its Save step never clicks Save.
+  let guide = null; let guideTarget = null
+  const guidePanel = element('onboarding-guide')
+  if (guidePanel && element('show-guide')) {
+    let storage
+    try { storage = browser.localStorage } catch { /* sandbox/private storage can be unavailable */ }
+    guide = createOnboardingGuide({ storage })
+    const focusGuideOpener = () => element('show-guide').focus()
+    cleanups.push(guide.subscribe(state => {
+      guidePanel.hidden = !state.visible
+      setText('guide-progress', `${state.index + 1} / ${state.count}`)
+      setText('guide-title', state.step.title); setText('guide-description', state.step.description)
+      setText('guide-target', state.step.action); setText('guide-next', state.index === state.count - 1 ? '完成引导' : '下一步')
+      element('guide-back').disabled = state.index === 0
+      if (guideTarget) guideTarget.removeAttribute('data-guide-target')
+      guideTarget = state.visible ? element(state.step.target) : null
+      guideTarget?.setAttribute('data-guide-target', 'true')
+    }))
+    const finishGuide = action => {
+      action()
+      if (!guide.getState().visible) {
+        if (!guide.getState().remembered) { const note = element('guide-memory-note'); if (note) { note.hidden = false; note.textContent = '当前浏览器无法记住引导偏好，下次打开可能再次显示；不影响编辑和保存。' } }
+        focusGuideOpener()
+      }
+    }
+    listen(element('show-guide'), 'click', () => { guide.start(); guidePanel.scrollIntoView?.({ block: 'nearest' }); element('guide-next').focus() })
+    listen(element('guide-next'), 'click', () => finishGuide(() => guide.next()))
+    listen(element('guide-back'), 'click', () => guide.back())
+    listen(element('guide-skip'), 'click', () => finishGuide(() => guide.skip()))
+    listen(element('guide-target'), 'click', () => {
+      const target = element(guide.getState().step.target)
+      if (!target) return
+      // Reveal collapsed inspectors on narrow screens, but never change fields.
+      let ancestor = target.parentElement
+      while (ancestor && ancestor !== root) { if (ancestor.tagName === 'DETAILS') ancestor.open = true; ancestor = ancestor.parentElement }
+      target.scrollIntoView?.({ block: 'nearest' })
+      if (!['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'A'].includes(target.tagName)) target.setAttribute('tabindex', '-1')
+      target.focus()
+    })
+    cleanups.push(() => guideTarget?.removeAttribute('data-guide-target'))
+  }
   listen(element('property-form'), 'submit', event => event.preventDefault())
   function patchProperty(id, key, { type = 'string', event = 'change' } = {}) {
     listen(element(id), event, () => {
@@ -695,7 +759,11 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
   })
   const beforeUnload = event => { if (model.getState().dirty) { event.preventDefault(); event.returnValue = '' } }
   listen(browser, 'beforeunload', beforeUnload)
-  listen(dom, 'keydown', event => { if (event.key === 'Escape' && model.closeModal()) { event.preventDefault(); event.stopPropagation() } })
+  listen(dom, 'keydown', event => {
+    if (event.key !== 'Escape') return
+    if (model.closeModal()) { event.preventDefault(); event.stopPropagation(); return }
+    if (guide?.getState().visible) { guide.dismiss(); element('show-guide').focus(); event.preventDefault(); event.stopPropagation() }
+  })
   const narrow = browser.matchMedia('(max-width: 900px)')
   const foldPanels = () => { element('workspace-panel').open = !narrow.matches; element('inspector-panel').open = !narrow.matches; fitPreview() }
   narrow.addEventListener('change', foldPanels); cleanups.push(() => narrow.removeEventListener('change', foldPanels))

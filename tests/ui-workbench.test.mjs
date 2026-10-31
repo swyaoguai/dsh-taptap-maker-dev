@@ -144,10 +144,11 @@ test('shell has self-origin assets only and does not preload a guessed Maker tar
   assert.doesNotMatch(projectInput, /value=["'][^"']+["']/)
   assert.match(html, /value=["']["'][^>]*>.*选择字号/s)
 })
-test('layout includes DSH tokens, contain scaling, collapsible narrow layout and reduced motion', async () => {
+test('layout owns paired theme tokens, contain scaling, collapsible narrow layout and reduced motion', async () => {
   const css = await source('../src/ui-workbench.css')
   assert.ok(css.length > 0, 'Workbench CSS implementation missing')
-  for (const token of ['--dsh-border', '--dsh-input-bg', '--dsh-accent', '--dsh-success', '--dsh-warn', '--dsh-danger']) assert.ok(css.includes(token), token)
+  for (const token of ['--wb-bg', '--wb-fg', '--wb-muted', '--wb-faint', '--wb-input', '--wb-accent', '--wb-ok', '--wb-warn', '--wb-danger']) assert.ok(css.includes(token), token)
+  assert.doesNotMatch(css, /--dsh-/, 'Unpaired host colors must not leak into owned light/dark palettes')
   assert.match(css, /@media\s*\(max-width:\s*\d+px\)/)
   assert.match(css, /minmax\(0,\s*1fr\)/)
   assert.match(css, /\[hidden\][\s\S]*?display:\s*none\s*!important/)
@@ -159,7 +160,11 @@ test('frontend exposes no executable-user-content or arbitrary server-file-read 
   const js = await source('../src/ui-workbench.mjs')
   assert.ok(js.length > 0, 'Workbench JS implementation missing')
   assert.doesNotMatch(js, /\.innerHTML\s*=|insertAdjacentHTML|\beval\s*\(|new\s+Function\b|\.outerHTML\s*=/)
-  assert.doesNotMatch(js, /localStorage|sessionStorage|Authorization|credentials\.json|file-read|file\?path/)
+  assert.doesNotMatch(js, /sessionStorage|Authorization|credentials\.json|file-read|file\?path/)
+  // Only an explicit first-use preference is persisted; never drafts or credentials.
+  assert.match(js, /getItem\(ONBOARDING_KEY\)/)
+  assert.match(js, /setItem\(ONBOARDING_KEY, value\)/)
+  assert.doesNotMatch(js, /storage\.(?:clear|removeItem)|localStorage\[/)
   assert.match(js, /FileReader/)
   assert.match(js, /document\.mjs/)
   assert.match(js, /beforeunload/)
@@ -617,8 +622,9 @@ test('same-origin iframe theme reads a paired dark/light parent and never change
   const values = { '--dsh-border': '#bbc9c4', '--dsh-accent': '#267c65' }
   parent.getComputedStyle = () => ({ backgroundColor: 'rgb(240, 244, 242)', color: 'rgb(25, 42, 37)', colorScheme: 'light', getPropertyValue: name => values[name] ?? '' })
   const stop = feature('connectHostTheme', browser, dom)
-  assert.equal(dom.documentElement.dataset.theme, 'light'); assert.equal(dom.documentElement.style['--dsh-accent'], '#267c65')
-  assert.equal(dom.documentElement.style['--wb-fg'], 'rgb(25, 42, 37)')
+  assert.equal(dom.documentElement.dataset.theme, 'light'); assert.equal(dom.documentElement.style['--dsh-accent'], undefined)
+  assert.equal(dom.documentElement.style['--wb-fg'], undefined, 'Host foreground is not copied independently of its palette')
+  assert.equal(dom.documentElement.style['--wb-bg'], undefined)
   assert.equal(parentDom.documentElement.dataset.theme, 'light')
   parentDom.documentElement.dataset.theme = 'dark'
   parent.getComputedStyle = () => ({ backgroundColor: 'rgb(21, 27, 29)', color: 'rgb(226, 236, 232)', colorScheme: 'dark', getPropertyValue: () => '' })

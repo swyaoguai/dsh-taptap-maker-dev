@@ -17,7 +17,7 @@
         <span class="workbench-mark" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
         <div><p class="eyebrow">AUTHOR / PREVIEW / STAGE</p><h1>UI 工作台<span class="edition">Maker 优先</span></h1></div>
       </div>
-      <p class="header-note">原创 DOM 界面<span class="separator">/</span>无第三方图片、字体或编辑器搬运</p>
+      <div class="header-actions"><p class="header-note">原创 DOM 界面<span class="separator">/</span>无第三方图片、字体或编辑器搬运</p><button id="show-guide" class="tool-button" type="button" aria-controls="onboarding-guide">使用引导</button></div>
     </header>
 
     <div class="action-bar" aria-label="文档与审阅操作">
@@ -48,6 +48,13 @@
       </details>
     </div>
     <div class="boundary-note"><span class="boundary-symbol" aria-hidden="true">i</span><strong>浏览器预览不是Maker引擎验收</strong><span>仅模拟布局与有限动作。安全区未 native 验收；审阅包不导入游戏、不改入口、不构建。</span></div>
+    <section id="onboarding-guide" class="onboarding-guide" role="region" aria-labelledby="guide-title" hidden>
+      <div class="guide-heading"><span class="micro-label">首次使用 · 可以随时跳过</span><span id="guide-progress" class="guide-progress" role="status" aria-live="polite">1 / 4</span></div>
+      <h2 id="guide-title">先体验一份 UI 草稿</h2>
+      <p id="guide-description">引导不会替你保存、导出或改游戏。</p>
+      <div class="guide-actions"><button id="guide-target" class="tool-button" type="button">定位画布</button><div class="guide-navigation"><button id="guide-back" class="tool-button" type="button" disabled>上一步</button><button id="guide-next" class="tool-button primary" type="button">下一步</button><button id="guide-skip" class="tool-button" type="button">跳过引导</button></div></div>
+    </section>
+    <p id="guide-memory-note" class="guide-memory-note" role="status" hidden></p>
     <p id="boot-error" class="error-banner" role="alert" hidden></p>
     <p id="global-error" class="error-banner" role="alert" hidden></p>
     <div id="conflict-actions" class="conflict-actions" hidden>
