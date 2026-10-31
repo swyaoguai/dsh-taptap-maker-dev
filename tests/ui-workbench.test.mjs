@@ -233,6 +233,16 @@ test('initial demo is unsaved, has an empty Maker target and makes no automatic 
   assert.equal(model.getState().status.sourceAudit.commit, sourceAudit.commit)
   assert.equal(model.canExport(), false)
 })
+test('preflight includes the selected immutable workspace context for reviewed local images', async () => {
+  const { model, calls } = fixture()
+  await model.loadWorkspace('ui-a'); target(model)
+  await model.planExport()
+  const body = calls.find(call => call.path === '/plan').body
+  assert.equal(body.workspaceId, 'ui-a')
+  assert.equal(body.revisionId, 'rev-a')
+  assert.equal(body.options.assetRoot, undefined, 'The browser never invents a filesystem root; the host derives it from verified IDs')
+})
+
 test('edit selection is separate from button interaction', () => {
   const { model } = fixture()
   model.clickNode('buy-potion')

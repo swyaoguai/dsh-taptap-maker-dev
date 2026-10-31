@@ -45,6 +45,7 @@ test('opening uses the same GUI iframe route, not another port, server or extern
   const iframe = collect(tree, node => node.type === 'iframe')[0]
   assert.equal(iframe.props.src, '/api/taptap-maker-dev/ui/workbench')
   assert.match(iframe.props.sandbox, /allow-scripts/)
+  assert.match(iframe.props.sandbox, /allow-modals/, 'Authored draft-discard confirmation must work inside the same-origin iframe')
   assert.match(iframe.props.title, /UI 工作台/)
   assert.ok(collect(tree, node => node.props.role === 'dialog' && node.props['aria-modal'] === true).length)
 })
