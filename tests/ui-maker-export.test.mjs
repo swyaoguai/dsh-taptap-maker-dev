@@ -274,7 +274,7 @@ test('each review is fresh, immutable, staged within the saved workspace and tar
   for (const item of manifest.files) assert.equal(sha(fs.readFileSync(path.join(first.directory, item.path))), item.sha256)
   assert.match(fs.readFileSync(path.join(first.directory, 'usage.md'), 'utf8'), /main\.ui\.json\.meta/)
   assert.doesNotMatch(fs.readFileSync(path.join(first.directory, 'host-example.lua'), 'utf8'), /SafeAreaView\.Wrap|SetRoot\([^\n]*true|fontScale\s*=/)
-  assert.match(fs.readFileSync(path.join(first.directory, 'host-example.lua'), 'utf8'), /UI\.Theme\.SetFontScale\(1\)/)
+  assert.match(fs.readFileSync(path.join(first.directory, 'host-example.lua'), 'utf8'), /UI\.Theme\.SetFontScale\(1(?:\.0)?\)/)
   assert.deepEqual(treeFingerprint(first.directory), previous)
   assert.deepEqual(treeFingerprint(project), before)
 })
@@ -305,6 +305,10 @@ test('review paths cannot target a game project, consume another workspace asset
   const root = path.join(project, 'fixture-ui-workspaces')
   const saved = createUiWorkspace(root, { name: 'Do not export into this game', document: createDemoDocument() })
   assert.throws(() => api('createMakerReview', root, saved.workspaceId, saved.revisionId, project, OPTIONS), error => error.code === 'MAKER_STAGE_INSIDE_PROJECT')
+  assert.equal(fs.existsSync(path.join(saved.directory, 'exports')), false)
+  // A different selected target must not authorize staging into this game.
+  const unrelatedTarget = projectFixture()
+  assert.throws(() => api('createMakerReview', root, saved.workspaceId, saved.revisionId, unrelatedTarget, OPTIONS), error => error.code === 'MAKER_STAGE_INSIDE_PROJECT')
   assert.equal(fs.existsSync(path.join(saved.directory, 'exports')), false)
   const workspace = workspaceFixture(imageDocument()); const other = workspaceFixture(imageDocument())
   assert.throws(() => api('createMakerReview', workspace.root, workspace.saved.workspaceId, workspace.saved.revisionId, project, { ...OPTIONS, assetRoot: other.assetRoot }), error => error.code === 'MAKER_ASSET_WORKSPACE_MISMATCH')
@@ -371,6 +375,7 @@ widgetById['buy-potion']:EmitClick()
 assert(state.coins == 110 and state.bought == 1 and externalCalls == 1)
 assert(widgetById.coins.props.text == '金币 110')
 assert(widgetById['escaped-label'].props.text == testText, 'Lua string/control escaping differs')
+assert(widgetById['literal-label'].props.text == testText .. ' / {0} / {__} / {!literal}', 'non-IR placeholder syntax must remain literal')
 assert(#toasts == 1)
 assert(widgetById['buy-ration']:IsDisabled(), 'author disabled state must survive')
 widgetById['bag-button']:EmitClick()
@@ -389,6 +394,30 @@ widgetById['buy-potion']:EmitClick()
 assert(state.coins == 0 and #toasts == 2 and toasts[2] == '金币不足，先去冒险吧。')
 local invalid, reason = api:Dispatch('not-a-declared-action')
 assert(invalid == nil and type(reason) == 'string')
+local beforeConditions = state.bought
+for _, action in ipairs({ 'cond-eq', 'cond-ne', 'cond-gte', 'cond-gt', 'cond-lte', 'cond-lt', 'cond-eq-flag', 'cond-eq-text' }) do assert(api:Dispatch(action)) end
+assert(state.bought == beforeConditions + 8, 'all six finite comparisons plus scalar equality must work')
+local strictBefore = state.bought
+assert(api:Dispatch('cond-strict'))
+assert(state.bought == strictBefore, 'numeric state must not equal a numeric string')
+assert(api:Dispatch('set-type'))
+assert(state.coins == '5')
+assert(api:Dispatch('increment-test') == nil, 'increment must not coerce numeric strings')
+state.coins = math.huge
+assert(api:Refresh() == nil and api:Dispatch('open-bag') == nil, 'host non-finite state must not be rendered or dispatched')
+state.coins = 9007199254740992
+assert(api:Dispatch('increment-test'))
+assert(state.coins == 9007199254740992, 'Lua arithmetic must retain JS IEEE-double rounding, not silently switch to int64')
+state.coins = 0
+local atomicBefore = state.bought
+local toastBefore = #toasts
+assert(api:Dispatch('atomic-invalid') == nil, 'set numeric key to false followed by increment must fail')
+assert(state.coins == 0 and state.bought == atomicBefore, 'failed action must not partially commit any state key')
+assert(not widgetById['bag-modal']:IsVisible() and #toasts == toastBefore, 'failed action must not partially show widgets or invoke toast')
+assert(api:Dispatch('set-test'))
+assert(state.coins == 50 and state.flag == true and widgetById['bag-modal']:IsVisible(), 'set and toggle must preserve declared scalar and visibility semantics')
+assert(api:Dispatch('toggle-test'))
+assert(not widgetById['bag-modal']:IsVisible())
 assert(M.Dispatch(instance, 'close-bag'))
 api:Dispatch('open-bag')
 assert(widgetById['buy-potion']:IsDisabled())
@@ -415,12 +444,26 @@ assert(not ok, 'non-finite supplied state must be rejected')
 return true
 `
 
-test('installed Python lupa executes real Lua syntax and pure binder mocks, not native acceptance', () => {
+test('installed Python lupa Lua 5.4 executes real syntax and pure binder mocks, not native acceptance', t => {
   const document = createDemoDocument()
   const escaped = '中文 "quoted" \\ slash\nline\rreturn\tTAB\0NUL\u0001SOH\u0007BEL\u001bESC\u007fDEL'
   document.state.text = escaped
+  document.state.flag = false
   document.nodes.push({ id: 'escaped-label', type: 'label', parent: 'root', layout: { x: 0, y: 0, width: 300, height: 40 }, props: { text: escaped, fontSize: 16 } })
+  document.nodes.push({ id: 'literal-label', type: 'label', parent: 'root', layout: { x: 0, y: 40, width: 300, height: 40 }, props: { text: '', fontSize: 16 } })
   document.bindings.push({ node: 'escaped-label', property: 'text', template: '{text}' })
+  document.bindings.push({ node: 'literal-label', property: 'text', template: '{text} / {0} / {__} / {!literal}' })
+  for (const [op, value] of [['eq', 0], ['ne', 1], ['gte', 0], ['gt', -1], ['lte', 0], ['lt', 1]]) document.actions.push({ id: 'cond-' + op, when: { key: 'coins', op, value }, steps: [{ type: 'increment', key: 'bought', value: 1 }] })
+  document.actions.push(
+    { id: 'cond-eq-flag', when: { key: 'flag', op: 'eq', value: false }, steps: [{ type: 'increment', key: 'bought', value: 1 }] },
+    { id: 'cond-eq-text', when: { key: 'text', op: 'eq', value: escaped }, steps: [{ type: 'increment', key: 'bought', value: 1 }] },
+    { id: 'cond-strict', when: { key: 'coins', op: 'eq', value: '0' }, steps: [{ type: 'increment', key: 'bought', value: 1 }] },
+    { id: 'set-type', steps: [{ type: 'set', key: 'coins', value: '5' }] },
+    { id: 'increment-test', steps: [{ type: 'increment', key: 'coins', value: 1 }] },
+    { id: 'set-test', steps: [{ type: 'set', key: 'coins', value: 50 }, { type: 'set', key: 'flag', value: true }, { type: 'toggle', node: 'bag-modal' }] },
+    { id: 'toggle-test', steps: [{ type: 'toggle', node: 'bag-modal' }] },
+    { id: 'atomic-invalid', steps: [{ type: 'show', node: 'bag-modal' }, { type: 'increment', key: 'bought', value: 1 }, { type: 'toast', text: 'must not run' }, { type: 'set', key: 'coins', value: false }, { type: 'increment', key: 'coins', value: 1 }] },
+  )
   document.nodes.find(node => node.id === 'buy-ration').props.enabled = false
   assert.equal(validateUiDocument(document).ok, true)
   const lua = api('createMakerBindings', document)
@@ -430,11 +473,11 @@ test('installed Python lupa executes real Lua syntax and pure binder mocks, not 
   const dataFile = jsonNew(path.join(directory, 'data.json'), { nodes: document.nodes, text: escaped })
   const python = String.raw`import json, sys
 try:
- import lupa
+ from lupa.lua54 import LuaRuntime, LUA_VERSION
 except ImportError:
- print('LUA_NOT_TESTED: no installed Python lupa; no dependency installed')
+ print('LUA_NOT_TESTED: no installed Python lupa Lua 5.4; no dependency installed')
  sys.exit(77)
-from lupa import LuaRuntime
+assert LUA_VERSION == (5, 4)
 runtime = LuaRuntime(unpack_returned_tuples=True)
 def table(value):
  if isinstance(value, dict): return runtime.table_from({key: table(item) for key, item in value.items()})
@@ -447,11 +490,11 @@ runtime.globals().testText = data['text']
 with open(sys.argv[1], encoding='utf-8') as stream: runtime.globals().exportedModule = runtime.execute(stream.read())
 with open(sys.argv[2], encoding='utf-8') as stream: result = runtime.execute(stream.read())
 assert result is True
-print('LUA_MOCK_GREEN: ' + str(lupa.LUA_VERSION) + '; nativeVerified=false')
+print('LUA_MOCK_GREEN: ' + str(LUA_VERSION) + '; nativeVerified=false')
 `
   const result = spawnSync('python', ['-c', python, moduleFile, mockFile, dataFile], { stdio: ['ignore', 'inherit', 'inherit'] })
   if (result.error?.code === 'ENOENT' || result.status === 77) {
-    console.log('LUA_NOT_TESTED: no installed Lua runtime; generated Lua is not native-verified')
+    t.skip('LUA_NOT_TESTED: no installed Lua 5.4 runtime; generated Lua is not native-verified')
     return
   }
   assert.equal(result.error, undefined)

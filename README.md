@@ -16,6 +16,17 @@ HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录*
 
 详细规则与证据见[免费素材 skill](<skills/taptap-maker-free-assets/SKILL.md>)，只读目录见 `GET /api/taptap-maker-dev/asset-sources`。不会自动爬站、登录、下载、生成或改用户配置。如果运行实例仍是旧版，请重载插件或重启 DSH 后使用新界面；已保存的章鱼凭据独立保留，无需重填。
 
+## UI 工作台：历史 MIT 适配 · Maker-first
+
+新增原创 UI 工作台：输入框旁点 `▦ UI`，或设置页 →「UI 工作流」。提供独立 JSON 文档、静态节点编辑/交互预览、追加版本保存、受限 FairyGUI XML 导入与 Maker **隔离静态审阅包**。
+
+- 固定 [LGUI 历史 MIT 快照](<third_party/LGUI-MIT/README.md>) `e962aa3617aaad5a2fd5ddf2c80ace4bb1551240`，仅适配已核验模型算法，不移植 Unity 编辑器、不混入 current-main 或未核验依赖/素材。
+- `/taptap-ui` 与 [CLI](<src/taptap-ui.mjs>) 共用严格参数；保存以 base revision 防冲突，损坏提交不会被隐藏后退到旧版，路径/历史元数据不可信时阻断。
+- 默认 UI 版本目录在宿主 `$DSH_HOME`，不跟随游戏 cwd。导出只新建 staged 审阅包，**不改游戏、不生成 UUID、不 preview/build/submit/push、不消耗生成额度**。
+- 浏览器 primitive 预览与 Lua5.4 mock 不等于 native 验收；图片目前明确为占位显示。Cocos/Godot 为后续后端，尚未实现。
+
+完整用法、XML/图片通知、SDK/字号门禁与验证边界见 [UI 工作流指南](<docs/ui-workflow.md>)、[MIT 审计](<docs/lgui-mit-audit.md>)、[Maker 源码审计](<docs/maker-ui-source-audit.md>)。更新后需重载插件并刷新**现有 GUI**；不能另起 server 代替。没有运行构建 watcher 时不承诺自动 HMR。
+
 ## 你会得到什么
 
 | 能力 | 说明 |
@@ -31,7 +42,7 @@ HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录*
 | **音频转换** | ffmpeg 批量转格式 / 压缩 / 响度归一 / 去静音 / 淡入淡出 / 短音拼循环 |
 | **视频动作帧** | 视频模型按**首尾帧**出一段动作 → 精确时间点**抽帧** → **本地抠像**（绿/蓝/品红幕，带逐帧自检）→ 对齐合成透明序列帧 → 一键导入 Maker（`.meta` + `seq.json` + Lua 切图）。只有出视频那一步花钱，抽帧/抠像/合成可无限重调 |
 | **视频三后端** | MiniMax 官方（订阅 Key / 按量 Key 自动识别）/ **视频中转站**（OpenAI 兼容 / MiniMax 协议 / 自定义路径映射）/ **自选本地视频**（零额度）。`auto` 按可用性挑，也可按作业指定 |
-| **分组式设置页** | 十几张卡按「生成通道 / 音频素材 / 治理与工具 / 怎么用」四组收拢，顶部一条通道状态总览（绿点=现在能用），不用再在长页面里翻找 |
+| **分组式设置页** | 十几张卡按「生成通道 / 音频素材 / UI 工作流 / 治理与工具 / 怎么用」五组收拢，顶部一条通道状态总览（绿点=现在能用），不用再在长页面里翻找 |
 | **可更新 skills** | 内置游戏开发 skills + 周期更新检测；设置页可勾选禁用不需要的 |
 | **初始化引导** | 直接用中文说「帮我初始化 taptap maker」即可触发，不必记斜杠命令 |
 

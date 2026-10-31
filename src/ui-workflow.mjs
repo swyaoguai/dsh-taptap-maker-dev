@@ -30,7 +30,11 @@ export function safeUiPath(root, relative) {
   // must not redirect a reviewed asset or immutable revision to private data.
   let current = resolved
   while (true) {
-    if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) fail('UI_PATH', 'UI 路径包含符号链接或目录联接；请使用明确的真实路径。')
+    // exists follows the link and returns false for a dangling target. lstat
+    // still sees the link itself, so missing targets cannot bypass this guard.
+    let stat
+    try { stat = fs.lstatSync(current) } catch (error) { if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error }
+    if (stat?.isSymbolicLink()) fail('UI_PATH', 'UI 路径包含符号链接或目录联接；请使用明确的真实路径。')
     const parent = path.dirname(current)
     if (parent === current) break
     current = parent
@@ -61,30 +65,67 @@ export function writeUiFileExclusive(root, relative, contents) {
   } finally { if (fd !== undefined) fs.closeSync(fd) }
   return file
 }
-function revisionInfo(directory, revisionId) {
+function revisionRecord(directory, revisionId) {
+  try {
+    const record = readUiJson(safeUiPath(directory, `revisions/${revisionId}/revision.json`), 16_384)
+    const allowed = ['revisionId', 'baseRevision', 'sha256', 'createdAt', 'name']
+    if (!record || Array.isArray(record) || Object.keys(record).some(key => !allowed.includes(key)) || record.revisionId !== revisionId || typeof record.sha256 !== 'string' || !/^[a-f\d]{64}$/.test(record.sha256) || (record.baseRevision !== null && (typeof record.baseRevision !== 'string' || !SAFE_ID.test(record.baseRevision))) || typeof record.createdAt !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(record.createdAt) || !Number.isFinite(Date.parse(record.createdAt)) || typeof record.name !== 'string' || !record.name.trim() || record.name.length > 120) fail('UI_INTEGRITY', 'UI revision 提交记录字段不符。')
+    return { revisionId, baseRevision: record.baseRevision, sha256: record.sha256, createdAt: record.createdAt, name: record.name }
+  } catch (error) {
+    fail('UI_INTEGRITY', '已存在的 revision 提交记录损坏；不会隐藏它并回退旧版。', { revisionId, cause: error.code ?? 'UI_JSON' })
+  }
+}
+function revisionInfo(directory, revisionId, record) {
   if (typeof revisionId !== 'string' || !SAFE_ID.test(revisionId)) fail('UI_PATH', '无效的 UI revision ID。')
-  const relative = `revisions/${revisionId}`
-  const record = readUiJson(safeUiPath(directory, `${relative}/revision.json`))
-  if (record.revisionId !== revisionId || !/^[a-f\d]{64}$/.test(record.sha256)) fail('UI_INTEGRITY', 'UI revision 提交记录无效。')
-  const file = safeUiPath(directory, `${relative}/document.json`)
-  const bytes = fs.readFileSync(file)
-  if (bytes.length > UI_LIMITS.bytes || digest(bytes) !== record.sha256) fail('UI_INTEGRITY', '已保存 UI 文档哈希不符，未覆盖或自动修复。', { file, revisionId })
-  const document = readUiJson(file)
-  assertUiDocument(document)
-  return { ...record, file, document }
+  if (!record) fail('UI_REVISION_MISSING', '请求的 UI revision 没有完整提交。', { revisionId })
+  try {
+    const file = safeUiPath(directory, `revisions/${revisionId}/document.json`)
+    const stat = fs.lstatSync(file)
+    if (!stat.isFile() || stat.size > UI_LIMITS.bytes) fail('UI_INTEGRITY', '文档不是大小受限的普通文件。')
+    const bytes = fs.readFileSync(file)
+    if (bytes.length > UI_LIMITS.bytes || digest(bytes) !== record.sha256) fail('UI_INTEGRITY', '已保存 UI 文档哈希不符。')
+    const document = readUiJson(file)
+    assertUiDocument(document)
+    if (document.name !== record.name) fail('UI_INTEGRITY', '提交记录名称与文档不符。')
+    return { ...record, file, document }
+  } catch (error) {
+    fail('UI_INTEGRITY', '已提交的 UI 文档损坏，未覆盖、自动修复或静默回退。', { revisionId, cause: error.code ?? 'UI_DOCUMENT' })
+  }
 }
 function revisionIds(directory) {
   const revisions = safeUiPath(directory, 'revisions')
   if (!fs.existsSync(revisions)) return []
-  return fs.readdirSync(revisions, { withFileTypes: true }).filter(entry => entry.isDirectory() && SAFE_ID.test(entry.name)).map(entry => entry.name).sort()
+  const entries = fs.readdirSync(revisions, { withFileTypes: true })
+  if (entries.some(entry => SAFE_ID.test(entry.name) && entry.isSymbolicLink())) fail('UI_INTEGRITY', 'Revision 目录含链接，不能忽略并回退旧版。')
+  return entries.filter(entry => entry.isDirectory() && SAFE_ID.test(entry.name)).map(entry => entry.name).sort()
 }
-function latestRevision(directory) {
-  const ids = revisionIds(directory)
-  const failures = []
-  for (const id of ids.reverse()) {
-    try { return { ...revisionInfo(directory, id), incompleteRevisions: failures } } catch (error) { failures.push({ revisionId: id, code: error.code ?? 'UI_INCOMPLETE' }) }
+function committedHistory(directory) {
+  const records = new Map(); const incompleteRevisions = []
+  for (const id of revisionIds(directory)) {
+    const marker = safeUiPath(directory, `revisions/${id}/revision.json`)
+    // Only absence of a commit marker denotes an unfinished write. Anything
+    // that HAS committed metadata must fail closed, including bad JSON/SHA.
+    if (!fs.existsSync(marker)) { incompleteRevisions.push({ revisionId: id, code: 'UI_INCOMPLETE' }); continue }
+    records.set(id, revisionRecord(directory, id))
   }
-  fail('UI_INCOMPLETE', '工作区没有完整提交的 UI revision；已有中间文件原样保留。', { incompleteRevisions: failures })
+  if (!records.size) fail('UI_INCOMPLETE', '工作区没有完整提交的 UI revision；中间文件原样保留。', { incompleteRevisions })
+  const roots = [...records.values()].filter(record => record.baseRevision === null)
+  if (roots.length !== 1) fail('UI_INTEGRITY', 'Revision 历史必须有唯一根版本。')
+  const next = new Map()
+  for (const record of records.values()) {
+    if (record.baseRevision === null) continue
+    if (!records.has(record.baseRevision) || record.baseRevision === record.revisionId || next.has(record.baseRevision)) fail('UI_INTEGRITY', 'Revision 历史含缺失父版本、自环或重复消费父版本的分叉。')
+    next.set(record.baseRevision, record.revisionId)
+  }
+  let latest = roots[0].revisionId; const visited = new Set()
+  while (true) {
+    if (visited.has(latest)) fail('UI_INTEGRITY', 'Revision 历史存在环。')
+    visited.add(latest)
+    if (!next.has(latest)) break
+    latest = next.get(latest)
+  }
+  if (visited.size !== records.size) fail('UI_INTEGRITY', 'Revision 历史存在孤链或环；不按文件名猜 latest。')
+  return { records, latest, incompleteRevisions }
 }
 function appendRevision(directory, document, baseRevision = null) {
   const revisionId = newId('rev')
@@ -112,8 +153,10 @@ export function readUiWorkspace(root, workspaceId, revisionId) {
   const directory = workspaceDirectory(root, workspaceId)
   const workspace = readUiJson(safeUiPath(directory, 'workspace.json'))
   if (workspace.format !== 'taptap-ui-workspace' || workspace.version !== 1 || workspace.workspaceId !== workspaceId) fail('UI_INTEGRITY', 'UI 工作区记录不符。')
-  const revision = revisionId ? revisionInfo(directory, revisionId) : latestRevision(directory)
-  return { workspaceId, directory, workspace, ...revision }
+  const history = committedHistory(directory)
+  const selected = revisionId ?? history.latest
+  const revision = revisionInfo(directory, selected, history.records.get(selected))
+  return { workspaceId, workspace, ...revision, incompleteRevisions: history.incompleteRevisions, directory }
 }
 export function saveUiRevision(root, workspaceId, document, { baseRevision } = {}) {
   assertUiDocument(document)

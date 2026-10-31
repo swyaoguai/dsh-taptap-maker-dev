@@ -693,12 +693,13 @@ def handle(route):
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
-    context = browser.new_context(viewport={'width': 1512, 'height': 920}, color_scheme='dark', reduced_motion='reduce')
+    context = browser.new_context(viewport={'width': 1512, 'height': 920}, color_scheme='dark', reduced_motion='reduce', record_video_dir=str(artifacts / 'videos'), record_video_size={'width': 1512, 'height': 920})
     context.tracing.start(screenshots=True, snapshots=True)
     page = context.new_page(); page.route('**/*', handle)
     errors = []; page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(base + api + '/workbench')
     page.locator('[data-ui-id="buy-potion"]').wait_for()
+    page.screenshot(path=str(artifacts / 'desktop-original.png'), full_page=True)
     assert not posts, 'Boot must not save or export'
     assert page.locator('#maker-project').input_value() == ''
     assert page.locator('#font-size-method').input_value() == ''

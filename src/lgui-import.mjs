@@ -180,6 +180,9 @@ function graphProps(attrs) {
 function simpleComponent(component) {
   for (const key of Object.keys(component.root.attrs)) if (!['size', 'extention', 'extension'].includes(key)) unsupported(`组件根属性 ${key} 尚未映射。`)
   for (const child of component.root.children) if (!['displayList', 'Button'].includes(child.tag)) unsupported(`组件 ${child.tag} 尚未映射；控制器/关系/动效不会被静默扁平化。`)
+  const buttonConfig = component.root.children.filter(child => child.tag === 'Button')
+  if (buttonConfig.length > 1 || (buttonConfig.length && component.extension !== 'Button')) unsupported('Button 配置必须属于唯一 Button 扩展，不能忽略多份或普通根配置。')
+  for (const child of buttonConfig) if (child.children.length || Object.keys(child.attrs).some(key => key !== 'mode')) unsupported('Button 下压效果、声音、控制器与其它定义属性尚未映射。')
   if (component.controllers.length || component.transitions.length) unsupported('首版不自动展开 controller / transition。')
 }
 
@@ -248,10 +251,15 @@ export function importLguiComponent(fairyPath, fullName, options = {}) {
       for (const child of [...labels, ...graphs]) {
         attributes(child, child.tag === 'text' ? TEXT_ATTRIBUTES : GRAPH_ATTRIBUTES)
         if (child.children.length) unsupported('Button relation/gear 尚未映射。')
+        if (child.attrs.visible !== undefined && child.attrs.visible !== 'true') unsupported('Button 子图层隐藏不能合并为整个 Button 隐藏。')
+        if (child.attrs.alpha !== undefined && number(child.attrs.alpha, 1, 'alpha') !== 1) unsupported('Button 文字/背景的独立 alpha 尚未映射；不能套到整个 Button。')
         const box = bounds(child.attrs)
         if (box.x !== 0 || box.y !== 0 || box.width !== layout.width || box.height !== layout.height) unsupported('Button 子布局不是全尺寸，不能假装中心文字原样兼容。')
       }
       const props = { ...textProps(labels[0].attrs), align: labels[0].attrs.align ?? 'center', backgroundColor: '#00000000', borderWidth: 0, borderRadius: 0, ...(graphs[0] ? graphProps(graphs[0].attrs) : {}), ...common(node.attrs) }
+      // Child hit-testing is not the component's author disabled state. Only
+      // the Button INSTANCE may control enabled/visible/opacity as a whole.
+      for (const key of ['enabled', 'visible', 'opacity']) { delete props[key]; const value = common(node.attrs)[key]; if (value !== undefined) props[key] = value }
       if (props.align !== 'center') unsupported('首版 Button 只支持 center，与目标真实 Button 绘制对齐。')
       for (const override of node.children) {
         if (override.tag !== 'Button' || Object.keys(override.attrs).some(key => key !== 'title') || override.children.length) unsupported('Button 实例仅支持 title 文字覆盖。')

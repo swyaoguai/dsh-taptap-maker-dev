@@ -28,13 +28,15 @@ def decode(text: str) -> dict:
         raise XmlBridgeError("UI_XML_LIMIT", "XML 大小超过 1 MB 预算。")
     if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", text, re.IGNORECASE):
         raise XmlBridgeError("UI_XML_DTD", "XML 不允许 DTD 或实体声明。")
-    parser = ET.XMLPullParser(events=("start", "end"))
+    parser = ET.XMLPullParser(events=("start", "end", "start-ns"))
     root = None
     count = 0
     depth = 0
     for start in range(0, len(text), 16384):
         parser.feed(text[start : start + 16384])
         for event, element in parser.read_events():
+            if event == "start-ns":
+                raise XmlBridgeError("UI_XML_SCHEMA", "首版不支持 XML 命名空间声明，包括未使用或空声明。")
             if event == "end":
                 depth -= 1
                 continue

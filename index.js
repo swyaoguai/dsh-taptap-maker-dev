@@ -54,6 +54,8 @@ import { FREE_ASSET_SOURCES } from './src/free-asset-sources.mjs'
 import { guardUserSetting, guardrailLines, hasApproval, requireApproval } from './src/guards.mjs'
 import { killProcessesContaining } from './src/win-proc.mjs'
 import { startBackgroundCheck, currentVersion, checkForUpdates, readCachedCheck, shouldCheck } from './src/version-checker.mjs'
+import { createUiHttpHandler } from './src/ui-http.mjs'
+import { handleUiSlashInput } from './src/ui-command.mjs'
 
 // API 层的短别名：路由函数里反复写 readLanes/writeLanes 太长，且和已有的
 // read*FromApi 风格不一致。
@@ -916,6 +918,7 @@ export function apply(ctx, config = {}) {
       }
       return `${base} ${Date.now()}${ext}`
     }
+    const uiHandler = createUiHttpHandler({ root: path.join(dataDir(home), 'ui-workspaces'), logger: scoped.logger ?? ctx.logger })
     const handler = async (req, res) => {
       try {
         // Uniform 413 for oversized uploads (every route posts a tiny JSON
@@ -930,6 +933,7 @@ export function apply(ctx, config = {}) {
         }
         const url = new URL(req.url, 'http://localhost')
         const sub = url.pathname.replace(/^\/api\/taptap-maker-dev\/?/, '').replace(/\/+$/, '')
+        if (sub === 'ui' || sub.startsWith('ui/')) return uiHandler(req, res)
         if (req.method === 'GET' && (sub === 'skills' || sub === '')) {
           const skills = buildSkillProvider().listAll()
           return sendJson(res, 200, { ok: true, skills, disabled: readDisabledSkills(home) })
@@ -1873,6 +1877,12 @@ export function apply(ctx, config = {}) {
 
   // --- 3. Slash commands --------------------------------------------------
   ctx.inject(['commands'], (scoped) => {
+    scoped.commands.register({
+      name: 'taptap-ui',
+      description: 'UI 工作台：规范 JSON / 历史 MIT FairyGUI 受限导入、版本保存、Maker 隔离审阅包（零生成额度）',
+      input: { hint: 'workbench / demo / list / check / import-xml / plan / export；不会导入游戏或build/push' },
+      handler: invocation => handleUiSlashInput(invocation?.rawInput ?? '', { root: path.join(dataDir(home), 'ui-workspaces') }),
+    })
     scoped.commands.register({
       name: 'taptap-setup',
       description: 'TapTap Maker MCP 安装与项目初始化引导（也可直接用中文说“帮我初始化 taptap maker”触发）',

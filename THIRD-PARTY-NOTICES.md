@@ -1,6 +1,6 @@
 # 第三方开源致谢与许可
 
-本插件整合了部分第三方开源项目的**方法论、判据与规范**，以及两个**作为服务脚本
+本插件整合了部分第三方开源项目的**方法论、判据与规范**、下述明确标注的**历史 MIT 模型算法**，以及两个**作为服务脚本
 原样分发**的第三方 skill（见下文 zaiduyu-imagegen 与 Stable Audio Open）。
 感谢这些项目的作者公开他们的工作，让本地游戏开发工具链能少走弯路。
 
@@ -13,6 +13,16 @@
 - 重写为中文并适配本项目语境，而非逐字复制；因此本仓库对这些内容自负文责。
 
 ---
+
+## LGUI 历史 MIT 模型适配（LumioGames）
+
+- 来源：[LGUI](https://github.com/LumioGames/LGUI)，**固定**提交 `e962aa3617aaad5a2fd5ddf2c80ace4bb1551240`、tree `5ecb71203c95e5fbf90a66d324457bbfa39d9623`。
+- 许可证：该提交的 **MIT**，Copyright (c) 2026 LumioGames。此处许可只适用于逐项核验并保留的历史文件，不推定 current-main、示例图片、依赖或其它上游代码可用。
+- 原样隔离分发：[顶层 LICENSE](<third_party/LGUI-MIT/LICENSE>)、[plugin LICENSE](<third_party/LGUI-MIT/plugin/LICENSE>)、[原始 model](<third_party/LGUI-MIT/plugin/tools/lib/generate/model.mjs>)、[errors](<third_party/LGUI-MIT/plugin/tools/lib/errors.mjs>)；完整许可文本、出处及 SHA256 随 npm 包保留，禁自动升级该 vendor。
+- 修改：[适配 model](<src/lgui-model-adapter.mjs>) 明示原版权/MIT 全文与修改说明。保留模型/引用算法，替换原 XML 读取依赖为注入的受限 stdlib 解码，不分发 `fast-xml-parser` 或其未核验的传递依赖。原 vendor 不修改。
+- 工作台、独立 IR、HTTP/CLI、Maker JSON/Lua 发射是本插件的适配层，不是复制 Unity 编辑器/素材；其它引擎和实际图片均须独立授权/验收。
+- 证据：[审计](<docs/lgui-mit-audit.md>)、[vendor 来源与清单](<third_party/LGUI-MIT/README.md>)、[Maker 实际源码契约](<docs/maker-ui-source-audit.md>)。
+- 上游后续改为带竞争限制的 PolyForm Shield/Additional Permission；本插件不合并后续源码。分发适配及 vendor 时保留上述 notice/许可证。这里不是对上游整个项目的泛化授权或法律保证。
 
 ## zaiduyu-imagegen（章鱼多模型生图 skill）
 

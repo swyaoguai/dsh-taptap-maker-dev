@@ -318,6 +318,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
       if (!data.localValidation.ok) blockers.push(...data.localValidation.errors)
       if (blockers.length) { data.plan = { ok: true, ready: false, blockers, warnings: [], origin: 'browser-prerequisites' }; planSignature = null; notice('预检 blocked：尚未满足明确的目标与字号选择。'); emit(); return false }
       const key = documentKey(); const payload = { document: clone(data.document), projectDirectory: data.target.projectDirectory.trim(), options: { fontSizeMethod: data.target.fontSizeMethod, fontScale: 1 } }
+      if (safeId(data.workspaceId) && safeId(data.revisionId)) { payload.workspaceId = data.workspaceId; payload.revisionId = data.revisionId }
       return perform('plan', async () => {
         const result = success(await api.request('/plan', { method: 'POST', body: payload }))
         if (key !== documentKey()) throw new UiWorkbenchError('UI_DRAFT_CHANGED', '预检期间草稿、保存版本或目标已改变；过期预检未应用。')
