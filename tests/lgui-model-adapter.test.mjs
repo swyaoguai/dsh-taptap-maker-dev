@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import { validateUiDocument } from '../src/ui-document.mjs'
 
 const moduleUrl = new URL('../src/lgui-import.mjs', import.meta.url)
@@ -42,6 +43,33 @@ test('DTD, entities, namespaces, deep and oversized XML fail closed', () => {
   for (const text of ['<!DOCTYPE component [<!ENTITY a "x">]><component/>', '<!ENTITY a SYSTEM "file:///secret"><component/>', '<x:component xmlns:x="urn:test"/>', '<component>', '<component>' + '<a>'.repeat(40) + '</a>'.repeat(40) + '</component>', '<component text="' + 'x'.repeat(1_100_000) + '"/>']) {
     assert.throws(() => call('decodeLguiXml', text), error => /^UI_XML/.test(error.code))
   }
+})
+
+test('unused and empty namespace declarations are rejected, not silently discarded', () => {
+  for (const xml of ['<component xmlns:x="urn:test"/>', '<component xmlns=""/>']) assert.throws(() => call('decodeLguiXml', xml), error => error.code === 'UI_XML_SCHEMA')
+})
+
+test('Common Button configuration and per-child visibility/alpha are not silently lost', () => {
+  for (const change of ['mode="Common" downEffect="scale"', 'mode="Common" sound="ui://secret"', 'mode="Common"><unknown/></Button><Button mode="Common"']) {
+    const files = fixture({ button: `<component size="120,44" extention="Button"><Button ${change}/><displayList><text id="title" xy="0,0" size="120,44" text="购买" fontSize="18" align="center"/></displayList></component>` })
+    assert.throws(() => call('importLguiComponent', files.fairy, 'Camp/Shop'), error => error.code === 'UI_IMPORT_UNSUPPORTED' || error.code === 'UI_XML_SYNTAX')
+  }
+  for (const prop of ['alpha="0.5"', 'visible="false"']) {
+    const files = fixture({ button: `<component size="120,44" extention="Button"><Button mode="Common"/><displayList><text id="title" xy="0,0" size="120,44" text="购买" fontSize="18" align="center" ${prop}/></displayList></component>` })
+    assert.throws(() => call('importLguiComponent', files.fairy, 'Camp/Shop'), error => error.code === 'UI_IMPORT_UNSUPPORTED')
+  }
+})
+
+test('a reviewed self-authored image projects to valid stretch IR and retains source hash', () => {
+  const bytes = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+j9E0AAAAASUVORK5CYII=', 'base64')
+  const files = fixture({ descriptor: '<packageDescription id="PKG00001"><resources><component id="MAIN0001" name="Shop.xml" path="/" exported="true"/><image id="ICON0001" name="icon.png" path="/"/></resources></packageDescription>', main: '<component size="640,360"><displayList><image id="icon" src="ICON0001" xy="10,20" size="40,40"/></displayList></component>' })
+  fs.writeFileSync(path.join(files.directory, 'icon.png'), bytes, { flag: 'wx' })
+  const sha256 = crypto.createHash('sha256').update(bytes).digest('hex')
+  const result = call('importLguiComponent', files.fairy, 'Camp/Shop', { assetRights: { 'PKG00001/ICON0001': { sha256, license: { kind: 'own', author: 'Fixture author', source: 'self-authored fixture', verifiedAt: '2026-10-31T00:00:00Z' } } } })
+  assert.equal(validateUiDocument(result.document).ok, true)
+  assert.equal(result.document.nodes.find(node => node.type === 'image').props.imageFit, 'stretch')
+  assert.equal(result.document.assets[0].sha256, sha256)
+  assert.equal(result.assetsToCopy[0].file, path.join(files.directory, 'icon.png'))
 })
 
 test('the adapted historical model keeps packages, Maps, extensions and refs', () => {
