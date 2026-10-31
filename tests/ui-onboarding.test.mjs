@@ -73,6 +73,16 @@ test('unavailable or blocked storage cannot prevent using or skipping the guide'
     assert.equal(guide.getState().remembered, false)
   }
 })
+test('a failed replay preference write preserves an already remembered completion', () => {
+  const { storage, entries } = storageFixture('completed')
+  const guide = create({ storage })
+  guide.start()
+  storage.setItem = () => { throw new Error('quota after replay') }
+  guide.skip()
+  assert.equal(entries.get(workbench.ONBOARDING_KEY), 'completed')
+  assert.equal(guide.getState().remembered, true, 'Existing preference still hides the guide on next launch')
+  assert.equal(create({ storage }).getState().visible, false)
+})
 test('guide subscriptions unsubscribe exactly and steps target real workbench controls', () => {
   const guide = create({ storage: storageFixture().storage }); const states = []
   const stop = guide.subscribe(state => states.push(state))

@@ -332,6 +332,29 @@ test('a workspace response never silently replaces edits made during its read', 
   assert.equal(model.getState().workspaceId, null)
   assert.match(model.getState().error, /草稿|改变|过期/)
 })
+test('a delayed workspace listing cannot hide a workspace created while the GET was pending', async () => {
+  const listing = deferred()
+  const { model, calls } = fixture({ handler: call => call.method === 'GET' ? listing.promise : saved(call.body.document) })
+  const refreshing = model.refreshWorkspaces()
+  assert.equal(await model.save(), true)
+  const remembered = model.getState().workspaces
+  assert.equal(remembered[0].workspaceId, 'ui-a')
+  listing.resolve({ ok: true, workspaces: [] })
+  assert.equal(await refreshing, false, 'An older listing must be reported as stale, not replace the newer local result')
+  assert.deepEqual(model.getState().workspaces, remembered)
+  assert.equal(model.getState().revisionId, 'rev-a')
+  assert.equal(calls.length, 2, 'No implicit retry, save or refresh')
+})
+test('a delayed workspace listing cannot replace the revision just loaded with an older list entry', async () => {
+  const listing = deferred()
+  const { model } = fixture({ handler: call => call.path === '/workspaces' ? listing.promise : saved(demo(), 'ui-a', 'rev-new') })
+  const refreshing = model.refreshWorkspaces()
+  assert.equal(await model.loadWorkspace('ui-a'), true)
+  listing.resolve({ ok: true, workspaces: [{ workspaceId: 'ui-a', revisionId: 'rev-old', name: '旧列表' }] })
+  assert.equal(await refreshing, false)
+  assert.equal(model.getState().workspaces[0].revisionId, 'rev-new')
+  assert.equal(model.getState().dirty, false)
+})
 test('malformed and failed workspace responses retain the current draft', async () => {
   for (const response of [{ ok: true, workspaceId: 'ui-a', revisionId: 'rev-a', document: {} }, { ok: false, error: '不可读取' }]) {
     const { model } = fixture({ handler: () => response })
@@ -516,6 +539,16 @@ test('custom modal renderer blocks background, traps Tab, handles Escape and res
   assert.equal(dom.activeElement.dataset.uiId, 'bag-button')
 })
 
+test('closing a preview modal does not steal focus already moved to external workbench controls', () => {
+  const { model } = fixture(); model.setMode('interact')
+  const callbacks = { onAction: id => model.clickNode(id), onDismissModal: () => model.closeModal() }
+  const { host, dom } = render(model.getState(), callbacks)
+  byId(host, 'bag-button').focus(); model.clickNode('bag-button'); render(model.getState(), callbacks, host)
+  const external = dom.createElement('button'); dom.body.append(external); external.focus()
+  model.closeModal(); render(model.getState(), callbacks, host)
+  assert.ok(dom.activeElement === external, 'A modal cannot reclaim focus from the guide or property editor')
+})
+
 // Mount integration uses an explicitly limited DOM adapter, with no filesystem
 // or network writes. Real CSS/DOM visual evidence remains the browser test.
 async function mountFixture() {
@@ -563,6 +596,63 @@ async function mountFixture() {
   await new Promise(resolve => setImmediate(resolve))
   return { ...mounted, root, dom, browser, calls, timers, media, get: id => dom.getElementById(id), settle: () => new Promise(resolve => setImmediate(resolve)) }
 }
+test('numeric and style input events protect a clean saved document before change or blur', async () => {
+  for (const [id, value, property, expected] of [['property-x', '70', 'x', 70], ['property-width', '700', 'width', 700], ['property-color', '#AACCEE', 'color', '#AACCEE']]) {
+    const context = await mountFixture(); const { model, get } = context
+    await model.loadWorkspace('ui-a')
+    get(id).focus(); get(id).value = value; get(id).dispatch('input')
+    const edited = node(model, 'title')
+    assert.equal(property === 'color' ? edited.props.color : edited.layout[property], expected, id)
+    assert.equal(model.getState().dirty, true)
+    assert.equal(get('draft-status').dataset.dirty, 'true')
+    context.dispose()
+  }
+})
+test('invalid pending input is visible as an unsaved draft before change or blur', async () => {
+  const context = await mountFixture(); const { model, get } = context
+  await model.loadWorkspace('ui-a')
+  const before = model.getState().document
+  get('property-width').focus(); get('property-width').value = ''; get('property-width').dispatch('input')
+  assert.equal(get('property-width').getAttribute('aria-invalid'), 'true')
+  assert.equal(get('draft-status').dataset.dirty, 'true')
+  assert.deepEqual(model.getState().document, before, 'Invalid fields never leak into the IR')
+  context.dispose()
+})
+test('invalid visible fields cannot silently save the previous valid value and can recover', async () => {
+  const context = await mountFixture(); const { model, get, calls, settle } = context
+  model.selectNode('title'); model.updateNode('title', { text: '合法但尚未保存的草稿' })
+  get('property-color').focus(); get('property-color').value = 'not-a-color'; get('property-color').dispatch('change')
+  assert.equal(get('property-color').getAttribute('aria-invalid'), 'true')
+  const writes = calls.filter(call => call.method === 'POST').length
+  get('save-workspace').click(); await settle()
+  assert.equal(calls.filter(call => call.method === 'POST').length, writes, 'Do not persist stale model values behind an invalid visible field')
+  assert.equal(model.getState().dirty, true)
+  get('property-color').value = '#AACCEE'; get('property-color').dispatch('input')
+  get('save-workspace').click(); await settle()
+  assert.equal(calls.filter(call => call.method === 'POST').length, writes + 1)
+  assert.equal(model.getState().dirty, false)
+  context.dispose()
+})
+test('a recovered guide preference clears an obsolete blocked-storage message', async () => {
+  const context = await mountFixture(); const { get, dom, browser } = context
+  context.dispose()
+  let blocked = true
+  browser.localStorage = { getItem: () => null, setItem() { if (blocked) throw new Error('quota') } }
+  const mounted = feature('mountWorkbench', { root: context.root, ui, browser, dom, fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ok: true, workspaces: [] }) }) })
+  get('guide-skip').click(); assert.equal(get('guide-memory-note').hidden, false)
+  blocked = false
+  get('show-guide').click(); get('guide-skip').click()
+  assert.equal(get('guide-memory-note').hidden, true)
+  assert.equal(get('guide-memory-note').textContent, '')
+  mounted.dispose()
+})
+test('going back to the first guide step transfers focus before disabling the Back control', async () => {
+  const context = await mountFixture(); const { get, dom } = context
+  get('guide-next').click(); get('guide-back').focus(); get('guide-back').click()
+  assert.equal(get('guide-back').disabled, true)
+  assert.ok(dom.activeElement === get('guide-next'), 'Disabled Back must leave focus on Next')
+  context.dispose()
+})
 test('mounted controls bind all property inputs, local file IO, readiness layers and explicit write actions', async () => {
   const context = await mountFixture(); const { model, get, calls, dom, browser, settle } = context
   assert.equal(calls.length, 2); assert.equal(get('export-review').disabled, true)
@@ -630,6 +720,34 @@ test('same-origin iframe theme reads a paired dark/light parent and never change
   parent.getComputedStyle = () => ({ backgroundColor: 'rgb(21, 27, 29)', color: 'rgb(226, 236, 232)', colorScheme: 'dark', getPropertyValue: () => '' })
   callbacks[0](); assert.equal(dom.documentElement.dataset.theme, 'dark'); assert.equal(dom.documentElement.style['--dsh-accent'], undefined)
   stop(); assert.equal(disconnected, true)
+})
+test('theme observers track exactly the iframe ancestor sources they read, including reparenting', () => {
+  const dom = new Dom(); const parentDom = new Dom(); const browser = new Element('window', dom)
+  const media = new Element('media', dom); media.matches = true; browser.matchMedia = () => media
+  browser.parent = { document: parentDom, getComputedStyle: () => ({ colorScheme: 'normal' }) }
+  const wrapper = { dataset: { theme: 'light' }, parentElement: parentDom.body }
+  const frame = { dataset: {}, parentElement: wrapper }; browser.frameElement = frame
+  let observer
+  browser.MutationObserver = class {
+    constructor(callback) { this.callback = callback; this.targets = new Map(); this.disconnects = 0; observer = this }
+    observe(target, options) { this.targets.set(target, options) }
+    disconnect() { this.targets.clear(); this.disconnects++ }
+  }
+  const stop = feature('connectHostTheme', browser, dom)
+  assert.equal(dom.documentElement.dataset.theme, 'light')
+  wrapper.dataset.theme = 'dark'
+  if (observer.targets.has(wrapper)) observer.callback([{ target: wrapper, type: 'attributes' }])
+  assert.equal(dom.documentElement.dataset.theme, 'dark', 'A changed wrapper must synchronize without an unrelated body mutation')
+  const moved = { dataset: { theme: 'light' }, parentElement: parentDom.body }
+  frame.parentElement = moved
+  if (observer.targets.get(wrapper)?.childList) observer.callback([{ target: wrapper, type: 'childList' }])
+  assert.equal(dom.documentElement.dataset.theme, 'light')
+  assert.equal(observer.targets.has(moved), true)
+  assert.equal(observer.targets.has(wrapper), false, 'Detached theme ancestors must not retain observers')
+  const theme = dom.documentElement.dataset.theme
+  stop(); assert.equal(observer.targets.size, 0)
+  observer.callback([]); assert.equal(observer.targets.size, 0, 'Queued mutations cannot reconnect after disposal')
+  assert.equal(dom.documentElement.dataset.theme, theme)
 })
 test('bootstrap safely handles an absent root or unavailable host document route without writing', async () => {
   const dom = new Dom(); const browser = new Element('window', dom)
