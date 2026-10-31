@@ -27,8 +27,7 @@ export function createOnboardingGuide({ storage } = {}) {
   const emit = () => { for (const listener of listeners) listener(getState()) }
   function finish(value) {
     if (!visible) return false
-    remembered = false
-    try { if (storage?.setItem) { storage.setItem(ONBOARDING_KEY, value); remembered = true } } catch { /* preference failure never blocks the workbench */ }
+    try { if (storage?.setItem) { storage.setItem(ONBOARDING_KEY, value); remembered = true } } catch { /* a previous remembered preference remains valid */ }
     visible = false; emit(); return true
   }
   return {
@@ -42,6 +41,8 @@ export function createOnboardingGuide({ storage } = {}) {
   }
 }
 
+const PROPERTY_INPUT_IDS = Object.freeze(['property-text', 'property-x', 'property-y', 'property-width', 'property-height', 'property-font-size', 'property-color', 'property-background', 'property-visible'])
+const INPUT_IDS = new Set(['document-name', 'maker-project', 'font-size-method', ...PROPERTY_INPUT_IDS])
 const ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/
 const forbiddenIds = new Set(['constructor', 'prototype', '__proto__'])
 const clone = value => structuredClone(value)
@@ -155,8 +156,8 @@ function globalPosition(node, byId) {
 /** The controller owns authored drafts separately from disposable preview state. */
 export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) {
   const document = ui.createDemoDocument(); requireDocument(document, ui)
-  const listeners = new Set(); const pending = new Set()
-  let savedSignature = null; let draftEpoch = 0; let planSignature = null
+  const listeners = new Set(); const pending = new Set(); const invalidInputs = new Set()
+  let savedSignature = null; let draftEpoch = 0; let planSignature = null; let workspaceEpoch = 0
   const data = {
     document, dirty: true, workspaceId: null, revisionId: null, directory: null,
     selectedId: document.nodes.find(node => node.type === 'label')?.id ?? document.nodes[0].id,
@@ -166,7 +167,10 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
     plan: null, report: null, exported: null, error: '', conflict: false,
     notice: '先编辑或切到交互体验 CAMP。未保存样例不会自动落盘。', noticeKind: 'info',
   }
-  const snapshot = () => clone({ ...data, busy: [...pending] })
+  // Unapplied inspector values stay UI-only, but still count as an unsaved
+  // draft for close/beforeunload and block serializing an older valid value.
+  const hasDraft = () => data.dirty || invalidInputs.size > 0
+  const snapshot = () => clone({ ...data, dirty: hasDraft(), invalidInputs: [...invalidInputs], busy: [...pending] })
   const emit = () => { if (listeners.size) { const state = snapshot(); for (const listener of listeners) listener(state) } }
   const notice = (text, kind = 'info') => { data.notice = text; data.noticeKind = kind }
   const fail = error => { data.error = errorText(error); emit(); return false }
@@ -176,11 +180,11 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
   const dirty = () => { data.dirty = savedSignature !== signature(data.document) }
   const canReplace = verb => {
     if (writeBusy()) return fail(new Error('保存 / 导出请求尚未结束；当前草稿已保留，请等待确认结果。'))
-    if (!data.dirty) return true
-    try { return confirmDiscard(`当前草稿尚未保存。${verb}将替换当前草稿，是否继续？\n可以先点击「本地 JSON 下载」保留副本。`) === true } catch { return false }
+    if (!hasDraft()) return true
+    try { return confirmDiscard(`当前草稿尚未保存。${verb}将替换当前草稿，是否继续？\n请先修正标红输入，再点击「本地 JSON 下载」保留副本。`) === true } catch { return false }
   }
   function replaceDocument(next, info = {}) {
-    data.document = clone(next); draftEpoch += 1
+    data.document = clone(next); draftEpoch += 1; invalidInputs.clear()
     data.workspaceId = info.workspaceId ?? null; data.revisionId = info.revisionId ?? null; data.directory = info.directory ?? null
     savedSignature = data.workspaceId && data.revisionId ? signature(next) : null
     dirty(); data.localValidation = ui.validateUiDocument(next)
@@ -207,7 +211,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
   }
   function rememberWorkspace(result, savedDocument) {
     const item = { workspaceId: result.workspaceId, revisionId: result.revisionId, name: savedDocument.name, directory: result.directory, nodeCount: savedDocument.nodes.length, assetCount: savedDocument.assets.length }
-    data.workspaces = [item, ...data.workspaces.filter(workspace => workspace.workspaceId !== result.workspaceId)]
+    data.workspaces = [item, ...data.workspaces.filter(workspace => workspace.workspaceId !== result.workspaceId)]; workspaceEpoch++
   }
   const model = {
     getState: snapshot,
@@ -220,15 +224,28 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
     },
     async refreshWorkspaces() {
       if (pending.has('workspaces')) return false
+      const epoch = workspaceEpoch
       pending.add('workspaces'); emit()
       try {
         const result = success(await api.request('/workspaces'))
         if (!Array.isArray(result.workspaces)) throw new UiWorkbenchError('UI_RESPONSE', '工作区列表响应无效。')
+        if (epoch !== workspaceEpoch) throw new UiWorkbenchError('UI_LIST_CHANGED', '列表读取期间已有版本保存或载入；旧列表未应用。可自行刷新核对。')
         data.workspaces = clone(result.workspaces); data.workspacesError = ''; return true
       } catch (error) { data.workspacesError = errorText(error); return false } finally { pending.delete('workspaces'); emit() }
     },
+    setInputValidity(id, valid) {
+      if (!INPUT_IDS.has(id) || typeof valid !== 'boolean') return false
+      const changed = valid ? invalidInputs.delete(id) : !invalidInputs.has(id)
+      if (!valid) { invalidInputs.add(id); draftEpoch++ } // Every raw edit, even when the field was already invalid.
+      if (changed) { if (valid) draftEpoch++; if (valid && !invalidInputs.size) data.error = ''; emit() }
+      return true
+    },
     selectNode(id) {
       if (!data.document.nodes.some(node => node.id === id)) return false
+      if (id !== data.selectedId && PROPERTY_INPUT_IDS.some(field => invalidInputs.has(field))) {
+        try { if (confirmDiscard('当前节点有尚未应用的无效输入。切换节点会丢弃这些输入，是否继续？') !== true) return false } catch { return false }
+        for (const field of PROPERTY_INPUT_IDS) invalidInputs.delete(field)
+      }
       data.selectedId = id; emit(); return true
     },
     setMode(mode) {
@@ -282,6 +299,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
       replaceDocument(imported); notice('本地 JSON 已作为新草稿载入；点击保存才会创建新工作区。'); emit(); return true
     },
     toJsonDownload() {
+      if (invalidInputs.size) throw new UiWorkbenchError('UI_INPUT_INVALID', '请先修正标红输入；不会用旧值生成 JSON 副本。')
       requireDocument(data.document, ui)
       return { filename: normalizeJsonFilename(data.document.name), contents: JSON.stringify(data.document, null, 2) + '\n' }
     },
@@ -301,6 +319,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
       })
     },
     async save({ asNew = false } = {}) {
+      if (invalidInputs.size) return fail(new Error('请先修正标红输入；未保存旧值或无效草稿。'))
       if (writeBusy() || pending.has('load')) return fail(new Error('读写请求尚未结束；未重复保存。'))
       const savedDocument = clone(data.document)
       try { requireDocument(savedDocument, ui) } catch (error) { return fail(error) }
@@ -322,7 +341,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
         data.workspaceId = result.workspaceId; data.revisionId = result.revisionId; data.directory = result.directory ?? null
         savedSignature = signature(savedDocument); dirty(); invalidate(); data.conflict = false; data.error = ''
         rememberWorkspace(result, savedDocument)
-        notice(data.dirty ? '保存的是请求发出时的快照；之后的修改仍是未保存草稿。' : '新版本已保存，旧版本没有被覆盖。', 'success')
+        notice(hasDraft() ? '保存的是请求发出时的快照；之后的修改仍是未保存草稿。' : '新版本已保存，旧版本没有被覆盖。', 'success')
         return true
       })
     },
@@ -334,6 +353,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
       return true
     },
     async checkDocument() {
+      if (invalidInputs.size) return fail(new Error('请先修正标红输入；未用旧值发起校验。'))
       const checkedDocument = clone(data.document); const epoch = draftEpoch
       return perform('check', async () => {
         const raw = await api.request('/check', { method: 'POST', body: { document: checkedDocument } })
@@ -345,6 +365,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
       })
     },
     async planExport() {
+      if (invalidInputs.size) return fail(new Error('请先修正标红输入；未用旧值或旧目标发起预检。'))
       const blockers = []
       if (!data.target.projectDirectory.trim()) blockers.push({ code: 'MAKER_PROJECT_MISSING', message: '请明确输入已初始化的 Maker 游戏工程；不猜路径、不用插件目录。' })
       if (!['pixel', 'char'].includes(data.target.fontSizeMethod)) blockers.push({ code: 'FONT_SIZE_METHOD_REQUIRED', message: '请由你选择 fontSizeMethod：pixel 或 char；不会更改游戏 Init / theme。' })
@@ -363,7 +384,7 @@ export function createWorkbenchModel({ ui, api, confirmDiscard = () => false }) 
       })
     },
     canExport() {
-      return !data.dirty && safeId(data.workspaceId) && safeId(data.revisionId) && data.plan?.ok === true && data.plan.ready === true && Array.isArray(data.plan.blockers) && data.plan.blockers.length === 0 && planSignature === documentKey() && !writeBusy() && !pending.has('load')
+      return !hasDraft() && safeId(data.workspaceId) && safeId(data.revisionId) && data.plan?.ok === true && data.plan.ready === true && Array.isArray(data.plan.blockers) && data.plan.blockers.length === 0 && planSignature === documentKey() && !writeBusy() && !pending.has('load')
     },
     async exportReview() {
       if (!model.canExport()) return fail(new Error('导出 blocked：必须先保存当前草稿，并对相同版本、明确目标与字号完成 ready 预检。'))
@@ -462,7 +483,7 @@ export function renderUiPreview(host, state, { ui, dom = host.ownerDocument, onS
   host.addEventListener('keydown', keydown)
   previewMemory.set(host, { activeId: modal?.id ?? null, returnFocusId, keydown })
   if (modalElement && previous.activeId !== modal.id) modalElement.focus()
-  else if (!modalElement && previous.activeId && previous.returnFocusId) elements.get(previous.returnFocusId)?.focus()
+  else if (!modalElement && focusedId && previous.activeId && previous.returnFocusId) elements.get(previous.returnFocusId)?.focus()
   else if (focusedId && elements.has(focusedId)) elements.get(focusedId).focus()
   return { elements, activeModalId: modal?.id ?? null }
 }
@@ -482,17 +503,20 @@ function hierarchy(document) {
 
 /** Read only host theme identity, never unrelated host color/token fragments. */
 export function connectHostTheme(browser, dom) {
-  const root = dom.documentElement; const observers = []; const cleanups = []
+  const root = dom.documentElement
   const media = browser.matchMedia?.('(prefers-color-scheme: dark)')
   const validTheme = value => ['light', 'dark'].includes(value) ? value : null
+  let observer = null; let disposed = false
   function sync() {
-    let theme = null
+    if (disposed) return
+    let theme = null; let sources = []
     try {
       if (browser.parent !== browser) {
         const parent = browser.parent; const parentDom = parent.document
-        const sources = [parentDom.documentElement, parentDom.body].filter(Boolean)
+        const nodes = [parentDom.documentElement, parentDom.body]
         let ancestor = browser.frameElement
-        while (ancestor) { sources.push(ancestor); ancestor = ancestor.parentElement }
+        while (ancestor) { nodes.push(ancestor); ancestor = ancestor.parentElement }
+        sources = [...new Set(nodes.filter(Boolean))]
         for (const element of sources) {
           theme = validTheme(element.dataset?.theme) ?? validTheme(element.dataset?.colorScheme)
           if (theme) break
@@ -504,17 +528,17 @@ export function connectHostTheme(browser, dom) {
       }
     } catch { /* Cross-origin/unavailable parent: OS still selects a paired palette. */ }
     root.dataset.theme = theme ?? (media?.matches ? 'dark' : 'light')
-  }
-  sync()
-  try {
-    if (browser.parent !== browser && browser.MutationObserver) {
-      const observer = new browser.MutationObserver(sync)
-      for (const element of [browser.parent.document.documentElement, browser.parent.document.body]) if (element) observer.observe(element, { attributes: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme'] })
-      observers.push(observer)
+    if (observer) {
+      observer.disconnect()
+      // Observe only the sources we read, not the whole streaming GUI subtree.
+      // Direct child-list changes detect iframe reparenting and replace stale ancestors.
+      try { for (const element of sources) observer.observe(element, { attributes: true, childList: true, attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme'] }) } catch { /* Optional theme access can disappear. */ }
     }
-  } catch { /* Theme access is optional, not an API readiness signal. */ }
-  media?.addEventListener?.('change', sync); cleanups.push(() => media?.removeEventListener?.('change', sync))
-  return () => { for (const observer of observers) observer.disconnect(); for (const cleanup of cleanups) cleanup() }
+  }
+  try { if (browser.parent !== browser && browser.MutationObserver) observer = new browser.MutationObserver(sync) } catch { /* Optional host theme support. */ }
+  sync()
+  media?.addEventListener?.('change', sync)
+  return () => { disposed = true; observer?.disconnect(); media?.removeEventListener?.('change', sync) }
 }
 
 export function mountWorkbench({ root, ui, browser = window, dom = document, fetchImpl = browser.fetch.bind(browser) }) {
@@ -524,7 +548,7 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
   let current = model.getState(); let treeSignature = ''; let workspaceSignature = ''; let previousSelection = ''; let previewSignature = ''; let previewToastTimer = null; let toastSignature = ''
   const listen = (target, name, listener) => { target.addEventListener(name, listener); cleanups.push(() => target.removeEventListener(name, listener)) }
   const setText = (id, text) => { element(id).textContent = String(text ?? '') }
-  const value = (id, next) => { const input = element(id); if (dom.activeElement !== input || previousSelection !== current.selectedId) input.value = String(next ?? '') }
+  const value = (id, next) => { const input = element(id); if (!current.invalidInputs.includes(id) && (dom.activeElement !== input || previousSelection !== current.selectedId)) input.value = String(next ?? '') }
   const mutedError = id => element(id).removeAttribute('aria-invalid')
   function drawTree(state) {
     const key = signature({ nodes: state.document.nodes.map(node => [node.id, node.type, node.parent, node.props.visible]), selectedId: state.selectedId })
@@ -631,6 +655,7 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
   }
   function render(state) {
     current = state
+    for (const id of INPUT_IDS) { if (state.invalidInputs.includes(id)) element(id).setAttribute('aria-invalid', 'true'); else mutedError(id) }
     value('document-name', state.document.name); value('maker-project', state.target.projectDirectory); value('font-size-method', state.target.fontSizeMethod)
     setText('preview-title', state.document.name); setText('draft-status', state.dirty ? '未保存草稿' : '已保存版本'); element('draft-status').dataset.dirty = String(state.dirty)
     setText('revision-id', state.revisionId ?? '尚未保存'); element('revision-id').title = state.directory ?? ''
@@ -648,11 +673,12 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
     setText('global-error', state.error); element('global-error').hidden = !state.error
     element('conflict-actions').hidden = !state.conflict
     setText('notice', state.notice); element('notice').dataset.kind = state.noticeKind
-    const writing = state.busy.includes('save') || state.busy.includes('export'); const loading = state.busy.includes('load')
+    const writing = state.busy.includes('save') || state.busy.includes('export'); const loading = state.busy.includes('load'); const invalid = state.invalidInputs.length > 0
     for (const id of ['new-demo', 'import-json', 'save-workspace', 'save-as-new', 'reload-workspace']) element(id).disabled = writing || loading
-    element('save-workspace').disabled = writing || loading || (!state.dirty && state.workspaceId !== null)
-    element('save-workspace').title = state.workspaceId ? '以 baseRevision 保存新版本，旧版不覆盖' : '显式创建新工作区与首个保存版本'
-    element('check-document').disabled = state.busy.includes('check'); element('plan-export').disabled = state.busy.includes('plan') || writing || loading; element('export-review').disabled = !model.canExport()
+    element('save-as-new').disabled = writing || loading || invalid; element('download-json').disabled = invalid
+    element('save-workspace').disabled = writing || loading || invalid || (!state.dirty && state.workspaceId !== null)
+    element('save-workspace').title = invalid ? '请先修正标红输入；不会保存旧值' : state.workspaceId ? '以 baseRevision 保存新版本，旧版不覆盖' : '显式创建新工作区与首个保存版本'
+    element('check-document').disabled = state.busy.includes('check') || invalid; element('plan-export').disabled = state.busy.includes('plan') || writing || loading || invalid; element('export-review').disabled = !model.canExport()
     element('refresh-workspaces').disabled = state.busy.includes('status') || state.busy.includes('workspaces')
     element('mode-edit').setAttribute('aria-pressed', String(state.mode === 'edit')); element('mode-interact').setAttribute('aria-pressed', String(state.mode === 'interact'))
     setText('mode-hint', state.mode === 'edit' ? '编辑模式：点击画布选节点；不会执行按钮动作。' : '交互模式：按钮执行有限动作。自定义弹窗遮挡背景；Escape 关闭（仅浏览器模拟）。')
@@ -693,13 +719,18 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
     const finishGuide = action => {
       action()
       if (!guide.getState().visible) {
-        if (!guide.getState().remembered) { const note = element('guide-memory-note'); if (note) { note.hidden = false; note.textContent = '当前浏览器无法记住引导偏好，下次打开可能再次显示；不影响编辑和保存。' } }
+        const note = element('guide-memory-note')
+        if (note) { note.hidden = guide.getState().remembered; note.textContent = note.hidden ? '' : '当前浏览器无法记住引导偏好，下次打开可能再次显示；不影响编辑和保存。' }
         focusGuideOpener()
       }
     }
     listen(element('show-guide'), 'click', () => { guide.start(); guidePanel.scrollIntoView?.({ block: 'nearest' }); element('guide-next').focus() })
     listen(element('guide-next'), 'click', () => finishGuide(() => guide.next()))
-    listen(element('guide-back'), 'click', () => guide.back())
+    listen(element('guide-back'), 'click', () => {
+      const back = element('guide-back'); const hadFocus = dom.activeElement === back
+      guide.back()
+      if (hadFocus && back.disabled) element('guide-next').focus()
+    })
     listen(element('guide-skip'), 'click', () => finishGuide(() => guide.skip()))
     listen(element('guide-target'), 'click', () => {
       const target = element(guide.getState().step.target)
@@ -714,20 +745,27 @@ export function mountWorkbench({ root, ui, browser = window, dom = document, fet
     cleanups.push(() => guideTarget?.removeAttribute('data-guide-target'))
   }
   listen(element('property-form'), 'submit', event => event.preventDefault())
-  function patchProperty(id, key, { type = 'string', event = 'change' } = {}) {
-    listen(element(id), event, () => {
+  function applyInput(id, update) {
+    // Track the raw field before validation emits, so even a blurred invalid
+    // value is preserved and close/serialization cannot assume a clean draft.
+    model.setInputValidity(id, false)
+    if (update()) model.setInputValidity(id, true)
+  }
+  function patchProperty(id, key, { type = 'string' } = {}) {
+    const update = () => {
       const input = element(id)
       const next = type === 'number' ? (input.value === '' && key === 'fontSize' ? '' : input.value === '' ? NaN : Number(input.value)) : type === 'boolean' ? input.checked : input.value
-      const applied = model.updateNode(model.getState().selectedId, { [key]: next })
-      if (applied) mutedError(id); else input.setAttribute('aria-invalid', 'true')
-    })
+      applyInput(id, () => model.updateNode(model.getState().selectedId, { [key]: next }))
+    }
+    listen(element(id), 'input', update)
+    listen(element(id), 'change', update)
   }
-  patchProperty('property-text', 'text', { event: 'input' })
+  patchProperty('property-text', 'text')
   for (const [id, key] of [['property-x', 'x'], ['property-y', 'y'], ['property-width', 'width'], ['property-height', 'height'], ['property-font-size', 'fontSize']]) patchProperty(id, key, { type: 'number' })
   patchProperty('property-color', 'color'); patchProperty('property-background', 'backgroundColor'); patchProperty('property-visible', 'visible', { type: 'boolean' })
-  listen(element('document-name'), 'input', () => { if (model.rename(element('document-name').value)) mutedError('document-name'); else element('document-name').setAttribute('aria-invalid', 'true') })
-  listen(element('maker-project'), 'input', () => { if (model.setTarget({ projectDirectory: element('maker-project').value })) mutedError('maker-project'); else element('maker-project').setAttribute('aria-invalid', 'true') })
-  listen(element('font-size-method'), 'change', () => model.setTarget({ fontSizeMethod: element('font-size-method').value }))
+  listen(element('document-name'), 'input', () => { const next = element('document-name').value; applyInput('document-name', () => model.rename(next)) })
+  listen(element('maker-project'), 'input', () => { const next = element('maker-project').value; applyInput('maker-project', () => model.setTarget({ projectDirectory: next })) })
+  listen(element('font-size-method'), 'change', () => { const next = element('font-size-method').value; applyInput('font-size-method', () => model.setTarget({ fontSizeMethod: next })) })
   listen(element('new-demo'), 'click', () => model.newDemo())
   listen(element('save-workspace'), 'click', () => model.save())
   listen(element('save-as-new'), 'click', () => model.save({ asNew: true }))

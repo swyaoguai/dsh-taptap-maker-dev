@@ -2366,15 +2366,44 @@ window.__ModuleLoader__.load({
         if (old) { try { old.window.removeEventListener('keydown', old.handler) } catch (_error) { /* already unloaded */ } }
         innerListener.current = null
       }, [])
+      const innerFocusTargets = useCallback(() => {
+        try {
+          const inner = frame.current.contentWindow
+          const targets = Array.from(inner.document.querySelectorAll('button, input:not([type="hidden"]), select, textarea, a[href], summary, [tabindex]')).filter(item => {
+            if (item.tabIndex < 0 || item.disabled || item.hidden || item.inert || item.matches?.(':disabled') || item.closest?.('[hidden], [inert]')) return false
+            if (item.getClientRects && !item.getClientRects().length) return false
+            const style = inner.getComputedStyle(item)
+            return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+          })
+          return targets.sort((a, b) => (a.tabIndex > 0 ? a.tabIndex : Infinity) - (b.tabIndex > 0 ? b.tabIndex : Infinity))
+        } catch (_error) { return [] }
+      }, [])
+      const focusFrameEdge = useCallback(backward => {
+        const targets = innerFocusTargets()
+        const target = backward ? targets[targets.length - 1] : targets[0]
+        if (!target) return false
+        target.focus(); return true
+      }, [innerFocusTargets])
       const frameLoaded = useCallback(() => {
         clearInnerListener()
         try {
           const inner = frame.current.contentWindow
-          const handler = event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); requestClose() } }
+          const handler = event => {
+            if (event.defaultPrevented || frame.current?.contentWindow !== inner) return
+            if (event.key === 'Escape') { event.preventDefault(); requestClose(); return }
+            if (event.key !== 'Tab') return
+            const targets = innerFocusTargets(); const active = inner.document.activeElement
+            if (!targets.length || (event.shiftKey && active === targets[0]) || (!event.shiftKey && active === targets[targets.length - 1])) {
+              event.preventDefault()
+              const root = dialog.current
+              const close = root && Array.from(root.querySelectorAll('button:not([disabled])')).find(item => !item.hidden && !item.inert)
+              if (close && close.focus) close.focus(); else if (root && root.focus) root.focus()
+            }
+          }
           inner.addEventListener('keydown', handler)
           innerListener.current = { window: inner, handler }
         } catch (_error) { /* keep the explicit close button available */ }
-      }, [clearInnerListener, requestClose])
+      }, [clearInnerListener, requestClose, innerFocusTargets])
       useEffect(() => {
         if (!open) return
         const root = dialog.current
@@ -2398,7 +2427,12 @@ window.__ModuleLoader__.load({
           const targets = Array.from(root.querySelectorAll('button:not([disabled]), iframe, [tabindex="0"]')).filter(item => !item.hidden && !item.inert)
           const first = targets[0]; const last = targets[targets.length - 1]
           if (!first) { event.preventDefault(); root.focus(); return }
-          if (document.activeElement === root || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) { event.preventDefault(); (event.shiftKey ? last : first).focus() }
+          if (document.activeElement === root || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
+            event.preventDefault()
+            const target = event.shiftKey ? last : first
+            if (target === frame.current && focusFrameEdge(event.shiftKey)) return
+            target.focus()
+          }
         }
         window.addEventListener('keydown', handler)
         if (document.addEventListener) document.addEventListener('focusin', focusGuard, true)
@@ -2408,7 +2442,7 @@ window.__ModuleLoader__.load({
           for (const sibling of changed) sibling.inert = false
           if (previous && previous.isConnected !== false && previous.focus) previous.focus()
         }
-      }, [open, requestClose, clearInnerListener])
+      }, [open, requestClose, clearInnerListener, focusFrameEdge])
       return h(React.Fragment, null,
         h('button', {
           ref: opener, type: 'button', 'aria-label': '打开 UI 工作台', title: 'UI 工作台：编辑、浏览器预览、版本保存、Maker 审阅包（零生成额度）',
