@@ -5,7 +5,7 @@ import vm from 'node:vm'
 
 const host = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
 const client = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
-function uiDock({ open = false, confirm = () => false } = {}) {
+function uiDock({ open = false, confirm = () => false, hostDocument = {} } = {}) {
   const registered = []; const stateWrites = []; const effects = []
   const React = {
     Component: class {},
@@ -14,7 +14,7 @@ function uiDock({ open = false, confirm = () => false } = {}) {
     useMemo: fn => fn(), useCallback: fn => fn, useEffect: fn => effects.push(fn), useRef: initial => ({ current: initial }),
   }
   const window = { __ModuleLoader__: { load({ factory }) { const plugin = factory(name => { assert.equal(name, 'react'); return React }); plugin.apply({ slots: { inject: (_name, cb) => cb(), register: (meta, component) => registered.push({ meta, component }) } }) } }, confirm, addEventListener() {}, removeEventListener() {} }
-  vm.runInNewContext(client, { window, console, document: {}, fetch: () => { throw new Error('No unexpected API/provider call from client registration') } })
+  vm.runInNewContext(client, { window, console, document: hostDocument, fetch: () => { throw new Error('No unexpected API/provider call from client registration') } })
   const entry = registered.find(item => item.meta.id === 'taptap-maker-dev-ui')
   assert.ok(entry, 'Missing intended UI composer dock registration')
   return { tree: entry.component(), entry, stateWrites, effects }
@@ -48,6 +48,25 @@ test('opening uses the same GUI iframe route, not another port, server or extern
   assert.match(iframe.props.sandbox, /allow-modals/, 'Authored draft-discard confirmation must work inside the same-origin iframe')
   assert.match(iframe.props.title, /UI 工作台/)
   assert.ok(collect(tree, node => node.props.role === 'dialog' && node.props['aria-modal'] === true).length)
+})
+
+test('outer dialog owns initial focus and restores only its own background inert changes', () => {
+  const previous = { focus() { hostDocument.activeElement = this } }
+  const hostDocument = { activeElement: previous, addEventListener() {}, removeEventListener() {} }
+  const { tree, effects } = uiDock({ open: true, hostDocument })
+  const dialog = collect(tree, node => node.props.role === 'dialog')[0]
+  const background = { inert: false }; const alreadyInert = { inert: true }
+  const body = { children: [], parentElement: null }; hostDocument.body = body
+  const root = { parentElement: body, contains: node => node === root, focus() { hostDocument.activeElement = this }, querySelectorAll: () => [] }
+  body.children = [background, root, alreadyInert]
+  assert.ok(dialog.props.ref, 'Dialog must hold its own DOM reference for focus/inert ownership')
+  dialog.props.ref.current = root
+  const cleanup = effects.map(effect => effect()).filter(fn => typeof fn === 'function')
+  assert.equal(hostDocument.activeElement, root)
+  assert.equal(background.inert, true); assert.equal(alreadyInert.inert, true)
+  cleanup.forEach(fn => fn())
+  assert.equal(background.inert, false); assert.equal(alreadyInert.inert, true)
+  assert.equal(hostDocument.activeElement, previous)
 })
 
 test('host close retains an unsaved iframe draft when confirmation is denied', () => {
