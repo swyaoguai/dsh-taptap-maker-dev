@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "component": "LGUI historical MIT source subset",
+  "status": "quarantined-source-reference",
+  "audit_date": "2026-10-31",
+  "source_repository": "https://github.com/LumioGames/LGUI",
+  "source_commit": "e962aa3617aaad5a2fd5ddf2c80ace4bb1551240",
+  "source_tree": "5ecb71203c95e5fbf90a66d324457bbfa39d9623",
+  "commit_author": "Go1c",
+  "commit_authored_at": "2026-10-30T02:50:46Z",
+  "source_tree_entry_count": 1986,
+  "source_tree_truncated": false,
+  "source_scope": "Only explicitly listed raw files from the immutable source commit; no main branch content.",
+  "raw_sources_modified": false,
+  "provenance_index": "provenance.json",
+  "execution_validation": "not-run; upstream execution was prohibited for this audit",
+  "dependency_resolution": "blocked; no vendored XML parser, vendor package manifest, or node_modules included",
+  "adoption_decision": "Retain original model and error classes plus both upstream MIT notices. Parent owns a separate adapted copy and installed Python standard-library XML bridge; that bridge is not implemented or validated by this audit.",
+  "license": {
+    "spdx": "MIT",
+    "copyright": "Copyright (c) 2026 LumioGames",
+    "evidence_paths": ["LICENSE", "plugin/LICENSE"],
+    "evidence_scope": "LGUI-authored source listed below, not all upstream resources or third-party dependencies",
+    "permissions_observed": ["use", "copy", "modify", "merge", "publish", "distribute", "sublicense", "sell"],
+    "required_notice": "Include the above copyright notice and permission notice in all copies or substantial portions.",
+    "warranty": "Provided AS IS; upstream MIT liability disclaimer retained verbatim."
+  },
+  "verification": {
+    "acquisition": "Read-only unauthenticated GitHub API metadata and fixed-commit raw HTTP GETs",
+    "blob_algorithm": "SHA-1 of UTF-8 blob header (blob <byte_length> NUL) followed by raw file bytes",
+    "content_algorithm": "SHA-256 of raw file bytes",
+    "raw_byte_length_and_git_blob_match": true,
+    "write_mode": "FileMode.CreateNew; refuse existing destinations",
+    "source_review": "All two copied JavaScript modules and both copied license files fully read before inclusion and again from local files; no import, execution, test, or installer."
+  },
+  "files": [
+    {
+      "path": "LICENSE",
+      "source_path": "LICENSE",
+      "source_commit": "e962aa3617aaad5a2fd5ddf2c80ace4bb1551240",
+      "raw_url": "https://raw.githubusercontent.com/LumioGames/LGUI/e962aa3617aaad5a2fd5ddf2c80ace4bb1551240/LICENSE",
+      "git_blob_sha1": "a7de970b7e3aab602bb384bc232cf11f09925441",
+      "sha256": "8040a15ada7fb7dad8b6d15d5a245bf52dcee2de64eaa4870b6f48ee88f9e074",
+      "byte_length": 1067,
+      "license": "MIT",
+      "modified": false,
+      "role": "original repository license notice"
+    },
+    {
+      "path": "plugin/LICENSE",
+      "source_path": "plugin/LICENSE",
+      "source_commit": "e962aa3617aaad5a2fd5ddf2c80ace4bb1551240",
+      "raw_url": "https://raw.githubusercontent.com/LumioGames/LGUI/e962aa3617aaad5a2fd5ddf2c80ace4bb1551240/plugin/LICENSE",
+      "git_blob_sha1": "a7de970b7e3aab602bb384bc232cf11f09925441",
+      "sha256": "8040a15ada7fb7dad8b6d15d5a245bf52dcee2de64eaa4870b6f48ee88f9e074",
+      "byte_length": 1067,
+      "license": "MIT",
+      "modified": false,
+      "role": "original plugin license notice"
+    },
+    {
+      "path": "plugin/tools/lib/errors.mjs",
+      "source_path": "plugin/tools/lib/errors.mjs",
+      "source_commit": "e962aa3617aaad5a2fd5ddf2c80ace4bb1551240",
+      "raw_url": "https://raw.githubusercontent.com/LumioGames/LGUI/e962aa3617aaad5a2fd5ddf2c80ace4bb1551240/plugin/tools/lib/errors.mjs",
+      "git_blob_sha1": "0b75f57e2040624cb2048cd1c2a35fe4df40ec0d",
+      "sha256": "378eea81379dd101c1ac3581278938748aab3585231b64b2051e341953316362",
+      "byte_length": 847,
+      "license": "MIT",
+      "license_evidence_paths": ["LICENSE", "plugin/LICENSE"],
+      "modified": false,
+      "role": "only relative JavaScript import of the selected UI model"
+    },
+    {
+      "path": "plugin/tools/lib/generate/model.mjs",
+      "source_path": "plugin/tools/lib/generate/model.mjs",
+      "source_commit": "e962aa3617aaad5a2fd5ddf2c80ace4bb1551240",
+      "raw_url": "https://raw.githubusercontent.com/LumioGames/LGUI/e962aa3617aaad5a2fd5ddf2c80ace4bb1551240/plugin/tools/lib/generate/model.mjs",
+      "git_blob_sha1": "1c8273f2213c410e7fb85003a857ea09595a556b",
+      "sha256": "3342f16e41ff6f4e6b7f625a5633496d12558f030bbdb3f8f4b7b365f69c2dfd",
+      "byte_length": 7250,
+      "license": "MIT",
+      "license_evidence_paths": ["LICENSE", "plugin/LICENSE"],
+      "modified": false,
+      "role": "FairyGUI XML-to-UI model algorithm reference; original readUiModel must not be used as a runtime parser"
+    }
+  ],
+  "files_total": 4,
+  "raw_source_bytes_total": 10231,
+  "excluded": [
+    "all default/main branch files and post-pin additions",
+    "plugin/editor compiled interface resources",
+    "Unity, PuerTS, and FairyGUI Unity runtime code",
+    "brand logos, examples, screenshots, images, and fonts",
+    "all upstream skills, commands, hooks, installers, tests, and generators",
+    "upstream vendor package manifest and lockfile with broad dependency installation surface",
+    "entire upstream node_modules; fast-xml-parser CJS/minified bundles, builders, CLI, v6, and unapproved transitive packages"
+  ],
+  "runtime_warning": "Directory quarantine is not a sandbox. Original createRequire can resolve ancestor node_modules; callers must not invoke original readUiModel or allow ambient dependencies to substitute for this blocked parser.",
+  "ownership": "Audit subagent: this directory and docs/lgui-mit-audit.md only. Parent: all adapters, bridges, tests, root notices, and product wiring."
+}

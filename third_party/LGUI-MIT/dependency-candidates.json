@@ -1,0 +1,104 @@
+{
+  "schema_version": 1,
+  "status": "excluded-candidates-not-installed",
+  "source_repository": "https://github.com/LumioGames/LGUI",
+  "source_commit": "e962aa3617aaad5a2fd5ddf2c80ace4bb1551240",
+  "source_path_prefix": "plugin/tools/vendor/node_modules/",
+  "source_url_prefix": "https://raw.githubusercontent.com/LumioGames/LGUI/e962aa3617aaad5a2fd5ddf2c80ace4bb1551240/plugin/tools/vendor/node_modules/",
+  "source_files_present_locally": false,
+  "candidate_code_executed": false,
+  "selection": "Direct original ESM src/xmlparser/XMLParser.js and its source-entry dependency candidates. This excludes fast-xml-parser src/fxp.js because it also loads XMLBuilder. Source-entry re-exports require additional files without a bundler, even when only a subset of exports is requested.",
+  "candidate_js_file_count": 33,
+  "candidate_js_bytes": 241543,
+  "metadata_tree_truncated": false,
+  "review_coverage": {
+    "all_candidates": "Fixed-tree path/blob/byte metadata and static import/re-export edge enumeration; not a full source security audit or verified runnable dependency closure.",
+    "full_js_text_read": [
+      "fast-xml-parser/src/fxp.js",
+      "fast-xml-parser/src/xmlparser/XMLParser.js",
+      "fast-xml-parser/src/xmlparser/OptionsBuilder.js",
+      "fast-xml-parser/src/xmlbuilder/json2xml.js",
+      "@nodable/entities/src/index.js",
+      "is-unsafe/src/index.js",
+      "path-expression-matcher/src/index.js"
+    ],
+    "prefix_text_read_only": ["@nodable/entities/src/EntityDecoder.js", "xml-naming/src/index.js"],
+    "sha256": "Not recorded for excluded source candidates: they were not materialized as original byte-for-byte local sources. Git blob identities and byte lengths below are from the fixed upstream tree."
+  },
+  "blockers": [
+    {
+      "id": "default-entry-minified",
+      "path": "fast-xml-parser/lib/fxp.cjs",
+      "git_blob_sha1": "8aecedafce38702d7c32273ae9561f601877b82e",
+      "byte_length": 77653,
+      "detail": "Original model uses createRequire; fast-xml-parser@5.11.2 exports.require.default selects this single-line minified CJS bundle. Only its size/line shape/prefix was inspected. It is neither copied nor executed."
+    },
+    {
+      "id": "dependency-notice-evidence-gap",
+      "package": "@nodable/entities",
+      "version": "3.1.0",
+      "detail": "Package manifest declares MIT and author Amit Gupta; README says MIT. No LICENSE/COPYING/NOTICE/copyright-named file exists under this scoped package in the non-truncated fixed tree. The reviewed entry/header text does not supply a full MIT notice with copyright holder. This is an evidence gap, not a declaration that the package is non-MIT. No notice is fabricated and no other commit/npm source is used to fill it."
+    },
+    {
+      "id": "incomplete-source-vetting",
+      "detail": "The 33-file source-entry candidate set and entity data-table provenance have not received a full code/IP review. Package license declarations do not automatically establish rights to all copied dependency content. Do not install this candidate set based on this metadata-only plan."
+    }
+  ],
+  "packages": [
+    {"name":"fast-xml-parser","version":"5.11.2","manifest_blob":"74f71d29f725008919d31cbf74a06d3cf19cb4fc","license":"MIT","notice_path":"fast-xml-parser/LICENSE","notice_blob":"d7da622a911188a857eb177bbbb383ac22825cb3","copyright_as_observed":"Copyright (c) 2017 Amit Kumar Gupta","chosen_candidate_entry":"src/xmlparser/XMLParser.js","included":false},
+    {"name":"@nodable/entities","version":"3.1.0","manifest_blob":"04f6385d2b84c5a97b78d7b40cb6390c6c3367b7","license_declaration":"MIT","notice_path":null,"notice_status":"evidence-gap","manifest_author":"Amit Gupta (https://solothought.com)","chosen_candidate_entry":"src/index.js","included":false},
+    {"name":"is-unsafe","version":"2.0.2","manifest_blob":"248ededbc7c4c2c5e5fc9717fb2c851835fb8c1b","license":"MIT","notice_path":"is-unsafe/LICENSE","notice_blob":"0311839a07c340fb1dfa5eb9b29a42bbd693ff84","copyright_as_observed":"Copyright (c) 2026 Natural Intelligence","chosen_candidate_entry":"src/index.js","included":false},
+    {"name":"path-expression-matcher","version":"1.6.2","manifest_blob":"981d633c94f5acfec39916013aaddd3f5f9c2638","license":"MIT","notice_path":"path-expression-matcher/LICENSE","notice_blob":"c13f99117e366fd54b4c097b67ca34dfb1fb8ba1","copyright_as_observed":"Copyright (c) 2024","copyright_note":"The upstream notice omits a holder name; do not invent one.","chosen_candidate_entry":"src/index.js","included":false},
+    {"name":"xml-naming","version":"0.3.0","manifest_blob":"c5622cd0109173af8f95f7578531c9af4972cecb","license":"MIT","notice_path":"xml-naming/LICENSE","notice_blob":"0311839a07c340fb1dfa5eb9b29a42bbd693ff84","copyright_as_observed":"Copyright (c) 2026 Natural Intelligence","chosen_candidate_entry":"src/index.js","included":false},
+    {"name":"strnum","version":"2.5.1","manifest_blob":"b278462d064657d42fdbf30d34a9fc24bc6c6a0a","license":"MIT","notice_path":"strnum/LICENSE","notice_blob":"64505544befa413eb28175a0db3532876a58412a","copyright_as_observed":"Copyright (c) 2021 Natural Intelligence","chosen_candidate_entry":"strnum.js","included":false},
+    {"name":"anynum","version":"1.0.1","manifest_blob":"4b0782aeeb66b6c3ba1229e99f2634d892258552","license":"MIT","notice_path":"anynum/LICENSE","notice_blob":"0311839a07c340fb1dfa5eb9b29a42bbd693ff84","copyright_as_observed":"Copyright (c) 2026 Natural Intelligence","chosen_candidate_entry":"anynum.js","included":false}
+  ],
+  "source_candidates": [
+    {"path":"fast-xml-parser/src/xmlparser/XMLParser.js","git_blob_sha1":"7da1e61150e668c8b91f23ca34190a3d8a3b2775","byte_length":2969},
+    {"path":"fast-xml-parser/src/xmlparser/OptionsBuilder.js","git_blob_sha1":"0822b996829367f984af70d206b2ba24c7817114","byte_length":5422},
+    {"path":"fast-xml-parser/src/xmlparser/OrderedObjParser.js","git_blob_sha1":"58c6a5f20a16ee208963a2b4c832c3b1097b7093","byte_length":30836},
+    {"path":"fast-xml-parser/src/xmlparser/DocTypeReader.js","git_blob_sha1":"d65f8c17295b2e4d2a5d8a4722950bc31e1f1b5f","byte_length":15601},
+    {"path":"fast-xml-parser/src/xmlparser/node2json.js","git_blob_sha1":"ce2e9518e84e3896d115dd375171a7c311d6d8e6","byte_length":5647},
+    {"path":"fast-xml-parser/src/xmlparser/xmlNode.js","git_blob_sha1":"a8b46394f34e67dbdcafafba6502ef87c1149634","byte_length":1816},
+    {"path":"fast-xml-parser/src/validator.js","git_blob_sha1":"6f9904f03d7b5951a6d55a2d328d184e38edf0e6","byte_length":18044},
+    {"path":"fast-xml-parser/src/util.js","git_blob_sha1":"c2c809d1ae4c81ca6427ffc29529063907ff0eba","byte_length":1644},
+    {"path":"fast-xml-parser/src/ignoreAttributes.js","git_blob_sha1":"bdec0a6117eb75fb367bf89236d6817b26fc1078","byte_length":586},
+    {"path":"@nodable/entities/src/EntityDecoder.js","git_blob_sha1":"71f9180d1c9ad2d106ca376b5d734ce30e50b16a","byte_length":25816},
+    {"path":"@nodable/entities/src/EntityEncoder.js","git_blob_sha1":"a9f596f1178e1a5cb297b5c4a4e67e926e4c65fd","byte_length":8479},
+    {"path":"@nodable/entities/src/all-entities.js","git_blob_sha1":"2000c46e04f81e3e81e545d65087f2b1c68e62a7","byte_length":1497},
+    {"path":"@nodable/entities/src/entities.js","git_blob_sha1":"8c5723d2a77ae09d8b3f53032e1c33ad946f2251","byte_length":18791},
+    {"path":"@nodable/entities/src/entityTries.js","git_blob_sha1":"c8aaeff7dcfddf5908eaef4c447a3e8ab3ec1ccb","byte_length":2359},
+    {"path":"@nodable/entities/src/index.js","git_blob_sha1":"e2b214514adac5a446d6422ca582d143e1cfd583","byte_length":515},
+    {"path":"is-unsafe/src/contexts/html.js","git_blob_sha1":"323e589b68a10f982d19331a00afb21ad405a249","byte_length":3327},
+    {"path":"is-unsafe/src/contexts/log.js","git_blob_sha1":"54737b2d5ad2639606366f11489e95b4871388e9","byte_length":4234},
+    {"path":"is-unsafe/src/contexts/nosql.js","git_blob_sha1":"7461f95ec7c144b23d1a3f511ded52f1ac1cb7ee","byte_length":4255},
+    {"path":"is-unsafe/src/contexts/redos.js","git_blob_sha1":"a6ee8e60db205522fcae06ef8d1a736742aafa5b","byte_length":2262},
+    {"path":"is-unsafe/src/contexts/shell.js","git_blob_sha1":"9bbbafea1831473a8331cce4db328307fed29b86","byte_length":2981},
+    {"path":"is-unsafe/src/contexts/sql-strict.js","git_blob_sha1":"6525d6178427673573401dc9a8eac6c055c38edd","byte_length":1742},
+    {"path":"is-unsafe/src/contexts/sql.js","git_blob_sha1":"5f3033bf9bfac193599232818b770078754ea084","byte_length":3063},
+    {"path":"is-unsafe/src/contexts/svg.js","git_blob_sha1":"990d8da086b8460df8559ed1d17548e58fe10e5f","byte_length":3053},
+    {"path":"is-unsafe/src/contexts/xml.js","git_blob_sha1":"0d171b9b18d13e76e3a2580dee3f90ce5777028b","byte_length":2532},
+    {"path":"is-unsafe/src/index.js","git_blob_sha1":"425e3558455c522093474a11985328f0cda713b1","byte_length":8730},
+    {"path":"path-expression-matcher/src/Expression.js","git_blob_sha1":"0fbcea37fdcf0b8bda9c09a2f566108834826cc7","byte_length":6795},
+    {"path":"path-expression-matcher/src/ExpressionSet.js","git_blob_sha1":"68b23e941c755ab699fefd80e7538066ab43941a","byte_length":7310},
+    {"path":"path-expression-matcher/src/Matcher.js","git_blob_sha1":"fc5f444f4400fc642a890c47bbce85317655ea89","byte_length":18459},
+    {"path":"path-expression-matcher/src/index.js","git_blob_sha1":"eeed4b57ab21ac7ed3013c428e0a9b98a6addee2","byte_length":919},
+    {"path":"xml-naming/src/index.js","git_blob_sha1":"566cb15764293cea1b8909daa372c470ed5c4d16","byte_length":15370},
+    {"path":"strnum/strnum.js","git_blob_sha1":"b77f1a49c5e4e039d277d414e94986a7ddb0f3ab","byte_length":7054},
+    {"path":"anynum/anynum.js","git_blob_sha1":"53987d39e8b2631ef63a5385b2a4297923cf8150","byte_length":4309},
+    {"path":"anynum/digitTable.js","git_blob_sha1":"9982e4dc993df4473346bf2340e804e09b6159e7","byte_length":5126}
+  ],
+  "dependency_edges": {
+    "direct_XMLParser": ["OptionsBuilder.js", "OrderedObjParser.js", "node2json.js", "../validator.js", "xmlNode.js"],
+    "OptionsBuilder": ["../util.js", "@nodable/entities"],
+    "OrderedObjParser": ["../util.js", "xmlNode.js", "DocTypeReader.js", "strnum", "../ignoreAttributes.js", "path-expression-matcher", "@nodable/entities", "is-unsafe"],
+    "DocTypeReader": ["xml-naming"],
+    "node2json": ["xmlNode.js", "path-expression-matcher"],
+    "strnum": ["anynum"],
+    "anynum": ["./digitTable.js"],
+    "@nodable/entities_source_entry": ["EntityDecoder.js", "EntityEncoder.js", "all-entities.js", "entities.js", "entityTries.js"],
+    "is-unsafe_source_entry": ["contexts/html.js", "contexts/xml.js", "contexts/svg.js", "contexts/sql.js", "contexts/sql-strict.js", "contexts/shell.js", "contexts/redos.js", "contexts/nosql.js", "contexts/log.js"],
+    "path-expression-matcher_source_entry": ["Expression.js", "ExpressionSet.js", "Matcher.js"]
+  },
+  "chosen_plan": "Do not vendor these packages in this task. Parent uses a separately owned, source-attributed model adapter and the already installed Python xml.etree standard library; no dependency or system installation is authorized by this plan. Compatibility and security acceptance remain parent tasks."
+}
