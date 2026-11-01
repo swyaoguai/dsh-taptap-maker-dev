@@ -17,7 +17,7 @@ description: 插件侧独立 UI 文档、受限历史 MIT FairyGUI 导入、静�
 
 ## 实际操作
 
-1. 用现有 GUI 输入框旁 `▦ UI` 或设置 → UI 工作流打开；无法加载时先查当前宿主是否重载新插件。不要开另一 server、重启停止的游戏或承诺无 watcher 的自动 HMR。
+1. 用现有 GUI 输入框旁 `▦ UI` 或设置 → UI 工作台打开；无法加载时先查当前宿主是否重载新插件。不要开另一 server、重启停止的游戏或承诺无 watcher 的自动 HMR。
 2. `/taptap-ui help`、`status`、`demo`、`list`；创建/导入由用户明确输入源文件，不能猜候选游戏路径。
 3. 本机入口是 `node "D:\dsh-taptap-maker-dev\src\taptap-ui.mjs"`；flags 可从 help 查。`save` 必须传读取的 `--base`，`export` 必须指定保存的 `--id/--rev` 和明确目标。
 4. XML 用已安装 Python stdlib 隔离桥，不自动下载 parser。仅静态矩形/文字、不缩放普通组件、窄 Common Button；unknown、namespace、DTD、关系、控制器、gears、声音/下压效果或丢失子图层状态应阻断，不伪装可用。

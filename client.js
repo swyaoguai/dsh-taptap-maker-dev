@@ -913,6 +913,8 @@ window.__ModuleLoader__.load({
             h('h2', { style: S.cardTitle }, 'BGM 账号'),
             h('p', { style: { ...S.sub, marginTop: 2 } },
               '生成完整 BGM 用的 MiniMax 账号。可登录、查额度、换号；多个账号可在额度用完时自动轮换。'),
+            h('p', { style: { ...S.hint, marginTop: 4, color: 'var(--dsh-warn, #f08c00)' } },
+              'MiniMax 官方说明：2026-08-20 起音乐 API 不再给新用户开，免费音乐接口已停。网页版 MiniMax Audio 还能用，插件走的就是网页版，所以目前不受影响。网页版以后要是也改了，生成会失败并提示卡在哪一步。'),
             h('p', { style: { ...S.hint, marginTop: 2 } }, headerText),
             h('span', { style: anyLogged ? S.pill : S.offPill }, anyLogged ? '已登录' : '未登录'),
           ),
@@ -1432,9 +1434,11 @@ window.__ModuleLoader__.load({
 
       return h('div', { style: S.card },
         h('h2', { style: S.cardTitle },
-          'Skill 管理',
+          'Skill 开关（一般不用动）',
           h('span', { style: S.pill }, `启用 ${activeCount} / 共 ${state.skills.length}`)),
-        h('p', { style: { ...S.sub, marginTop: 0 } }, '取消勾选即禁用（不进入 skill 候选），即时保存到本机，无需重启。'),
+        h('p', { style: { ...S.sub, marginTop: 0 } },
+          '用哪个 skill 是 AI 自己按游戏做到哪一步、你当前要干什么来挑的，每次只读用得上的那几个，不会全部塞进对话。',
+          '这里只用来彻底屏蔽你确定永远用不到的 skill。取消勾选立即生效，不用重启。'),
         h('div', { style: S.bar },
           h('input', {
             style: S.search, value: filter, placeholder: '搜索 skill 名称 / 描述…',
@@ -1884,6 +1888,7 @@ window.__ModuleLoader__.load({
     function LanePriorityCard() {
       const [data, setData] = useState(null)
       const [saving, setSaving] = useState('')
+      const [err, setErr] = useState('')
       const [dragId, setDragId] = useState(null)
       const [overId, setOverId] = useState(null)
 
@@ -1895,44 +1900,67 @@ window.__ModuleLoader__.load({
       }, [])
       useEffect(() => { load() }, [load])
 
-      const save = useCallback((patch, tag) => {
+      /**
+       * 发请求并在失败时回滚。
+       *
+       * `snapshot` 是动之前的整份 data：排序 / 开关都先在本地乐观改好（界面立刻
+       * 响应），请求失败就还原，并把原因显示出来 —— 不能让界面停在一个服务端
+       * 并不认可的顺序上，那比不动更糟（用户以为改了，实际没生效）。
+       */
+      const save = useCallback((patch, tag, snapshot) => {
         setSaving(tag)
+        setErr('')
         fetch(`${API_BASE}/lanes`, {
           method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(patch),
         })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-          .then((j) => { setData((prev) => (prev ? { ...prev, ...j } : j)); setSaving(''); try { setTimeout(() => setSaving(''), 1500) } catch (_e) { /* no-op */ } })
-          // 'error' 只是失败提示，不是「正在保存」：不能让它把开关一直锁住（否则提示「请重试」却无法重试）。
-          .catch(() => setSaving('error'))
+          // 服务端回的是权威顺序（它会去重、补新通道、挡住「全关」），以它为准。
+          .then((j) => { setData((prev) => (prev ? { ...prev, ...j } : j)); setSaving('') })
+          .catch(() => {
+            if (snapshot) setData(snapshot)
+            setSaving('')
+            setErr('保存失败，顺序已还原成改动前的样子，请重试。')
+          })
       }, [])
 
-      /** 移动一条通道。idx 传 -1 表示插到最前。 */
+      /**
+       * 把一条通道移到第 `to` 位（0 基，越界自动夹到两端）。
+       *
+       * ⚠️ 副作用（fetch / setSaving）必须留在事件处理里，**不能写进 setData 的
+       * updater**：updater 在 render 阶段执行、要求是纯函数，React 18 StrictMode
+       * 会刻意调用它两次。旧代码把 save() 塞在 updater 里，于是
+       *   - 每拖一次发两个 POST；
+       *   - 在 render 阶段调 setSaving，React 会丢掉这次更新；
+       *   - 返回的还是原来那个 lanes 数组（没有真的重排），界面完全不动。
+       * 三件事叠起来就是「拖了没反应」。现在顺序在本地先排好，再发请求。
+       */
       const move = useCallback((group, id, to) => {
-        setData((prev) => {
-          if (!prev || !prev.groups[group]) return prev
-          const cur = prev.groups[group].lanes.map((l) => l.id)
-          const from = cur.indexOf(id)
-          if (from < 0) return prev
-          const clamped = Math.max(0, Math.min(cur.length - 1, to))
-          if (from === clamped) return prev
-          cur.splice(clamped, 0, ...cur.splice(from, 1))
-          save({ groups: { [group]: { order: cur } } }, group)
-          return { ...prev, groups: { ...prev.groups, [group]: { ...prev.groups[group], lanes: prev.groups[group].lanes } } }
-        })
-      }, [save])
+        if (!data || !data.groups || !data.groups[group]) return
+        const lanes = data.groups[group].lanes
+        const from = lanes.findIndex((l) => l.id === id)
+        if (from < 0) return
+        const target = Math.max(0, Math.min(lanes.length - 1, to))
+        if (from === target) return
+        const next = lanes.slice()
+        next.splice(target, 0, ...next.splice(from, 1))
+        setData({ ...data, groups: { ...data.groups, [group]: { ...data.groups[group], lanes: next } } })
+        save({ groups: { [group]: { order: next.map((l) => l.id) } } }, group, data)
+      }, [data, save])
 
       const toggleLane = useCallback((group, id) => {
-        setData((prev) => {
-          if (!prev || !prev.groups[group]) return prev
-          const lanes = prev.groups[group].lanes
-          const target = lanes.find((l) => l.id === id)
-          if (!target) return prev
-          const onCount = lanes.filter((l) => l.enabled).length
-          if (target.enabled && onCount <= 1) return prev // 后端也会挡，这里先给反馈
-          save({ groups: { [group]: { enabled: { [id]: !target.enabled } } } }, group)
-          return prev
-        })
-      }, [save])
+        if (!data || !data.groups || !data.groups[group]) return
+        const lanes = data.groups[group].lanes
+        const target = lanes.find((l) => l.id === id)
+        if (!target) return
+        // 后端也会挡住「全部关掉」，但那边是静默纠正；这里要说清为什么点不动。
+        if (target.enabled && lanes.filter((l) => l.enabled).length <= 1) {
+          setErr('至少要留一条通道开着，不然这类素材就没法生成了。')
+          return
+        }
+        const next = lanes.map((l) => (l.id === id ? { ...l, enabled: !l.enabled } : l))
+        setData({ ...data, groups: { ...data.groups, [group]: { ...data.groups[group], lanes: next } } })
+        save({ groups: { [group]: { enabled: { [id]: !target.enabled } } } }, group, data)
+      }, [data, save])
 
       if (!data) return h('div', { style: S.card }, h('h2', { style: S.cardTitle }, '生成通道优先级'), h('p', { style: { ...S.sub, marginTop: 0 } }, '加载中…'))
 
@@ -1988,29 +2016,59 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
             ...g.lanes.map((lane, i) => {
               const isOver = overId === lane.id && dragId !== lane.id
+              const dragging = dragId === lane.id
               const dim = !lane.enabled
               return h('div', {
                 key: lane.id,
-                draggable: !dim,
-                onDragStart: (e) => { setDragId(lane.id); try { e.dataTransfer.effectAllowed = 'move' } catch (_e) { /* no-op */ } },
-                onDragOver: (e) => { e.preventDefault(); setOverId(lane.id) },
+                // 整行都能接住拖拽，**包括关掉的行**：关掉的通道一样有顺序，
+                // 重新打开后就按这个顺序走，所以不能不让它参与排序。
+                onDragOver: (e) => {
+                  if (dragId === null) return
+                  e.preventDefault()
+                  try { e.dataTransfer.dropEffect = 'move' } catch (_e) { /* no-op */ }
+                  setOverId(lane.id)
+                },
                 onDragLeave: () => setOverId((v) => (v === lane.id ? null : v)),
                 onDrop: (e) => {
                   e.preventDefault()
-                  if (dragId && dragId !== lane.id) move(group, dragId, i)
+                  // 优先用 dataTransfer 里的 id：拖拽过程中如果组件重渲染过，
+                  // 闭包里的 dragId 可能已经不是当初那个。
+                  let id = dragId
+                  try { id = e.dataTransfer.getData('text/plain') || dragId } catch (_e) { /* no-op */ }
+                  if (id && id !== lane.id) move(group, id, i)
                   setDragId(null); setOverId(null)
                 },
-                onDragEnd: () => { setDragId(null); setOverId(null) },
                 style: {
                   display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px',
                   borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
                   background: isOver ? 'var(--dsh-accent-soft, rgba(80,160,255,0.12))' : 'transparent',
-                  opacity: dim ? 0.55 : 1,
+                  opacity: dragging ? 0.4 : dim ? 0.55 : 1,
                   borderLeft: i === 0 && !dim ? '3px solid var(--dsh-accent, #4a9eff)' : '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
-                  cursor: dim ? 'default' : 'grab',
+                  // 拖到哪里，那一行上方就显示一条线，看得见会插到哪
+                  borderTop: isOver ? '2px solid var(--dsh-accent, #4a9eff)' : '1px solid var(--dsh-border, rgba(128,128,128,0.25))',
                 },
               },
-                h('span', { style: { fontSize: 13, opacity: 0.6, minWidth: 16, textAlign: 'center' } }, dim ? '—' : i + 1),
+                // 专门的抓手：只有它可拖。以前整行 draggable，手指/鼠标按在
+                // 开关或上下按钮上一动就变成拖拽，点不准；而且 Firefox 不调
+                // dataTransfer.setData 根本不认这是一次拖拽（拖了毫无反应）。
+                h('span', {
+                  draggable: true,
+                  onDragStart: (e) => {
+                    setDragId(lane.id)
+                    try {
+                      e.dataTransfer.setData('text/plain', lane.id) // Firefox 必需
+                      e.dataTransfer.effectAllowed = 'move'
+                    } catch (_e) { /* no-op */ }
+                  },
+                  onDragEnd: () => { setDragId(null); setOverId(null) },
+                  title: '按住拖动调整顺序（也可以用右边的 ↑ ↓）',
+                  'aria-hidden': 'true',
+                  style: {
+                    cursor: 'grab', fontSize: 14, lineHeight: 1, opacity: 0.45,
+                    padding: '4px 2px', flex: '0 0 auto', touchAction: 'none', userSelect: 'none',
+                  },
+                }, '⠿'),
+                h('span', { style: { fontSize: 13, opacity: dim ? 0.4 : 0.6, minWidth: 16, textAlign: 'center' } }, i + 1),
                 h('div', { style: { flex: 1, minWidth: 0 } },
                   h('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
                     h('span', { style: { fontWeight: 500, fontSize: 13 } }, lane.label),
@@ -2022,15 +2080,18 @@ window.__ModuleLoader__.load({
                   label: lane.ready ? '已就绪' : '未配置',
                   title: lane.ready ? '现在就能用' : (lane.reason || '尚未配置'),
                 }),
-                // 触屏 / 键盘可达：拖拽之外的第二条排序路径
+                // 触屏 / 键盘可达：拖拽之外的第二条排序路径。
+                // 只按「在不在头尾」禁用 —— 关掉的行同样要能调序（它的顺序
+                // 在重新打开后就生效）。之前连 dim 一起禁用，等于关掉的通道
+                // 永远卡在原位，只能先打开、调完再关回去。
                 h('button', {
-                  type: 'button', title: '上移', disabled: dim || i === 0, 'aria-label': `${lane.label} 上移`,
-                  style: { ...S.ghostBtn, padding: '2px 8px', opacity: dim || i === 0 ? 0.35 : 1 },
+                  type: 'button', title: '上移', disabled: i === 0 || saving === group, 'aria-label': `${lane.label} 上移`,
+                  style: { ...S.ghostBtn, padding: '2px 8px', opacity: i === 0 ? 0.35 : 1 },
                   onClick: () => move(group, lane.id, i - 1),
                 }, '↑'),
                 h('button', {
-                  type: 'button', title: '下移', disabled: dim || i === g.lanes.length - 1, 'aria-label': `${lane.label} 下移`,
-                  style: { ...S.ghostBtn, padding: '2px 8px', opacity: dim || i === g.lanes.length - 1 ? 0.35 : 1 },
+                  type: 'button', title: '下移', disabled: i === g.lanes.length - 1 || saving === group, 'aria-label': `${lane.label} 下移`,
+                  style: { ...S.ghostBtn, padding: '2px 8px', opacity: i === g.lanes.length - 1 ? 0.35 : 1 },
                   onClick: () => move(group, lane.id, i + 1),
                 }, '↓'),
                 h(Toggle, { on: lane.enabled, disabled: saving === group, onClick: () => toggleLane(group, lane.id) }),
@@ -2038,8 +2099,10 @@ window.__ModuleLoader__.load({
             })),
         )),
 
-        saving === 'error' ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, '保存失败，请重试') : null,
+        err ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)', marginTop: 10 } }, err) : null,
         h('p', { style: { ...S.hint, marginTop: 12, fontSize: 12 } },
+          '按住左边的 ⠿ 可以拖动排序，也可以用每行右边的 ↑ ↓；关掉的通道一样能调顺序，重新打开后就按这个顺序走。',
+          h('br'),
           '保存于 ', h('span', { style: S.codeInline }, data.file || 'lanes.json'), '，即时生效、无需重启。所有通道都被关掉时系统会自动保留一条，避免把自己锁死。'),
       )
     }
@@ -2280,13 +2343,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     *
-     * 以前十几张卡平铺一页，配视频要塞在两块生图之间、找 skill 要滚到底。
-     * 现在按「你在做什么」分成四组，顶部一条通道状态总览：
-     *   生成通道（图 / 视频）· 音频素材 · 治理与工具 · 怎么用
-     * 每组内部把「先配什么、后配什么」按使用频率排好。
-     */
-    /**
      * 「关于」卡：当前版本 + 更新检查。
      *
      * 读的是后端缓存的检查结果（version-check.json），打开页面不发网络请求；
@@ -2483,7 +2539,7 @@ window.__ModuleLoader__.load({
         return () => { live = false }
       }, [])
       return h('div', { style: S.card },
-        h('h2', { style: S.cardTitle }, 'UI 工作流 · Maker-first'),
+        h('h2', { style: S.cardTitle }, 'UI 工作台 · Maker-first'),
         h('p', { style: S.sub }, '原创编辑工作台 + 固定历史 MIT 模型适配；不是复制 Unity 编辑器或其素材。保存始终追加版本；导出仅为隔离审阅包。'),
         h(UiWorkbenchWidget),
         h('p', { style: status === 'unavailable' ? S.warn : S.hint }, status === null ? '读取只读 UI 状态…' : status === 'unavailable' ? '当前宿主尚未加载新 UI 路由。插件代码重新加载后刷新本页；不会另起服务器或重启游戏。' : `固定 MIT：${status.sourceAudit && status.sourceAudit.ok ? '已核验' : '未通过'} · 工作区：${(status.workspaces || []).length} · native：未验收`),
@@ -2491,94 +2547,96 @@ window.__ModuleLoader__.load({
         h('p', { style: S.hint }, '也可在对话中用 /taptap-ui；XML 导入只需已安装 Python 标准库。Cocos/Godot 为后续适配，不自动生成素材、改通道或花额度。'))
     }
 
+    /** 「怎么用」：大白话，放在第一个分组里，打开设置页第一眼就能看到。 */
+    function HowToCard() {
+      const code = (t) => h('span', { style: S.codeInline }, t)
+      return h('div', { style: S.card },
+        h('h2', { style: S.cardTitle }, '怎么用'),
+        h('p', { style: { ...S.sub, marginTop: 0 } },
+          '平时不用来这个页面。想要什么，直接在对话里跟 AI 说就行，比如：'),
+        h('ul', { style: S.ul },
+          h('li', null, '「画一个蓝色盾牌图标」—— AI 会按下面排好的顺序选一条路去画，画好放进项目。'),
+          h('li', null, '「让这个角色跑起来」—— 先出一段视频，再切成一帧一帧的图，导进 Maker。'),
+          h('li', null, '「加个捡金币的声音」—— 先从免费音效库里找，找到就直接装进项目。'),
+          h('li', null, '「来一首战斗背景音乐」—— 第一次会弹出浏览器让你登录 MiniMax，之后就自动了。做好后点右下角的 🎵 可以试听、剪掉不要的部分、导入项目。'),
+          h('li', null, '「帮我建一个 Maker 项目」—— AI 会先跟你确认，再帮你装好、建好。'),
+        ),
+        h('p', { style: { ...S.sub, margin: '10px 0 0' } }, '这个页面只在下面几种时候用一下：'),
+        h('ul', { style: S.ul },
+          h('li', null, '第一次用：登录账号、填 Key（在「图片」「视频」「音频」里）。'),
+          h('li', null, '想换顺序：比如想先用中转站再用网页，在下面「先用哪条」里拖一下。'),
+          h('li', null, '出问题了：看每条后面的小圆点，绿色是能用，灰色是还没配好。'),
+        ),
+        h('p', { style: { ...S.sub, margin: '10px 0 0' } }, '卡住了也可以自己敲命令：'),
+        h('ul', { style: S.ul },
+          h('li', null, code('/taptap-gpt login'), ' 登录 ChatGPT 网页画图'),
+          h('li', null, code('/taptap-video doctor'), ' 看看视频哪条路能用'),
+          h('li', null, code('/taptap-bgm credits'), ' 看看 BGM 还剩多少次'),
+          h('li', null, code('/taptap-audio 金币'), ' 自己搜音效'),
+        ),
+        h('p', { style: { ...S.hint, marginTop: 10 } },
+          '你的账号和 Key 只存在这台电脑的 ', code('$DSH_HOME/taptap-maker-dev/'),
+          ' 里，不会跟着游戏项目上传。'),
+      )
+    }
+
+    /**
+     * 分组：按「要配什么东西」分，每组只放一类。
+     * 以前「生成通道」一组塞了 6 张卡（图片 3 张 + 视频 3 张），skill 和额度红线
+     * 混在「治理与工具」里；现在图片 / 视频分开，额度红线和通道顺序放进第一组，
+     * skill 开关收进「其他」（AI 自己按需挑 skill，用户一般不用动）。
+     */
     function TaptapMakerSettings() {
-      const [group, setGroup] = useState('render')
+      const [group, setGroup] = useState('start')
       const groups = [
-        { id: 'render', icon: '🎨', label: '生成通道', desc: '优先级 / 开关与各通道 Key', count: 6 },
-        { id: 'audio', icon: '🔊', label: '音频素材', desc: '音效库与 BGM 账号', count: 2 },
-        { id: 'ui', icon: '▦', label: 'UI 工作流', desc: '编辑、版本、Maker 审阅', count: 1 },
-        { id: 'govern', icon: '🛡️', label: '治理与工具', desc: '额度红线、skills', count: 2 },
-        { id: 'about', icon: 'ℹ️', label: '关于', desc: '版本与更新检查', count: 1 },
-        { id: 'help', icon: '📖', label: '怎么用', desc: '日常全部在对话里完成', count: 0 },
+        { id: 'start', icon: '🎯', label: '开始', desc: '怎么用、花钱红线、先用哪条', count: 0 },
+        { id: 'image', icon: '🎨', label: '图片', desc: 'ChatGPT 网页 / 中转站 / 章鱼', count: 3 },
+        { id: 'video', icon: '🎬', label: '视频', desc: 'MiniMax / 中转站 / 自己的视频', count: 3 },
+        { id: 'audio', icon: '🔊', label: '音频', desc: 'BGM 账号与免费音效库', count: 2 },
+        { id: 'ui', icon: '▦', label: 'UI 工作台', desc: '编辑、版本、Maker 审阅', count: 0 },
+        { id: 'more', icon: '⚙️', label: '其他', desc: 'Skill 开关、版本更新', count: 0 },
       ]
       return h('div', { style: S.page },
         h('div', null,
           h('h1', { style: S.h1 }, 'TapTap Maker 本地开发'),
           h('p', { style: S.sub },
-            '通道配置、音频素材、治理开关与 skills。所有 Key 只写进本机 ',
-            h('span', { style: S.codeInline }, '$DSH_HOME/taptap-maker-dev/'),
-            '，绝不进入会自动提交的 Maker 工作区。'),
+            '登录账号、填 Key、排先后顺序都在这里。日常要素材直接在对话里说。'),
         ),
 
         h(GroupTabs, { groups, value: group, onChange: setGroup }),
 
-        // ── 生成通道：生图（网页→中转站）+ 视频（三后端） ──
-        h(PanelGroup, { active: group === 'render' },
-          h('p', { style: S.sectionIntro },
-            '先在下面这张「通道优先级」里定好顺序和开关，再填各通道的 Key。视频：MiniMax / 中转站 / 自选本地视频。'),
+        h(PanelGroup, { active: group === 'start' },
+          h(HowToCard),
+          h(PolicyToggle),
           h(LanePriorityCard),
+        ),
+
+        h(PanelGroup, { active: group === 'image' },
+          h('p', { style: S.sectionIntro },
+            '三条画图的路，用哪条、先后顺序在「开始」页的「生成通道优先级」里定。网页版用你自己的 ChatGPT 免费额度；中转站和章鱼花的是你自己的钱。'),
           h(GptAccount),
           h(ImageConfig),
           h(ZaiduyuAccount),
+        ),
+
+        h(PanelGroup, { active: group === 'video' },
+          h('p', { style: S.sectionIntro },
+            '只有「出视频」这一步花钱；后面切帧、抠图、导入都在本机做，反复调不花钱。'),
           h(VideoConfig),
         ),
 
-        // ── 音频素材 ──
         h(PanelGroup, { active: group === 'audio' },
           h('p', { style: S.sectionIntro },
-            '音效走本地 CC0 库（零成本）；BGM 走网页生成，账号只影响额度。'),
+            '音效用免费的 CC0 库，不花钱；完整 BGM 用你的 MiniMax 账号在网页上生成。'),
           h(BgmAccount),
           h(AudioLibrary),
         ),
 
-        // ── 原创 UI 工作流；仅插件侧，不运行或导入游戏 ──
         h(PanelGroup, { active: group === 'ui' }, h(UiWorkflowCard)),
 
-        // ── 治理与工具 ──
-        h(PanelGroup, { active: group === 'govern' },
-          h('p', { style: S.sectionIntro },
-            '额度红线防误花 Maker 内置额度；skills 决定模型能用到哪些游戏开发知识。'),
-          h(PolicyToggle),
+        h(PanelGroup, { active: group === 'more' },
           h(SkillManager),
-        ),
-
-        // ── 关于（版本与更新检查）──
-        h(PanelGroup, { active: group === 'about' },
           h(AboutCard),
-        ),
-
-        // ── 怎么用 ──
-        h(PanelGroup, { active: group === 'help' },
-          h('div', { style: S.card },
-            h('h2', { style: S.cardTitle }, '怎么用（全部在对话里，不用回设置页）'),
-            h('p', { style: { ...S.sub, marginTop: 0 } },
-              '本页只放一次性配置。日常使用直接跟模型说中文，或打斜杠命令：'),
-            h('ul', { style: S.ul },
-              h('li', null, '生图（首选）：说「生成一个蓝色盾牌图标」，默认走 ChatGPT 网页生图。首次需 ',
-                h('span', { style: S.codeInline }, '/taptap-gpt login'), ' 登录一次。'),
-              h('li', null, '生图（回退）：网页通道不可用时用 ',
-                h('span', { style: S.codeInline }, '/taptap-image <描述>'), '（中转站，需先配 baseURL/key/model）。'),
-              h('li', null, '视频（让角色动起来）：',
-                h('span', { style: S.codeInline }, '/taptap-video'),
-                ' —— 首尾帧出视频 → 抽帧 → 抠图 → 导入 Maker。先跑 ',
-                h('span', { style: S.codeInline }, '/taptap-video doctor'), ' 看哪条通道通。'),
-              h('li', null, '视频（零额度）：在 MiniMax Code 里用签到积分出片，下载后 ',
-                h('span', { style: S.codeInline }, '/taptap-video use <mp4>'), ' 挂进来照样能抽帧抠图。'),
-              h('li', null, '音效：说「加个金币音效」，或 ',
-                h('span', { style: S.codeInline }, '/taptap-audio 金币音效')),
-              h('li', null, 'BGM：说「来个战斗 BGM」——首次会引导登录一次，之后自动。'),
-              h('li', null, 'BGM 试听 / 裁剪：生成后点', h('span', { style: S.codeInline }, '输入框旁的 🎵 BGM 挂件'),
-                '，可试听、拖波形裁剪、一键导入项目（生成完会亮红点提醒）。'),
-              h('li', null, '音频转格式：说「把这些音效转成 wav」，或 ',
-                h('span', { style: S.codeInline }, '/taptap-audio-convert')),
-              h('li', null, '初始化 Maker：说「帮我初始化 taptap maker」。'),
-              h('li', null, 'Skills：说「把用不上的 skill 关掉」，或 ',
-                h('span', { style: S.codeInline }, '/taptap-skills')),
-              h('li', null, '额度红线开关：说「关掉额度红线」即可（会先跟你确认）。'),
-            ),
-            h('p', { style: { ...S.hint, marginTop: 8 } },
-              '各配置文件（image.json / video-relay.json / minimax.json）改完即时生效；插件代码改动需重启 DSH。'),
-          ),
         ),
       )
     }
