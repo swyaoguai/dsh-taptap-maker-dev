@@ -28,14 +28,20 @@ export function psSingleQuote(value) {
   return `'${String(value).replace(/'/g, "''")}'`
 }
 
-/** PowerShell 单引号字符串里的 `-like` 通配符只有 `*` 和 `?` 特殊。 */
-function psLikePattern(value) {
-  // 先转义单引号，再把 `*` / `?` 转成 PowerShell 的字符类写法，避免路径里
-  // 本来就带方括号/星号时被当成模式。
-  return String(value)
-    .replace(/'/g, "''")
-    .replace(/[?]/g, '[?]')
-    .replace(/\*/g, '[*]')
+/**
+ * 生成「命令行里出现 needle，且 needle 后面不是路径名字符」的 PowerShell 判断式。
+ *
+ * 不能用裸的 `-like '*<needle>*'`：
+ *   - 前缀误配：`...\browser-profile` 会命中 `...\browser-profile-gpt`、
+ *     `browser-profile-bgm-a` 会命中 `browser-profile-bgm-ab`，于是清理一个账号的
+ *     浏览器会顺手杀掉别的账号/通道正在跑的浏览器；
+ *   - `-like` 里 `[` 是字符类，路径带方括号时匹配不到。
+ * 改用 `[regex]::Escape` 后的 `-match`（大小写不敏感），并用负向前瞻要求后面不是
+ * `[\w.-]`。needle 只经 psSingleQuote 转义一次（以前在这里多转了一次单引号，
+ * 导致路径含 `'` 时永远匹配不到）。
+ */
+function psCommandLineMatch(needle) {
+  return `($_.CommandLine -match ([regex]::Escape(${psSingleQuote(needle)}) + '(?![\\w.-])'))`
 }
 
 /**
@@ -50,7 +56,7 @@ function psLikePattern(value) {
 export function killProcessesContaining(needle, { timeoutMs = 20000, name = 'chrome.exe' } = {}) {
   const script = [
     `Get-CimInstance Win32_Process -Filter ${psSingleQuote(`Name='${name}'`)} | `,
-    `Where-Object { $_.CommandLine -like ${psSingleQuote(`*${psLikePattern(needle)}*`)} } | `,
+    `Where-Object { ${psCommandLineMatch(needle)} } | `,
     'ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }',
   ].join('')
   try {
@@ -69,7 +75,7 @@ export function killProcessesContaining(needle, { timeoutMs = 20000, name = 'chr
 export function countProcessesContaining(needle, { timeoutMs = 15000, name = 'chrome.exe' } = {}) {
   const script = [
     `@(Get-CimInstance Win32_Process -Filter ${psSingleQuote(`Name='${name}'`)} | `,
-    `Where-Object { $_.CommandLine -like ${psSingleQuote(`*${psLikePattern(needle)}*`)} }).Count`,
+    `Where-Object { ${psCommandLineMatch(needle)} }).Count`,
   ].join('')
   try {
     const probe = spawnSync('powershell', ['-NoProfile', '-Command', script], { encoding: 'utf8', timeout: timeoutMs })

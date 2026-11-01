@@ -208,19 +208,24 @@ window.__ModuleLoader__.load({
       )
     }
 
+    // 表单里的 apiKey 来自 GET /image，是掩码（sk-ab…1234 / (unset)）。原样写进 JSON，
+    // 用户粘到 image.json 后真 Key 就被换成掩码、请求 401。只有用户真改过才写入。
     function buildImageJson(f) {
+      const key = f.apiKey.trim()
       return JSON.stringify({
         baseURL: f.baseURL.trim(),
-        apiKey: f.apiKey.trim(),
+        apiKey: key !== '' && key !== (f.loadedApiKey ?? '') ? key : '<在这里填你的 API Key>',
         model: f.model.trim(),
         size: (f.size || '1024x1024').trim(),
       }, null, 2)
     }
 
-    function copyText(text) {
+    // writeText 返回 Promise：失焦 / 权限拒绝 / 非安全来源时会 reject。必须等它结果，
+    // 否则界面显示「已复制」其实什么都没复制，且 execCommand 兜底永远不会执行。
+    async function copyText(text) {
       try {
         if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(text)
+          await navigator.clipboard.writeText(text)
           return true
         }
       } catch (_e) { /* fall through */ }
@@ -757,6 +762,9 @@ window.__ModuleLoader__.load({
       const [credits, setCredits] = useState(null)
       const [cfg, setCfg] = useState(null) // { instrumental, count }
       const [newId, setNewId] = useState('')
+      // 登录轮询（最长 3 分钟）：离开设置页时必须停掉，否则卸载后仍在请求、对已卸载组件 setState。
+      const pollRef = useRef(null)
+      useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
@@ -813,6 +821,7 @@ window.__ModuleLoader__.load({
           .then(({ ok, j }) => {
             if (!ok || !j.ok) { setErr(j.error || '登录启动失败'); setBusy(''); return }
             let tries = 0
+            if (pollRef.current) clearInterval(pollRef.current)
             const timer = setInterval(() => {
               tries += 1
               fetch(`${API_BASE}/bgm`, { headers: { accept: 'application/json' } })
@@ -831,6 +840,7 @@ window.__ModuleLoader__.load({
                 })
                 .catch(() => { if (tries >= 60) { clearInterval(timer); setBusy('') } })
             }, 3000)
+            pollRef.current = timer
           })
           .catch(() => { setErr('请求失败：宿主服务未就绪'); setBusy('') })
       }, [])
@@ -929,13 +939,13 @@ window.__ModuleLoader__.load({
               r.loggedIn
                 ? h('button', {
                   style: S.ghostBtn, disabled: busy !== '',
-                  onClick: () => post('bgm-logout', { account: r.id }),
+                  onClick: () => post('bgm-logout', { account: r.id }, `logout:${r.id}`),
                 }, '退出')
                 : null,
               r.loggedIn
                 ? h('button', {
                   style: S.ghostBtn, disabled: busy !== '',
-                  onClick: () => post('bgm-credits', { account: r.id }),
+                  onClick: () => post('bgm-credits', { account: r.id }, `credits:${r.id}`),
                 }, busy === `credits:${r.id}` ? '查询中…' : '查额度')
                 : null,
               h('button', {
@@ -1011,6 +1021,9 @@ window.__ModuleLoader__.load({
       const [newId, setNewId] = useState('')
       // null = 用 info 里的自定义值；用户一编辑就用自己的输入
       const [dirInput, setDirInput] = useState(null)
+      // 登录轮询（最长 3 分钟）：离开设置页时必须停掉，否则卸载后仍在请求、对已卸载组件 setState。
+      const pollRef = useRef(null)
+      useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current) }, [])
 
       const load = useCallback(() => {
         fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
@@ -1044,6 +1057,7 @@ window.__ModuleLoader__.load({
         // 否则用户能连点、反复开一堆窗口。
         setBusy(account ? `login:${account}` : 'login')
         let tries = 0
+        if (pollRef.current) clearInterval(pollRef.current)
         const timer = setInterval(() => {
           tries += 1
           fetch(`${API_BASE}/gpt`, { headers: { accept: 'application/json' } })
@@ -1061,6 +1075,7 @@ window.__ModuleLoader__.load({
             })
             .catch(() => { if (tries >= 60) { clearInterval(timer); setBusy('') } })
         }, 3000)
+        pollRef.current = timer
       }, [])
 
       const doLogin = useCallback((account) => {
@@ -1461,7 +1476,7 @@ window.__ModuleLoader__.load({
       const load = useCallback(() => {
         fetch(`${API_BASE}/image`, { headers: { accept: 'application/json' } })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
-          .then((j) => { setBridgeDown(false); setForm({ baseURL: j.baseURL || '', apiKey: j.apiKey || '', model: j.model || '', size: j.size || '1024x1024' }) })
+          .then((j) => { setBridgeDown(false); setForm({ baseURL: j.baseURL || '', apiKey: j.apiKey || '', loadedApiKey: j.apiKey || '', model: j.model || '', size: j.size || '1024x1024' }) })
           .catch(() => { setBridgeDown(true); setForm({ baseURL: '', apiKey: '', model: '', size: '1024x1024' }) })
       }, [])
       useEffect(() => { load() }, [load])
@@ -1490,9 +1505,10 @@ window.__ModuleLoader__.load({
       }, [form])
 
       const onCopy = useCallback(() => {
-        const ok = copyText(buildImageJson(form || { baseURL: '', apiKey: '', model: '', size: '1024x1024' }))
-        setCopied(ok ? 'ok' : 'fail')
-        try { setTimeout(() => setCopied(''), 2000) } catch (_e) { /* no-op */ }
+        copyText(buildImageJson(form || { baseURL: '', apiKey: '', model: '', size: '1024x1024' })).then((ok) => {
+          setCopied(ok ? 'ok' : 'fail')
+          try { setTimeout(() => setCopied(''), 2000) } catch (_e) { /* no-op */ }
+        })
       }, [form])
 
       if (form === null) {
@@ -1886,6 +1902,7 @@ window.__ModuleLoader__.load({
         })
           .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`HTTP ${r.status}`))))
           .then((j) => { setData((prev) => (prev ? { ...prev, ...j } : j)); setSaving(''); try { setTimeout(() => setSaving(''), 1500) } catch (_e) { /* no-op */ } })
+          // 'error' 只是失败提示，不是「正在保存」：不能让它把开关一直锁住（否则提示「请重试」却无法重试）。
           .catch(() => setSaving('error'))
       }, [])
 
@@ -1959,7 +1976,7 @@ window.__ModuleLoader__.load({
           h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
             h('span', { style: data.autoFallback ? S.pill : S.offPill }, data.autoFallback ? '自动切换开' : '自动切换关'),
             h(Toggle, {
-              on: data.autoFallback, disabled: saving !== '',
+              on: data.autoFallback, disabled: saving !== '' && saving !== 'error',
               onClick: () => save({ autoFallback: !data.autoFallback }, 'fb'),
             }))),
 

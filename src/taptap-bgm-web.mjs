@@ -32,7 +32,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount, writeJson } from './paths.js'
+import { resolveDshHome, dataDir, readBgmConfig, readBgmPool, writeBgmPool, touchBgmAccount, pickBgmAccount, writeJson, accountSlug } from './paths.js'
 import { resolveAssetDir } from './assets.mjs'
 import { laneEnabled } from './lanes.mjs'
 import { countProcessesContaining, killProcessesContaining, psSingleQuote } from './win-proc.mjs'
@@ -76,7 +76,7 @@ export async function detectSite({ timeoutMs = 8000 } = {}) {
 }
 
 export function profileDir(dshHome, accountId) {
-  const id = String(accountId ?? '').replace(/[^\w.-]/g, '_')
+  const id = accountSlug(accountId)
   if (id.length === 0) return path.join(dataDir(dshHome), 'browser-profile')
   // Each pool account is fully isolated so one broken session can't corrupt
   // the others (mirrors the ChatGPT lane).
@@ -95,10 +95,10 @@ export function downloadDir(dshHome, { projectDir } = {}) {
 }
 
 function parseArgs(argv) {
-  const args = {}
+  const args = { _: [] }
   for (let i = 0; i < argv.length; i += 1) {
     const t = argv[i]
-    if (!t.startsWith('--')) continue
+    if (!t.startsWith('--')) { args._.push(t); continue }
     const key = t.slice(2)
     const next = argv[i + 1]
     if (next === undefined || next.startsWith('--')) args[key] = true
@@ -121,7 +121,8 @@ function findPython() {
 }
 
 /** Escape a string into a python single-quoted literal. */
-const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n')}'`
+// 必须连 \r 一起转义：CRLF 提示词里裸 \r 会让 Python 单引号字面量提前断行（SyntaxError）。
+const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '\\r').replace(/\n/g, '\\n')}'`
 
 /**
  * Run a python playwright snippet with the persistent profile.
@@ -195,7 +196,7 @@ try:
         result["ok"] = True
 except Exception as e:
     result["error"] = str(e)
-print("__RESULT__" + json.dumps(result, ensure_ascii=False))
+print("__RESULT__" + json.dumps(result, ensure_ascii=True))
 `
   const tmp = path.join(os.tmpdir(), `bgmweb-${Date.now()}.py`)
   fs.writeFileSync(tmp, script, 'utf8')
@@ -205,7 +206,11 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
   return new Promise((resolve) => {
     let out = ''
     let settled = false
-    const child = spawn(py, [tmp], { stdio: ['ignore', 'pipe', 'pipe'] })
+    // 管道下 Python 默认按控制台代码页（中文 Windows 为 GBK）输出，Node 按 UTF-8 解码会乱码。
+    const child = spawn(py, [tmp], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+    })
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
@@ -246,7 +251,14 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
         return
       }
       try {
-        resolve({ ok: true, ...JSON.parse(out.slice(marker + '__RESULT__'.length).split('\n')[0]) })
+        // Python 侧异常写在 `error`，调用方统一读 `err`：这里映射一次，
+        // 否则启动失败（exitCode=21、goto 超时）的原因会变成 undefined。
+        const parsed = JSON.parse(out.slice(marker + '__RESULT__'.length).split('\n')[0])
+        resolve({
+          ...parsed,
+          ok: parsed.ok === true,
+          err: parsed.ok === true ? undefined : (parsed.error ?? 'unknown error'),
+        })
       } catch {
         resolve({ ok: false, err: 'unparseable result: ' + out.slice(marker, marker + 300) })
       }
@@ -1196,7 +1208,8 @@ async function main() {
     return
   }
   if (cmd === 'gen' || cmd === 'generate') {
-    const prompt = args.prompt ?? args._?.[0]
+    // args._[0] 是子命令本身（gen），位置参数提示词在其后。
+    const prompt = args.prompt ?? args._[1]
     if (typeof prompt !== 'string' || prompt.length === 0) {
       process.stderr.write('usage: taptap-bgm-web gen --prompt "<提示词>" [--account <名>] [--instrumental|--lyrics]\n')
       process.exitCode = 2

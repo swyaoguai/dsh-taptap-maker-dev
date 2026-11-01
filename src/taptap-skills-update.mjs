@@ -151,12 +151,18 @@ function importFromDirectory(sourceDir, cacheDir, record) {
 function importFromGit(repoUrl, cacheDir, record) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'taptap-skills-'))
   try {
-    const result = spawnSync('git', ['clone', '--depth', '1', repoUrl, tmp], {
+    // clone 进以仓库名命名的子目录：importFromDirectory 用目录名作根技能的稳定 id，
+    // 直接 clone 到 mkdtemp 目录时名字是随机的 taptap-skills-XXXXXX，
+    // 每次更新都会判成「新增」并在缓存里多留一份。
+    const repoName = String(repoUrl).split(/[?#]/)[0].replace(/[\\/]+$/, '').split(/[\\/:]/).pop()
+      ?.replace(/\.git$/i, '').replace(/[^\w.-]/g, '_') || 'skill'
+    const dest = path.join(tmp, repoName)
+    const result = spawnSync('git', ['clone', '--depth', '1', repoUrl, dest], {
       stdio: 'ignore',
       timeout: 120000,
     })
     if (result.status !== 0) throw new Error(`git clone failed (status ${result.status})`)
-    importFromDirectory(tmp, cacheDir, record)
+    importFromDirectory(dest, cacheDir, record)
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true })
   }

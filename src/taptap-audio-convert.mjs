@@ -108,7 +108,8 @@ export function probeDurationAsync(file) {
 /** Build the -af filter chain from options. */
 function buildFilter(opts, duration) {
   const parts = []
-  if (opts.trim === true || opts.trim === 'true') {
+  const trimmed = opts.trim === true || opts.trim === 'true'
+  if (trimmed) {
     // Strip leading silence, then trailing silence via the reverse trick.
     const lead = 'silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05:detection=peak'
     parts.push(lead, 'areverse', lead, 'areverse')
@@ -119,7 +120,11 @@ function buildFilter(opts, duration) {
   const fadeIn = Number(opts['fade-in'] ?? opts.fadeIn ?? 0)
   const fadeOut = Number(opts['fade-out'] ?? opts.fadeOut ?? 0)
   if (fadeIn > 0) parts.push(`afade=t=in:st=0:d=${fadeIn}`)
-  if (fadeOut > 0 && duration !== null && duration > fadeOut) {
+  if (fadeOut > 0 && trimmed) {
+    // 去静音后流变短，按原时长算的 st 会落在结尾之后、淡出失效。
+    // 反转 → 从头淡入 → 再反转，等价于在「实际结尾」淡出，与时长无关。
+    parts.push('areverse', `afade=t=in:st=0:d=${fadeOut}`, 'areverse')
+  } else if (fadeOut > 0 && duration !== null && duration > fadeOut) {
     parts.push(`afade=t=out:st=${(duration - fadeOut).toFixed(3)}:d=${fadeOut}`)
   }
   return parts.length > 0 ? parts.join(',') : null
@@ -133,7 +138,9 @@ export function convertFile(src, dst, opts) {
   if (bin === null) throw new Error('ffmpeg not found on PATH; install it or set FFMPEG=<path>')
 
   if (path.extname(dst).toLowerCase() !== target.ext) {
-    dst = `${dst.replace(/\.[^.]+$/, '')}${target.ext}`
+    // 只去掉文件名自己的扩展名：目录名里的点（D:\proj.v2\bgm）不能被当成扩展名截掉。
+    const ext = path.extname(dst)
+    dst = `${ext ? dst.slice(0, -ext.length) : dst}${target.ext}`
   }
   fs.mkdirSync(path.dirname(dst), { recursive: true })
 
@@ -174,7 +181,8 @@ export function convertFile(src, dst, opts) {
   if (bitrate !== null) {
     // Replace the encoder's default bitrate/quality slot.
     const bi = aArgs.findIndex((a) => a === '-b:a' || a === '-q:a')
-    if (bi >= 0) { aArgs[bi + 1] = bitrate } else { aArgs.push('-b:a', bitrate) }
+    // ogg 默认是 -q:a（质量档），换成码率时键也要换成 -b:a，否则 -q:a 64k 是非法质量值。
+    if (bi >= 0) { aArgs[bi] = '-b:a'; aArgs[bi + 1] = bitrate } else { aArgs.push('-b:a', bitrate) }
   }
   if (mono) aArgs.push('-ac', '1')
   if (rate > 0) aArgs.push('-ar', String(rate))
@@ -217,9 +225,11 @@ export function makeLoop(src, dst, times, opts) {
   for (let i = 0; i < count; i += 1) inputs.push('-i', src)
   const labels = Array.from({ length: count }, (_, i) => `[${i}:a]`).join('')
   const filter = `${labels}concat=n=${count}:v=0:a=1[out]`
+  // 编码器跟随输出扩展名：写死 libmp3lame 时 .ogg 封装直接失败、.wav 里装的是 MP3。
+  const loopTarget = Object.values(TARGETS).find((t) => t.ext === path.extname(dst).toLowerCase()) ?? TARGETS.mp3
   fs.mkdirSync(path.dirname(dst), { recursive: true })
   const r = spawnSync(bin, ['-y', '-hide_banner', '-loglevel', 'error', ...inputs,
-    '-filter_complex', filter, '-map', '[out]', '-c:a', 'libmp3lame', '-b:a', '192k', dst],
+    '-filter_complex', filter, '-map', '[out]', ...loopTarget.args, dst],
     { encoding: 'utf8' })
   if (r.status !== 0) throw new Error(`loop failed: ${(r.stderr || '').trim().split('\n').slice(-1)[0] ?? 'unknown'}`)
   return { src, dst, copies: count, bytes: fs.statSync(dst).size }

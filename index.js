@@ -248,6 +248,12 @@ async function gptPoolCommand(home, raw) {
     const id = flag('id')
     if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-gpt pool remove --id <名>' }
     writeGptPool(home, { accounts: readGptPool(home).accounts.filter((a) => a.id !== id) })
+    // 与设置页的删除路由一致：先释放锁再删浏览器登录态目录，否则同名重加会复用旧会话。
+    try {
+      const prof = gptAccountProfileDir(home, id)
+      gptReleaseProfile(prof)
+      fs.rmSync(prof, { recursive: true, force: true })
+    } catch { /* best effort */ }
     return { ok: true, text: `已移除账号「${id}」（其浏览器登录态也一并删除）。` }
   }
   if (sub === 'ban' || sub === '封禁') {
@@ -1739,8 +1745,10 @@ export function apply(ctx, config = {}) {
           const type = BGM_MIME[path.extname(abs).toLowerCase()] ?? 'application/octet-stream'
           const range = /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range ?? ''))
           if (range !== null && (range[1] !== '' || range[2] !== '')) {
-            const from = range[1] === '' ? 0 : Number(range[1])
-            const to = range[2] === '' ? stat.size - 1 : Math.min(Number(range[2]), stat.size - 1)
+            // 后缀区间 bytes=-N 表示「最后 N 字节」（RFC 7233），不是 0..N。
+            const suffix = range[1] === ''
+            const from = suffix ? Math.max(0, stat.size - Number(range[2])) : Number(range[1])
+            const to = suffix || range[2] === '' ? stat.size - 1 : Math.min(Number(range[2]), stat.size - 1)
             if (!Number.isFinite(from) || !Number.isFinite(to) || from > to || from >= stat.size) {
               res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` })
               return res.end()
@@ -1798,9 +1806,10 @@ export function apply(ctx, config = {}) {
           // 首尾 0.3/0.5 秒的音量，与「原样」二字矛盾。
           const wantFade = isTrim && p.fade !== false
           const base = path.basename(abs, path.extname(abs))
+          let tmpDir
           try {
             // 1) cut + convert into a temp wav (no Maker credits; pure ffmpeg)
-            const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taptap-bgm-'))
+            tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'taptap-bgm-'))
             const tmpOut = path.join(tmpDir, 'out.wav')
             const conv = ffmpegConvert(abs, tmpOut, {
               to: 'wav',
@@ -1814,7 +1823,6 @@ export function apply(ctx, config = {}) {
               `${base}${isTrim ? ' 裁剪' : ''}.wav`,
             )
             const inst = installAudioAsset(tmpOut, project, 'bgm', outName)
-            try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ }
             return sendJson(res, 200, {
               ok: true,
               file: inst.target,
@@ -1826,6 +1834,9 @@ export function apply(ctx, config = {}) {
             })
           } catch (error) {
             return sendJson(res, 502, { ok: false, error: error?.message ?? String(error) })
+          } finally {
+            // 失败路径（缺 ffmpeg / 区间非法 / 安装失败）也要清临时目录。
+            if (tmpDir) { try { fs.rmSync(tmpDir, { recursive: true, force: true }) } catch { /* best effort */ } }
           }
         }
         // NOTE: audio-search / audio-sources were removed — the settings page no
@@ -2015,7 +2026,7 @@ export function apply(ctx, config = {}) {
           }
           const chosen = result.matches[0]
           const kind = chosen.kind === 'bgm' ? 'bgm' : 'sfx'
-          const outName = om !== null ? om[1] : `${chosen.name}${chosen.ext}`
+          const outName = om !== null ? path.basename(om[1].replace(/^["']|["']$/g, '')) : `${chosen.name}${chosen.ext}`
           // Remote source → download that single file, then write .meta.
           if (chosen.local === false) {
             const remote = await installRemoteMatch(chosen, project, kind, outName)
@@ -2239,7 +2250,7 @@ export function apply(ctx, config = {}) {
               : '未完成登录（或超时）。请在打开的浏览器里完成登录（Google/Apple/手机号/邮箱均可），登录态会保存。',
           }
         }
-        if (low === 'logout' || raw === '退出' || raw === '换号') {
+        if (low === 'logout' || low.startsWith('logout ') || raw === '退出' || raw === '换号') {
           const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
           const r = gptLogout(home, acct)
           return {
@@ -2286,7 +2297,7 @@ export function apply(ctx, config = {}) {
         //   /taptap-gpt grab                  抓 pending 记录里的那个对话
         //   /taptap-gpt grab <对话url>         抓指定对话
         if (low === 'grab' || low.startsWith('grab ') || raw === '抓图' || low === 'pending') {
-          const urlArg = (/https?:\/\/\S+/.exec(raw) ?? [])[1]
+          const urlArg = (/https?:\/\/\S+/.exec(raw) ?? [])[0]
           if (low === 'pending') {
             const p = readGptPending(home)
             return {
@@ -2846,7 +2857,7 @@ export function apply(ctx, config = {}) {
             }
           }
           // 硬件门槛先行：不满足就不要开始动辄几分钟的长跑。
-          const hw = await sfxCheckHardwareAsync()
+          const hw = await sfxCheckHardware()
           if (!hw.ran) {
             // 体检没能真跑成功（典型是缺 Python）：这**不是**硬件问题。
             // 混在一起报会让人去做毫无必要的升级，而真正要做的只是装 Python。
@@ -2961,7 +2972,7 @@ export function apply(ctx, config = {}) {
           const r = await bgmPoolCommand(home, `pool ${raw}`)
           return { kind: r.ok ? 'success' : 'error', text: r.text }
         }
-        if (low === 'logout' || raw === '退出' || raw === '换号') {
+        if (low === 'logout' || low.startsWith('logout ') || raw === '退出' || raw === '换号') {
           const r = bgmLogout(home, accountArg)
           return {
             kind: r.ok ? 'success' : 'error',
@@ -2970,7 +2981,7 @@ export function apply(ctx, config = {}) {
               : `退出失败：可能有浏览器正在使用登录态，请先关闭再试。（${r.profile ?? ''}）`,
           }
         }
-        if (low === 'credits' || raw === '额度') {
+        if (low === 'credits' || low.startsWith('credits ') || raw === '额度') {
           const r = await bgmCredits(home, { accountId: accountArg })
           if (!r.ok) return { kind: 'error', text: `查额度失败：${r.error ?? '未知'}` }
           const exp = r.expiresAt ? `，到期 ${new Date(r.expiresAt).toLocaleDateString('zh-CN')}` : ''
@@ -3064,6 +3075,7 @@ export function apply(ctx, config = {}) {
         // --lyrics lets a single call override the instrumental setting (the
         // default is ON because game BGM normally has no vocals).
         const wantInstrumental = !/--lyrics/.test(raw)
+        let bgmTimer
         const r = await Promise.race([
           // Rotation: if one account has no credits left, try the next one.
           bgmGenerateWithRotation(home, prompt, {
@@ -3072,7 +3084,7 @@ export function apply(ctx, config = {}) {
             instrumental: wantInstrumental,
             accountId: accountArg,
           }),
-          new Promise((resolve) => setTimeout(() => {
+          new Promise((resolve) => { bgmTimer = setTimeout(() => {
             try {
               const prof = profileDir(home)
               // ⚠️ 必须走 win-proc 的统一实现：这里原先内联拼 `'*${prof}*'`，
@@ -3084,8 +3096,8 @@ export function apply(ctx, config = {}) {
               }
             } catch { /* best effort */ }
             resolve({ ok: false, error: `生成超时（${BGM_TIMEOUT_MS / 60000} 分钟）。已停止浏览器，可稍后重试或在网页里手动完成。` })
-          }, BGM_TIMEOUT_MS)),
-        ])
+          }, BGM_TIMEOUT_MS) }),
+        ]).finally(() => clearTimeout(bgmTimer))
         if (!r.ok || r.error) {
           const isCredit = String(r.error ?? '').startsWith('credit_exhausted')
           const triedList = Array.isArray(r.failures) && r.failures.length > 0
@@ -3376,6 +3388,19 @@ function renderVideoJob(job, home) {
 }
 
 /** 解析「当前作业」：`--job <id>` 显式指定，否则取最近更新的那个。 */
+/**
+ * 从「路径 + 若干参数」里取出纯路径：先去掉无值的授权开关（--yes/--force/-y），
+ * 再去掉 --key value（值可带引号），最后剥掉路径两侧引号。
+ * 顺序很重要：先剥带值参数会把 `--yes x.mp4` 里的路径当成 --yes 的值吃掉。
+ */
+function stripVideoArgs(rest) {
+  return String(rest ?? '')
+    .replace(/(^|\s)(--yes|--force|-y)(?=\s|$)/gi, ' ')
+    .replace(/--[a-zA-Z]+\s+("[^"]*"|'[^']*'|\S+)/g, ' ')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+}
+
 function pickVideoJob(home, raw) {
   const flags = parseVideoFlags(raw)
   if (flags.job) return getVideoJob(home, flags.job)
@@ -3561,7 +3586,7 @@ async function videoCommand(home, rawInput) {
       // 自动建作业必须继承设置页模型（createJob 的红线注释：不传就退回内置
       // 默认 H3，等于替用户换了计费模型）。
       if (!job) job = createVideoJob(home, undefined, { model: config.model })
-      const updated = await setVideoReference(home, job.id, kind, rest)
+      const updated = await setVideoReference(home, job.id, kind, stripVideoArgs(rest))
       const ref = updated.refs[kind]
       const lines = [`已设${kind === 'firstFrame' ? '首帧' : '尾帧'}：${ref.name}（${ref.width}×${ref.height}）→ 作业 ${updated.id}`]
       for (const w of ref.warnings ?? []) lines.push(`  ⚠ ${w}`)
@@ -3595,7 +3620,7 @@ async function videoCommand(home, rawInput) {
       let job = pickVideoJob(home, raw)
       if (!job) job = createVideoJob(home, undefined, { model: config.model })
       const forced = hasApproval(raw)
-      const updated = await useLocalVideo(home, job.id, rest.replace(/--\S+\s+\S+/g, '').trim(), { force: forced })
+      const updated = await useLocalVideo(home, job.id, stripVideoArgs(rest), { force: forced })
       // 拒绝覆盖（作业里已有花钱生成的视频）→ 如实回报，不当作失败也不当作成功。
       if (updated.overwritten === false) {
         return { kind: 'error', text: `${updated.message}\n\n我没有覆盖它。确认要换请加 --yes。` }

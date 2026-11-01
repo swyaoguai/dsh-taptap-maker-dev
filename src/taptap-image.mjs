@@ -334,6 +334,8 @@ export async function generateImage(options) {
           fs.writeFileSync(target, Buffer.from(item.b64_json, 'base64'))
         } else if (typeof item.url === 'string') {
           const img = await fetch(item.url, { signal: AbortSignal.timeout(120000) })
+          // 已经扣过一次费：下载失败要如实报错，不能把 403/404 错误页当 png 存下来报成功。
+          if (!img.ok) throw Object.assign(new Error(`image download HTTP ${img.status} (generation already charged; do not resubmit): ${item.url}`), { phase: 'postprocess', submitted: true, requiresLogin: false })
           fs.writeFileSync(target, Buffer.from(await img.arrayBuffer()))
         } else {
           continue
@@ -550,6 +552,7 @@ export async function editImage(options) {
       }
       if (typeof item.url === 'string') {
         const img = await fetch(item.url, { signal: AbortSignal.timeout(120000) })
+        if (!img.ok) throw Object.assign(new Error(`image download HTTP ${img.status} (generation already charged; do not resubmit): ${item.url}`), { phase: 'postprocess', submitted: true, requiresLogin: false })
         fs.mkdirSync(path.dirname(out), { recursive: true })
         fs.writeFileSync(out, Buffer.from(await img.arrayBuffer()))
         outputs.push(out)

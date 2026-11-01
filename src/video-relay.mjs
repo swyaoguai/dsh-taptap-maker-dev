@@ -441,7 +441,7 @@ async function queryOpenAI(cfg, taskId) {
     error: mapped === 'failed'
       ? (expired
         ? '成片下载已过期（download_expired）：中转站只保留 24 小时，需要重新生成'
-        : errorMessage(json?.error ?? json, '', 200))
+        : errorMessage(json, '', 200))
       : undefined,
     contentUrl: joinUrl(cfg.baseURL, `/videos/${encodeURIComponent(taskId)}/content`),
     directUrl: typeof json?.url === 'string' && json.url ? json.url : undefined,

@@ -420,6 +420,11 @@ function rel(id, sub, file) {
   return `${sub}/${file}`
 }
 
+/** 作业的实际目录：优先建作业时记下的 job.dir（与 absPath 一致），否则现算。 */
+function jobDirOf(home, id, job) {
+  return (job?.dir && typeof job.dir === 'string') ? job.dir : jobRoot(home, id, job)
+}
+
 export function absPath(home, id, relative) {
   // 优先用 job.json 里记下的目录：它是建作业时算出来并落盘的，之后 cwd 变了
   // 也不会漂 —— 否则一条在项目 A 里建的作业，切到项目 B 就会读不到自己的帧。
@@ -568,7 +573,9 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
     throw new Error('当前是「自选视频」后端：没有可提交的远程任务。直接用 /taptap-video use <mp4 路径> 挂上本地视频')
   }
   // 模型能力只在官方 MiniMax 后端下有意义：中转站的模型名由中转站自己定义。
-  if (backend === 'minimax') {
+  // 抽成函数：auto 模式下从中转站**回退**到 MiniMax 时同样要过这道关，
+  // 否则会带着空模型 / 不支持尾帧的模型去打付费接口。
+  const assertMinimaxModel = () => {
     // ⚠️ 模型不允许被自动替换。这里**只报错、绝不换模型**：视频按秒计费，
     //    静默换一个「差不多」的模型等于替用户改了要买的东西。
     //    需要换必须用户自己下指令（/taptap-video set --model … 或设置页）。
@@ -584,6 +591,7 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
         + '（插件不会自动替你换模型）')
     }
   }
+  if (backend === 'minimax') assertMinimaxModel()
   // 不在中转站提交前做型号校验：每家中转站可以有自己的能力表，
   // 写死一家反而误导其他家。超时 / 超画幅 / 不支持尾帧 → 平台 400 时如实回显。
 
@@ -631,6 +639,24 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
    * 重试也不会生成第二段视频、不会扣两次钱。
    */
   const attempt = async (useBackend, idemKey) => {
+    if (useBackend === 'relay' && config.relay?.protocol === 'minimax') {
+      // MiniMax 协议的中转站：协议与官方一致，走 minimax-video.mjs，只是地址 / Key / 模型
+      // 用中转站自己的。以前这里落到 relaySubmit 的 OpenAI /videos 形态，请求根本不对。
+      return submitVideo({
+        baseUrl: config.relay.baseURL,
+        apiKey: config.relay.apiKey,
+        model: config.relay.model || job.settings.model,
+        timeoutMs: 120_000,
+        prompt,
+        firstFrameImage,
+        lastFrameImage,
+        duration: job.settings.duration,
+        resolution: job.settings.resolution,
+        promptOptimizer: job.settings.promptOptimizer,
+        idempotencyKey: idemKey,
+      })
+    }
+    if (useBackend === 'minimax') assertMinimaxModel()
     if (useBackend === 'relay') {
       const submitted = await relaySubmit(config.relay, {
         prompt,
@@ -676,6 +702,9 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
   const chain = []
   if (usable(backend) && !chain.includes(backend)) chain.push(backend)
   for (const id of candidates) if (!chain.includes(id)) chain.push(id)
+  // 一条可用通道都没有：让首选后端自己报出「没配好」的具体原因，
+  // 而不是空循环后 `throw null`（调用方读 error.message 会崩、用户看不到原因）。
+  if (chain.length === 0) chain.push(backend)
 
   // 同一次提交共用一个幂等键（跨通道重试也不换）。
   const idemKey = randomUUID()
@@ -832,6 +861,11 @@ export async function pollJobVideo(home, id, config) {
 
   const backend = job.video.backend === 'relay' ? 'relay' : 'minimax'
   const model = job.video.model || job.settings.model
+  // MiniMax 协议的中转站：查询 / 取文件 / 下载都走 minimax-video.mjs，用中转站的地址与 Key。
+  const relayIsMinimax = backend === 'relay' && config.relay?.protocol === 'minimax'
+  const mm = relayIsMinimax
+    ? { baseUrl: config.relay.baseURL, apiKey: config.relay.apiKey }
+    : { baseUrl: config.baseURL, apiKey: config.apiKey }
   let query
   // 上一轮「已生成、下载失败」：任务状态已知成功，跳过重复查询，直接重试下载。
   // （查询免费但没必要——中转站还可能限流。）
@@ -841,9 +875,9 @@ export async function pollJobVideo(home, id, config) {
     query = { status: 'succeeded', remoteStatus: '已生成（重试下载）', ...hint }
   } else {
     try {
-      query = backend === 'relay'
-        ? await relayQuery(config.relay, taskId)
-        : await queryVideo({ baseUrl: config.baseURL, apiKey: config.apiKey, model, taskId, timeoutMs: 60_000 })
+      query = backend === 'minimax' || relayIsMinimax
+        ? await queryVideo({ baseUrl: mm.baseUrl, apiKey: mm.apiKey, model, taskId, timeoutMs: 60_000 })
+        : await relayQuery(config.relay, taskId)
     } catch (error) {
       // 单次查询失败 ≠ 任务失败，保留 running 让下一轮重试。
       // ⚠️ 轮询本身**不会**再花钱（只是查状态），所以这里可以放心重试；
@@ -873,12 +907,12 @@ export async function pollJobVideo(home, id, config) {
   }
   let bytes
   try {
-    if (backend === 'relay') {
+    if (backend === 'relay' && !relayIsMinimax) {
       bytes = await relayDownload(config.relay, taskId, query, 300_000)
     } else {
       // 成功：v2 直接有地址；v1 要先拿 file_id 换一次下载地址。
       const url = query.videoUrl
-        ?? (query.fileId ? await retrieveFile({ baseUrl: config.baseURL, apiKey: config.apiKey, model, fileId: query.fileId, timeoutMs: 60_000 }) : undefined)
+        ?? (query.fileId ? await retrieveFile({ baseUrl: mm.baseUrl, apiKey: mm.apiKey, model, fileId: query.fileId, timeoutMs: 60_000 }) : undefined)
       if (!url) {
         fresh.video = { ...fresh.video, status: 'error', error: '任务已成功，但响应里没有视频地址', updatedAt: Date.now() }
         return writeVideoJob(home, fresh)
@@ -901,9 +935,11 @@ export async function pollJobVideo(home, id, config) {
     }
     log(fresh2, 'warn', `视频已生成但下载失败（${error?.message ?? error}）；再跑一次 /taptap-video poll 会直接重试下载，不扣费`)
     // 记下下载线索，短路径重试时不用重新查询就能拿到地址。
-    fresh2.video.downloadHint = backend === 'relay'
+    fresh2.video.downloadHint = backend === 'relay' && !relayIsMinimax
       ? JSON.stringify({ directUrl: query.directUrl, contentUrl: query.contentUrl })
-      : JSON.stringify({ fileId: query.fileId })
+      // v2（H3）查询返回的是 videoUrl 而不是 fileId：两个都要记，否则重试下载时拿不到地址，
+      // 已付费的视频会被判成「没有视频地址」的 error。
+      : JSON.stringify({ fileId: query.fileId, videoUrl: query.videoUrl })
     clearSubmitLedger(home) // 任务确认成功，台账的「结果未知」已解除
     return writeVideoJob(home, fresh2)
   }
@@ -1070,7 +1106,9 @@ export async function extractJobFrames(home, id, overrides = {}) {
     //    落位用「逐文件 rename」而不是「整目录 rename」：Windows 上重命名一个
     //    仍被打开的目录会 EPERM（ffmpeg/图片解码刚释放句柄，时序上不稳），
     //    单文件 rename 则始终可用。先备份旧文件、逐个替换、失败即回滚。
-    const root = jobRoot(home, id)
+    // 与 absPath 同一个根（建作业时记下的 job.dir）：按 cwd 现算会在别的工程目录下另起一份，
+    // 之后按 job.dir 读帧就全找不到了。
+    const root = jobDirOf(home, id, job)
     const staging = path.join(root, '.frames-staging')
     rmSync(staging, { recursive: true, force: true })
     mkdirSync(staging, { recursive: true })
@@ -1134,11 +1172,12 @@ export async function keyJobFrames(home, id, overrides = {}) {
   if (job.frames?.status !== 'ready' || job.frames.files.length === 0) throw new Error('还没有抽帧，先抽帧再抠')
   const settings = normalizeSettings({ ...job.settings, ...overrides })
   const { width, height } = job.frames
-  const keyedDir = path.join(jobRoot(home, id), 'keyed')
+  const root = jobDirOf(home, id, job)
+  const keyedDir = path.join(root, 'keyed')
   // 同样先写临时目录：抠像途中失败时，上一轮的 keyed/ 仍然完好，
   // 不会出现「一半新参数、一半旧参数」的混合结果。
-  const keyedStaging = path.join(jobRoot(home, id), '.keyed-staging')
-  const keyedBackup = path.join(jobRoot(home, id), '.keyed-prev')
+  const keyedStaging = path.join(root, '.keyed-staging')
+  const keyedBackup = path.join(root, '.keyed-prev')
   rmSync(keyedStaging, { recursive: true, force: true })
   mkdirSync(keyedStaging, { recursive: true })
   const keyed = []
@@ -1198,19 +1237,22 @@ export async function keyJobFrames(home, id, overrides = {}) {
  *
  * 返回 { layout, columns }；调用方按这个结果铺格子。
  */
-export function chooseLayout({ count, cellWidth, maxWidth = 8192, maxHeight = 8192, maxPixels = 64_000_000 }) {
+export function chooseLayout({ count, cellWidth, cellHeight, maxWidth = 8192, maxHeight = 8192, maxPixels = 64_000_000 }) {
   const n = Math.max(1, Math.floor(Number(count) || 1))
   const cw = Math.max(1, Math.floor(Number(cellWidth) || 1))
+  // 格子不一定是正方形：高度方向按 cellHeight 算（缺省时退回 cellWidth，保持旧行为）。
+  const ch = Math.max(1, Math.floor(Number(cellHeight) || cw))
   // 宽度方向最多放几个（保持原来的行为）。
   let perRow = Math.max(1, Math.floor(maxWidth / cw))
   // 高度方向也得卡：行数不能多到让整图超高。
-  const maxRows = Math.max(1, Math.floor(maxHeight / cw))
+  const maxRows = Math.max(1, Math.floor(maxHeight / ch))
   // 内存闸门：总像素（含格子数）不许超过 maxPixels，否则单张就吃掉几 GB。
-  const pixelCap = Math.max(1, Math.floor(maxPixels / (cw * cw)))
+  const pixelCap = Math.max(1, Math.floor(maxPixels / (cw * ch)))
   const usable = Math.min(n, pixelCap)
   const columns = Math.max(1, Math.min(perRow, usable))
   const rows = Math.ceil(n / columns)
-  if (rows > maxRows) {
+  // 总像素按「实际行 × 列」算：pixelCap 只限制了列数，8×8 个 1024 格子仍会到 6700 万像素。
+  if (rows > maxRows || columns * cw * rows * ch > maxPixels) {
     // 无论如何都放不下 —— 交给调用方报错，而不是硬撑出一张爆内存的图。
     return { layout: 'grid', columns, tooLarge: true, rows, perFrameLimit: Math.max(1, Math.floor(pixelCap / Math.max(1, maxRows))) }
   }
@@ -1235,6 +1277,9 @@ export async function composeJobSheet(home, id, overrides = {}) {
     const chosen = chooseLayout({ count: frames.length, cellWidth: settings.cellWidth, cellHeight: settings.cellHeight })
     if (layout === 'auto') layout = chosen.layout
     if (columns <= 0) columns = chosen.columns
+    // 显式 layout=row 时 composeSheet 会忽略 columns、铺成一整行：尺寸检查要按单行算，
+    // 放不下就改用 chooseLayout 给出的网格，而不是放出一张 6 万多像素宽的图。
+    if (layout === 'row' && frames.length * settings.cellWidth > 8192) layout = 'grid'
     if (chosen.tooLarge) {
       throw new Error(
         `合成图会太大：${frames.length} 帧 × ${settings.cellWidth}px 格子，`
@@ -1247,7 +1292,7 @@ export async function composeJobSheet(home, id, overrides = {}) {
     const cellW = Math.max(1, settings.cellWidth)
     const rows = Math.ceil(frames.length / Math.max(1, columns))
     const outW = cellW * Math.max(1, columns)
-    const outH = cellW * rows
+    const outH = Math.max(1, settings.cellHeight) * rows
     if (outW > 8192 || outH > 8192 || outW * outH > 64_000_000) {
       const maxCols = Math.max(1, Math.floor(8192 / cellW))
       throw new Error(

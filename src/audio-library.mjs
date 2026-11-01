@@ -240,6 +240,18 @@ const INTENTS = [
   { zh: ['背景音乐', 'bgm', '音乐', '配乐', '主题曲'], tokens: ['jingles'], kind: 'bgm', note: 'Kenney CC0 音乐包只有 1~3 秒短 jingle（HIT/NES/PIZZI/SAX/STEEL 五组），没有可无缝循环的完整 BGM。要完整循环 BGM 需要另找 CC0 曲目或授权素材。' },
 ]
 
+/**
+ * 意图关键词是否出现在查询里。中文关键词按子串匹配；英文关键词必须是完整单词，
+ * 否则 'close' 会命中 'lose'（失败）、'window' 命中 'win'、'guitar' 命中 'ui'、
+ * 'background' 命中 'back'。
+ */
+function intentKeywordHit(q, keyword) {
+  const k = keyword.toLowerCase()
+  if (!/^[\x00-\x7f]+$/.test(k)) return q.includes(k)
+  const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`).test(q)
+}
+
 /** Score one index item against a set of tokens. */
 function scoreItem(item, tokens, weight = 1) {
   let score = 0
@@ -250,7 +262,7 @@ function scoreItem(item, tokens, weight = 1) {
     // 词边界：'back' 以 45 分命中 'background-music' 属于语义误报（返回 vs
     // 背景音乐毫无关系）。45 分档要求 token 作为**完整连字符词**出现；
     // 纯前缀拼接（back+ground）落到 25 分 includes 档。
-    else if (item.norm.includes(`-${t}`) || item.norm.startsWith(`${t}-`)) hit = 45
+    else if (item.norm.includes(`-${t}-`) || item.norm.endsWith(`-${t}`)) hit = 45
     else if (item.norm.includes(t)) hit = 25
     score += hit * weight
   }
@@ -271,7 +283,7 @@ export async function searchAudio(cacheDir, query, { limit = 8, ...opts } = {}) 
 
   for (const intent of INTENTS) {
     for (const zh of intent.zh) {
-      if (q.includes(zh.toLowerCase())) {
+      if (intentKeywordHit(q, zh)) {
         primary = intent.tokens
         alt = intent.alt ?? []
         kind = intent.kind
@@ -339,9 +351,13 @@ export async function searchAudio(cacheDir, query, { limit = 8, ...opts } = {}) 
 /** Install a remote (non-Kenney) match: download then place it. */
 export async function installRemoteMatch(match, project, kind, outName) {
   const ext = match.ext || '.mp3'
-  const safe = String(outName && outName.length > 0
+  let safe = String(outName && outName.length > 0
     ? outName
     : `${match.name}${ext}`).replace(/[^\w.\-()\u4e00-\u9fa5]/g, '_')
+  // 扩展名跟随真实格式（与 installFile 一致），避免 MP3 字节存成 .wav。
+  if (path.extname(safe).toLowerCase() !== ext.toLowerCase()) {
+    safe = `${path.basename(safe, path.extname(safe))}${ext}`
+  }
   const dir = path.join(project, 'assets', 'audio', kind === 'bgm' ? 'bgm' : 'sfx')
   fs.mkdirSync(dir, { recursive: true })
   const target = path.join(dir, safe)

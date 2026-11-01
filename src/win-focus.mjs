@@ -28,12 +28,13 @@ import { spawnSync } from 'node:child_process'
 export function focusWindowByCmdline(needle, { name = 'chrome.exe' } = {}) {
   if (process.platform !== 'win32') return false
   const psNeedle = String(needle).replace(/'/g, "''")
-  // -like 模式里转义 * 与 ?，免得路径里的字符被当通配符。
-  const pattern = psNeedle.replace(/[?]/g, '[?]').replace(/\*/g, '[*]')
+  // 与 win-proc 同一判据：regex 转义 + 要求路径后面不是路径名字符，避免
+  // `browser-profile` 误配 `browser-profile-gpt`（把别的通道的窗口抢到前台），
+  // 也避免 -like 把路径里的 `[` 当字符类。
   const script = [
     '$ErrorActionPreference = 0',
     `$p = Get-CimInstance Win32_Process -Filter 'Name="${name}"' | `,
-    `  Where-Object { $_.CommandLine -like '*${pattern}*' -and $_.CommandLine -notlike '*--type=*' } | `,
+    `  Where-Object { $_.CommandLine -match ([regex]::Escape('${psNeedle}') + '(?![\\w.-])') -and $_.CommandLine -notlike '*--type=*' } | `,
     '  Select-Object -First 1',
     'if ($p -and $p.ProcessId) {',
     '  $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue',
@@ -57,16 +58,16 @@ function runPowerShell(script) {
 }
 
 /**
- * Add-Type 每次调用都要起 csc 编译一遍 C#（数百毫秒的 CPU）。focusBrowserWindow
- * 的重试循环以前每 700ms 完整跑一次「查找 + 编译 + 置前」，登录窗口存在期间
- * 这段编译开销一直在烧 CPU、抢正要启动的浏览器的资源（「添加账号卡顿」的
- * 另一半）。把「编译」与「置前」拆成两次调用，编译一次进程内复用。
+ * 把窗口句柄恢复到前台。
+ *
+ * ⚠️ 每次都必须带 Add-Type：runPowerShell 每次 spawn 一个**新的** powershell 进程，
+ * Add-Type 定义的类型只活在那个进程里。以前用模块级标记「编译过就不再下发」，
+ * 结果从第二次起 `[DshFocus]` 根本不存在，置前永远失败。
+ * 编译开销只发生在真找到窗口句柄之后（focusWindowByCmdline 先查句柄），
+ * 窗口未出现前的轮询不会触发编译。
  */
-let focusTypeCompiled = false
-
-/** 把窗口句柄恢复到前台（首次调用时编译 Add-Type，之后复用）。 */
 function focusHandle(handle) {
-  const compile = focusTypeCompiled ? '' : `
+  const compile = `
 Add-Type @"
 using System;
 using System.Runtime.InteropServices;
@@ -102,9 +103,6 @@ if ($fgThread -ne 0 -and $fgThread -ne $curThread) { $dll::AttachThreadInput($cu
 if ($ok) { Write-Output "FOCUSED" }
 `
   const out = runPowerShell(script)
-  if (!focusTypeCompiled) focusTypeCompiled = /FOCUSED|False/.test(out ?? '') || out !== null
-  // 编译过一次后本进程内不再重复编译（不同 powershell 进程各有自己的缓存，
-  // 这里的标记只是避免重复下发编译文本）。
   return /FOCUSED/.test(out ?? '')
 }
 

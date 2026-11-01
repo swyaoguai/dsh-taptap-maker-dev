@@ -11,6 +11,7 @@
 import os from 'node:os'
 import path from 'node:path'
 import fs from 'node:fs'
+import crypto from 'node:crypto'
 
 /** Resolve $DSH_HOME, falling back to ~/.dsh. */
 export function resolveDshHome(explicit) {
@@ -324,7 +325,16 @@ export function writeBgmConfig(dshHome, patch = {}) {
  * `profile` path the runtime would never touch — a landmine for any code that
  * trusts the stored field.
  */
-const slugId = (id) => String(id ?? '').replace(/[^\w.-]/g, '_')
+export function accountSlug(id) {
+  const raw = String(id ?? '')
+  const slug = raw.replace(/[^\w.-]/g, '_')
+  // 纯 ASCII 安全 id 保持原样（兼容已有的登录态目录）；含中文等字符时
+  // 单纯替换成 _ 会让「小号」「主号」都变成 "__"，两个账号共用同一个浏览器
+  // 登录态、删一个连带删掉另一个。追加原始 id 的短哈希让它们互不相撞。
+  if (slug === raw) return slug
+  return `${slug}-${crypto.createHash('sha1').update(raw, 'utf8').digest('hex').slice(0, 8)}`
+}
+const slugId = accountSlug
 
 /* ------------------------------------------------------------------------- *
  * MINIMAX (BGM) ACCOUNT POOL — multi-account rotation for the BGM web lane.
@@ -548,16 +558,28 @@ export function touchGptAccount(dshHome, id, patch = {}) {
  * 于是「配置文件写坏了」会表现成「配置莫名其妙全丢了」，用户根本无从查起。
  * 留一份现场才能事后找回。
  */
+// 同一份坏内容只留一次证据：设置页轮询 / 一次请求多次读会对同一个坏文件反复调用，
+// 不去重的话 .corrupt-* 会无限增长。键 = 路径 + 大小 + mtime。
+const corruptBackedUp = new Set()
+
 export function readJson(file) {
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'))
+    const text = fs.readFileSync(file, 'utf8')
+    // Windows 上常见带 BOM 的 UTF-8（PowerShell 5 的 -Encoding utf8、记事本）；
+    // JSON.parse 不认 BOM，不剥会被当成损坏，下次写入就把用户配置覆盖成空。
+    return JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text)
   } catch (error) {
     if (error?.code === 'ENOENT') return undefined
     // 读得到但解析失败 = 文件坏了，值得留证据。
     try {
       if (fs.existsSync(file)) {
-        const raw = fs.readFileSync(file, 'utf8')
-        fs.writeFileSync(`${file}.corrupt-${Date.now().toString(36)}`, raw, 'utf8')
+        const st = fs.statSync(file)
+        const key = `${path.resolve(file)}|${st.size}|${st.mtimeMs}`
+        if (!corruptBackedUp.has(key)) {
+          corruptBackedUp.add(key)
+          const raw = fs.readFileSync(file, 'utf8')
+          fs.writeFileSync(`${file}.corrupt-${Date.now().toString(36)}`, raw, 'utf8')
+        }
       }
     } catch { /* 留证据失败也不能让读取本身抛错 */ }
     return undefined
@@ -1045,7 +1067,8 @@ export function writeVideoRelayConfigPatch(dshHome, patch = {}) {
   const file = videoRelayConfigPath(dshHome)
   const merged = { ...(readJson(file) ?? {}) }
   const stringKeys = [
-    'protocol', 'baseURL', 'apiKey', 'model', 'size', 'submitMethod', 'submitPath',
+    'protocol', 'baseURL', 'apiKey', 'model', 'size', 'ratio', 'referenceStyle', 'assetUploadPath',
+    'submitMethod', 'submitPath',
     'queryMethod', 'queryPath', 'videoUrlPath', 'taskIdPath', 'statusPath', 'authHeader',
     'authPrefix', 'extraQuery', 'extraBody',
   ]

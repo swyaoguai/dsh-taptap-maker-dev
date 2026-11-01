@@ -59,7 +59,13 @@ export function installFile(srcAbs, project, kind, outName) {
   //    `..\..\evil.wav` 这类值会把文件写出 audio/ 乃至写出项目（实测
   //    `..\..\..\..` 可逃到 %TEMP%）——路径穿越。同名 .meta 也会跟着写出去。
   const safeName = path.basename(String(outName && outName.length > 0 ? outName : `${path.basename(srcAbs, path.extname(srcAbs))}${path.extname(srcAbs)}`))
-  const name = safeName.length > 0 && safeName !== '.' && safeName !== '..' ? safeName : `audio-${Date.now()}${path.extname(srcAbs)}`
+  let name = safeName.length > 0 && safeName !== '.' && safeName !== '..' ? safeName : `audio-${Date.now()}${path.extname(srcAbs)}`
+  // 扩展名必须跟随真实格式：--out coin.wav 而源是 .ogg 时，直接拷过去就是
+  // 「OGG 字节 + .wav 扩展名」，按扩展名分派解码的引擎会加载失败。
+  const realExt = path.extname(srcAbs)
+  if (realExt && path.extname(name).toLowerCase() !== realExt.toLowerCase()) {
+    name = `${path.basename(name, path.extname(name))}${realExt}`
+  }
   const target = path.join(dir, name)
   fs.copyFileSync(srcAbs, target)
   const meta = path.join(dir, `${name}.meta`)

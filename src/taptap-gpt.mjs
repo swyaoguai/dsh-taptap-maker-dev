@@ -45,7 +45,7 @@ import os from 'node:os'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
-import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending } from './paths.js'
+import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending, accountSlug } from './paths.js'
 import { downscaleFile, generateImage as relayGenerate, editImage as relayEdit } from './taptap-image.mjs'
 import { flagOf, looksLikeFlag, splitTokens } from './tokens.mjs'
 import { generate as zaiduyuGenerate, zaiduyuLaneUsable } from './taptap-zaiduyu.mjs'
@@ -69,7 +69,7 @@ export function gptProfileDir(dshHome) {
 
 /** Profile dir for a specific pool account (each account is fully isolated). */
 export function gptAccountProfileDir(dshHome, accountId) {
-  const id = String(accountId ?? '').replace(/[^\w.-]/g, '_')
+  const id = accountSlug(accountId)
   if (id.length === 0) return gptProfileDir(dshHome)
   return path.join(dataDir(dshHome), `browser-profile-gpt-${id}`)
 }
@@ -105,7 +105,8 @@ export function resolveDownloadDir(dshHome, { explicit, projectDir } = {}) {
 }
 
 /** Escape a string into a python single-quoted literal. */
-const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\n/g, '\\n')}'`
+// 必须连 \r 一起转义：CRLF 提示词里裸 \r 会让 Python 单引号字面量提前断行（SyntaxError）。
+const pyStr = (s) => `'${String(s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r/g, '\\r').replace(/\n/g, '\\n')}'`
 
 /** Find a python with playwright importable. Cached: probing spawns up to 3
  * subprocesses (~1-2s) and the answer never changes within one process. */
@@ -196,7 +197,7 @@ try:
         result["ok"] = True
 except Exception as e:
     result["error"] = str(e)
-print("__RESULT__" + json.dumps(result, ensure_ascii=False))
+print("__RESULT__" + json.dumps(result, ensure_ascii=True))
 `
   const tmp = path.join(os.tmpdir(), `gptweb-${Date.now()}.py`)
   fs.writeFileSync(tmp, script, 'utf8')
@@ -205,7 +206,12 @@ print("__RESULT__" + json.dumps(result, ensure_ascii=False))
     let settled = false
     // Async spawn (NOT spawnSync): blocking the Node event loop froze the DSH
     // host while the browser stayed open — that was the earlier "卡住".
-    const ch = spawn(py, [tmp], { stdio: ['ignore', 'pipe', 'pipe'] })
+    // 管道下 Python 默认按控制台代码页（中文 Windows 为 GBK）输出，Node 按 UTF-8 解码，
+    // 中文保存路径会变乱码 → 拷贝/缩放时 ENOENT。强制 UTF-8，结果 JSON 也只输出 ASCII。
+    const ch = spawn(py, [tmp], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+    })
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
@@ -866,7 +872,14 @@ if REFS:
 try:
     box.click(force=True)
     pg.wait_for_timeout(500)
-    pg.keyboard.type(${pyStr(prompt)}, delay=12)
+    # keyboard.type 会把 "\n" 当成 Enter，而 Enter 在 ChatGPT 输入框里 = 发送：
+    # 多行提示词会被拆成好几条消息（截断提示词、可能重复扣额度）。
+    # 逐行输入，行间用 Shift+Enter 换行。
+    for _i, _line in enumerate(${pyStr(String(prompt).replace(/\r\n?/g, '\n'))}.split("\n")):
+        if _i > 0:
+            pg.keyboard.press("Shift+Enter")
+        if _line:
+            pg.keyboard.type(_line, delay=12)
     steps["typed"] = True
 except Exception as e:
     result["steps"] = steps
@@ -1040,9 +1053,20 @@ result["steps"] = steps
 result["saved"] = DEST
 return result`
 
-    // The watchdog remains above Python's soft deadline + 300s hard cap.
+    // The watchdog must stay above everything Python may legitimately spend:
+    // the pre-submit phase (composer/Cloudflare wait ≤150s, goto ≤60s, composer
+    // re-acquire ≤20s, refs ≤30s, conversation URL ≤40s), typing time, then the
+    // soft deadline (waitMs) + 300s hard cap. Killing earlier aborts a
+    // generation that is still allowed to finish.
+    const PRE_SUBMIT_BUDGET_MS = (150 + 60 + 20 + 30 + 40) * 1000
+    const typingMs = String(prompt).length * 20
     browserStarted = true
-    const r = await runBrowser(dshHome, snippet, { headless: false, timeoutMs: waitMs + 360000, accountId, sidecar })
+    const r = await runBrowser(dshHome, snippet, {
+      headless: false,
+      timeoutMs: waitMs + 300000 + PRE_SUBMIT_BUDGET_MS + typingMs + 60000,
+      accountId,
+      sidecar,
+    })
     if (!r.ok) {
       const error = r.err ?? r.error ?? 'browser_failed'
       const lostUrl = [r.convUrl, r.conv_url, r.steps?.conv_url]
@@ -1433,7 +1457,10 @@ export async function grab(dshHome, { url, out, downscale, accountId, waitMs = 1
   if (typeof target !== 'string' || target.length === 0) {
     return { ok: false, error: 'no_url', hint: '还没有待抓取的对话：先用 gen 生成，或 grab --url <对话链接>。' }
   }
-  const account = accountId ?? pending?.accountId ?? undefined
+  // 只有抓的正是 pending 那个对话时才沿用它的账号 / 清掉 pending 记录；
+  // 显式抓另一个对话不能把还没取回的 pending 弄丢（否则下次 gen 会重新生成、多扣额度）。
+  const grabbingPending = pending != null && pending.url === target
+  const account = accountId ?? (grabbingPending ? pending.accountId : undefined) ?? undefined
   const resolved = resolveDownloadDir(dshHome, { explicit: dir, projectDir })
   const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14)
   const dest = out || path.join(resolved.dir, `gpt-${stamp}.png`)
@@ -1563,7 +1590,7 @@ return result`
     }
   }
   if (steps.saved === undefined) return { ok: false, error: 'no file saved', steps, url: target }
-  clearGptPending(dshHome)
+  if (pending == null || grabbingPending) clearGptPending(dshHome)
   let saved = steps.saved
   const notes = []
   if (downscale) {

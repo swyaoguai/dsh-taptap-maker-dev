@@ -213,7 +213,9 @@ export function generate(prompt, {
     maxBuffer: 16 * 1024 * 1024,
   })
   const wavs = (() => { try { return fs.readdirSync(outDir).filter((f) => f.endsWith('.wav')) } catch { return [] } })()
+  const dropOutDir = () => { try { fs.rmSync(outDir, { recursive: true, force: true }) } catch { /* best effort */ } }
   if ((r.status ?? -1) !== 0 && wavs.length === 0) {
+    dropOutDir()
     return {
       ok: false, code: 'gen_failed',
       error: (r.stderr || r.stdout || '').trim().split('\n').slice(-4).join('\n') || `exit ${r.status}`,
@@ -228,11 +230,14 @@ export function generate(prompt, {
         results.push({ file: installed.target, uuid: installed.uuid, kb: Math.round(installed.bytes / 1024) })
         continue
       } catch (err) {
+        dropOutDir()
         return { ok: false, code: 'install_failed', error: String(err?.message ?? err) }
       }
     }
     results.push({ file: srcAbs, kb: Math.round(fs.statSync(srcAbs).size / 1024) })
   }
+  // 已全部拷进项目的临时产物要清掉；没给 --project 时临时目录里的 wav 就是结果本身，保留。
+  if (projectDir) dropOutDir()
   return { ok: true, generated: results.length, files: results, stderr: (r.stderr || '').trim() }
 }
 
