@@ -1,6 +1,6 @@
 ---
 name: taptap-skill-router
-description: 本插件 161 个游戏开发 skill 的查阅目录：按游戏开发进度和用户当前这句话的需求，挑出这一步该加载的 1~3 个 skill。不确定该用哪个 skill、开始一个新阶段、或用户换了话题时先读它。
+description: 本插件 160 个游戏开发 skill 的查阅目录：按游戏开发进度和用户当前这句话的需求，挑出这一步该加载的 1~3 个 skill。不确定该用哪个 skill、开始一个新阶段、或用户换了话题时先读它。
 ---
 
 # Skill 查阅目录（给 AI 用）
@@ -40,7 +40,6 @@ skill 列表里只有名字和一句话简介，正文要用 `skill` 工具加�
 |---|---|---|
 | 新建 / 初始化 Maker 项目、不知道从哪开始 | `taptap-maker-core` | `game-designer` |
 | 做 UI、菜单、HUD、按钮 | `taptap-maker-ui` | `game-ui-ux`、`ui-hud-patterns`、`ui-asset-pipeline` |
-| 按设计稿还原 UI、拼 UI.json | `taptap-maker-ui-workflow` | `taptap-maker-ui` |
 | 物理、碰撞、刚体、2D Box2D | `taptap-maker-physics` | `physics-gameplay-patterns` |
 | 相机、视野、点击拾取 | `taptap-maker-camera` | — |
 | 角色动画、状态机、骨骼挂点 | `taptap-maker-animation-fsm` | `animation-state-patterns`、`3d-animation-pipeline` / `2d-animation-pipeline` |

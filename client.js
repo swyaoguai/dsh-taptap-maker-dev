@@ -2414,139 +2414,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    // Original UI workflow entry: embeds the bounded same-origin workbench.
-    // Unlike beforeunload, explicit host-close also protects an iframe draft.
-    function UiWorkbenchWidget() {
-      const [open, setOpen] = useState(false)
-      const frame = useRef(null)
-      const opener = useRef(null)
-      const dialog = useRef(null)
-      const innerListener = useRef(null)
-      const requestClose = useCallback(() => {
-        let unsafe = true
-        try {
-          const dom = frame.current && frame.current.contentDocument
-          const draft = dom && dom.getElementById('draft-status')
-          unsafe = !draft || draft.dataset.dirty !== 'false' || Boolean(dom.querySelector('[aria-invalid="true"]'))
-        } catch (_error) { /* unreadable frame: never assume a clean draft */ }
-        if (unsafe && !window.confirm('UI 工作台还有未保存或不可读取的草稿。关闭会丢失本次草稿，是否继续关闭？')) return false
-        setOpen(false)
-        if (opener.current && opener.current.focus) opener.current.focus()
-        return true
-      }, [])
-      const clearInnerListener = useCallback(() => {
-        const old = innerListener.current
-        if (old) { try { old.window.removeEventListener('keydown', old.handler) } catch (_error) { /* already unloaded */ } }
-        innerListener.current = null
-      }, [])
-      const innerFocusTargets = useCallback(() => {
-        try {
-          const inner = frame.current.contentWindow
-          const targets = Array.from(inner.document.querySelectorAll('button, input:not([type="hidden"]), select, textarea, a[href], summary, [tabindex]')).filter(item => {
-            if (item.tabIndex < 0 || item.disabled || item.hidden || item.inert || item.matches?.(':disabled') || item.closest?.('[hidden], [inert]')) return false
-            if (item.getClientRects && !item.getClientRects().length) return false
-            const style = inner.getComputedStyle(item)
-            return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
-          })
-          return targets.sort((a, b) => (a.tabIndex > 0 ? a.tabIndex : Infinity) - (b.tabIndex > 0 ? b.tabIndex : Infinity))
-        } catch (_error) { return [] }
-      }, [])
-      const focusFrameEdge = useCallback(backward => {
-        const targets = innerFocusTargets()
-        const target = backward ? targets[targets.length - 1] : targets[0]
-        if (!target) return false
-        target.focus(); return true
-      }, [innerFocusTargets])
-      const frameLoaded = useCallback(() => {
-        clearInnerListener()
-        try {
-          const inner = frame.current.contentWindow
-          const handler = event => {
-            if (event.defaultPrevented || frame.current?.contentWindow !== inner) return
-            if (event.key === 'Escape') { event.preventDefault(); requestClose(); return }
-            if (event.key !== 'Tab') return
-            const targets = innerFocusTargets(); const active = inner.document.activeElement
-            if (!targets.length || (event.shiftKey && active === targets[0]) || (!event.shiftKey && active === targets[targets.length - 1])) {
-              event.preventDefault()
-              const root = dialog.current
-              const close = root && Array.from(root.querySelectorAll('button:not([disabled])')).find(item => !item.hidden && !item.inert)
-              if (close && close.focus) close.focus(); else if (root && root.focus) root.focus()
-            }
-          }
-          inner.addEventListener('keydown', handler)
-          innerListener.current = { window: inner, handler }
-        } catch (_error) { /* keep the explicit close button available */ }
-      }, [clearInnerListener, requestClose, innerFocusTargets])
-      useEffect(() => {
-        if (!open) return
-        const root = dialog.current
-        const previous = document.activeElement
-        const changed = []
-        if (root) {
-          let branch = root
-          while (branch.parentElement) {
-            const parent = branch.parentElement
-            for (const sibling of parent.children) if (sibling !== branch && !sibling.inert) { changed.push(sibling); sibling.inert = true }
-            if (parent === document.body) break
-            branch = parent
-          }
-          if (root.focus) root.focus()
-        }
-        const focusGuard = event => { if (root && event.target && !root.contains(event.target) && root.focus) root.focus() }
-        const handler = event => {
-          if (event.defaultPrevented) return
-          if (event.key === 'Escape') { event.preventDefault(); requestClose(); return }
-          if (event.key !== 'Tab' || !root) return
-          const targets = Array.from(root.querySelectorAll('button:not([disabled]), iframe, [tabindex="0"]')).filter(item => !item.hidden && !item.inert)
-          const first = targets[0]; const last = targets[targets.length - 1]
-          if (!first) { event.preventDefault(); root.focus(); return }
-          if (document.activeElement === root || (event.shiftKey && document.activeElement === first) || (!event.shiftKey && document.activeElement === last)) {
-            event.preventDefault()
-            const target = event.shiftKey ? last : first
-            if (target === frame.current && focusFrameEdge(event.shiftKey)) return
-            target.focus()
-          }
-        }
-        window.addEventListener('keydown', handler)
-        if (document.addEventListener) document.addEventListener('focusin', focusGuard, true)
-        return () => {
-          window.removeEventListener('keydown', handler); clearInnerListener()
-          if (document.removeEventListener) document.removeEventListener('focusin', focusGuard, true)
-          for (const sibling of changed) sibling.inert = false
-          if (previous && previous.isConnected !== false && previous.focus) previous.focus()
-        }
-      }, [open, requestClose, clearInnerListener, focusFrameEdge])
-      return h(React.Fragment, null,
-        h('button', {
-          ref: opener, type: 'button', 'aria-label': '打开 UI 工作台', title: 'UI 工作台：编辑、浏览器预览、版本保存、Maker 审阅包（零生成额度）',
-          onClick: () => setOpen(true), style: { ...S.btn, padding: '6px 10px', fontSize: 12, background: 'var(--dsh-panel-bg, rgba(128,128,128,0.12))', color: 'inherit' },
-        }, '▦ UI'),
-        open ? h('div', { ref: dialog, tabIndex: -1, role: 'dialog', 'aria-modal': true, 'aria-label': 'UI 工作台 · 插件侧', style: { position: 'fixed', top: 'max(64px, env(safe-area-inset-top, 0px))', right: 12, bottom: 12, left: 12, zIndex: 10000, display: 'flex', flexDirection: 'column', background: '#18241f', color: '#edf5ef', border: '1px solid #526d60', borderRadius: 10, boxShadow: '0 20px 100px rgba(0,0,0,.65)', overflow: 'hidden' } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 12, padding: '8px 12px', flex: '0 0 auto', borderBottom: '1px solid #526d60' } },
-            h('button', { type: 'button', 'aria-label': '关闭 UI 工作台', onClick: requestClose, style: { ...S.btn, minWidth: 88, minHeight: 44, flexShrink: 0, padding: '9px 12px', fontSize: 14, border: '1px solid #759589', background: '#274236', color: '#edf5ef' } }, '× 关闭工作台'),
-            h('div', { style: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', gap: '4px 12px', minWidth: 0, lineHeight: 1.5 } }, h('strong', { style: { fontSize: 15 } }, 'UI 工作台'), h('span', { style: { fontSize: 12, color: '#b7cec1', overflowWrap: 'anywhere' } }, '隔离版本 · 审阅包，不导入游戏 / 不构建 / 未 native 验收'))),
-          h('iframe', { ref: frame, src: `${API_BASE}/ui/workbench`, title: 'UI 工作台：独立静态 UI 编辑与预览', sandbox: 'allow-scripts allow-same-origin allow-downloads allow-modals', onLoad: frameLoaded, style: { width: '100%', minHeight: 0, flex: '1 1 auto', border: 0 } })) : null)
-    }
-
-    function UiWorkflowCard() {
-      const [status, setStatus] = useState(null)
-      useEffect(() => {
-        let live = true
-        fetch(`${API_BASE}/ui/status`, { headers: { accept: 'application/json' }, redirect: 'error' })
-          .then(async response => { const value = await response.json(); if (!response.ok || value.ok !== true) throw new Error('UI API 未就绪'); return value })
-          .then(value => { if (live) setStatus(value) })
-          .catch(() => { if (live) setStatus('unavailable') })
-        return () => { live = false }
-      }, [])
-      return h('div', { style: S.card },
-        h('h2', { style: S.cardTitle }, 'UI 工作台 · Maker-first'),
-        h('p', { style: S.sub }, '原创编辑工作台 + 固定历史 MIT 模型适配；不是复制 Unity 编辑器或其素材。保存始终追加版本；导出仅为隔离审阅包。'),
-        h(UiWorkbenchWidget),
-        h('p', { style: status === 'unavailable' ? S.warn : S.hint }, status === null ? '读取只读 UI 状态…' : status === 'unavailable' ? '当前宿主尚未加载新 UI 路由。插件代码重新加载后刷新本页；不会另起服务器或重启游戏。' : `固定 MIT：${status.sourceAudit && status.sourceAudit.ok ? '已核验' : '未通过'} · 工作区：${(status.workspaces || []).length} · native：未验收`),
-        status && status !== 'unavailable' ? h('p', { style: { ...S.hint, overflowWrap: 'anywhere' } }, `隔离目录：${status.root}`) : null,
-        h('p', { style: S.hint }, '也可在对话中用 /taptap-ui；XML 导入只需已安装 Python 标准库。Cocos/Godot 为后续适配，不自动生成素材、改通道或花额度。'))
-    }
-
     /** 「怎么用」：大白话，放在第一个分组里，打开设置页第一眼就能看到。 */
     function HowToCard() {
       const code = (t) => h('span', { style: S.codeInline }, t)
@@ -2593,7 +2460,6 @@ window.__ModuleLoader__.load({
         { id: 'image', icon: '🎨', label: '图片', desc: 'ChatGPT 网页 / 中转站 / 章鱼', count: 3 },
         { id: 'video', icon: '🎬', label: '视频', desc: 'MiniMax / 中转站 / 自己的视频', count: 3 },
         { id: 'audio', icon: '🔊', label: '音频', desc: 'BGM 账号与免费音效库', count: 2 },
-        { id: 'ui', icon: '▦', label: 'UI 工作台', desc: '编辑、版本、Maker 审阅', count: 0 },
         { id: 'more', icon: '⚙️', label: '其他', desc: 'Skill 开关、版本更新', count: 0 },
       ]
       return h('div', { style: S.page },
@@ -2632,8 +2498,6 @@ window.__ModuleLoader__.load({
           h(AudioLibrary),
         ),
 
-        h(PanelGroup, { active: group === 'ui' }, h(UiWorkflowCard)),
-
         h(PanelGroup, { active: group === 'more' },
           h(SkillManager),
           h(AboutCard),
@@ -2652,12 +2516,7 @@ window.__ModuleLoader__.load({
         TaptapMakerSettings,
       ))
 
-      ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
-        { name: 'conversation.composer.dock', id: 'taptap-maker-dev-ui', order: 89, label: () => 'UI 工作台' },
-        UiWorkbenchWidget,
-      ))
-
-      // BGM workbench on the MAIN interface (next to the composer): preview /
+      // BGM workbench on the MAIN interface (composer dock): preview /
       // trim / import freshly generated BGM. Usage belongs to the conversation
       // surface, not settings; the boundary keeps the chat UI safe if it breaks.
       ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(

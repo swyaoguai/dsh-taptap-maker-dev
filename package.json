@@ -1,6 +1,6 @@
 {
   "name": "dsh-taptap-maker-dev",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "type": "module",
   "description": "TapTap Maker 本地开发插件 (DSH bundle)：强制「非用户主动不消耗 Maker MCP 额度」、内置可周期更新的游戏开发 skills、提供 OpenAI 兼容 /images 的自定义生图接口与 CC0 音效/BGM 库用于生成游戏资源，并附带 Maker MCP 安装/初始化引导命令。",
@@ -16,13 +16,9 @@
     "taptap-gpt": "./src/taptap-gpt.mjs",
     "taptap-zaiduyu": "./src/taptap-zaiduyu.mjs",
     "taptap-sfx": "./src/taptap-sfx.mjs",
-    "taptap-ui": "./src/taptap-ui.mjs",
     "taptap-skills-update": "./src/taptap-skills-update.mjs"
   },
-  "scripts": {
-    "test:ui": "node --test tests/ui-*.test.mjs tests/lgui-model-adapter.test.mjs",
-    "test:ui:coverage": "node --test --experimental-test-coverage --test-coverage-include=src/ui-*.mjs --test-coverage-include=src/lgui-import.mjs --test-coverage-include=src/lgui-model-adapter.mjs --test-coverage-lines=80 --test-coverage-branches=80 --test-coverage-functions=80 tests/ui-*.test.mjs tests/lgui-model-adapter.test.mjs"
-  },
+  "scripts": {},
   "files": [
     "index.js",
     "client.js",
@@ -31,12 +27,7 @@
     "cordis.patch.yml",
     "README.md",
     "THIRD-PARTY-NOTICES.md",
-    "third_party/GameFactory-3A/LICENSE",
-    "third_party/LGUI-MIT",
-    "docs/ui-workflow.md",
-    "docs/lgui-mit-audit.md",
-    "docs/maker-ui-source-audit.md",
-    "docs/ui-qa-2026-10-31.md"
+    "third_party/GameFactory-3A/LICENSE"
   ],
   "keywords": [
     "dsh",
