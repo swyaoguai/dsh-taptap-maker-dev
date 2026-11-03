@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 /**
- * taptap-audio — find and install CC0 game audio (SFX / BGM) into a Maker
+ * game-audio — find and install CC0 game audio (SFX / BGM) into a Maker
  * project.
  *
- * This is the audio counterpart to taptap-image: it costs NO Maker credits.
+ * This is the audio counterpart to game-image-relay: it costs NO Maker credits.
  * Everything comes from Kenney's CC0 packs (commercial use allowed, no
  * attribution required).
  *
  * Usage:
- *   node taptap-audio.mjs search "金币音效"
- *   node taptap-audio.mjs search "背景音乐" --limit 5
- *   node taptap-audio.mjs add "金币音效" --project <maker-project> --out coin.wav
- *   node taptap-audio.mjs add "点击按钮" --project <maker-project>        # auto name
- *   node taptap-audio.mjs sync                                     # download/refresh library
+ *   node game-audio.mjs search "金币音效"
+ *   node game-audio.mjs search "背景音乐" --limit 5
+ *   node game-audio.mjs add "金币音效" --project <maker-project> --out coin.wav
+ *   node game-audio.mjs add "点击按钮" --project <maker-project>        # auto name
+ *   node game-audio.mjs sync                                     # download/refresh library
  *
  * `add` writes the file into <project>/assets/audio/{sfx|bgm}/ and creates the
  * sibling .meta ({"uuid": "..."}) that Maker expects.
  *
- * @module src/taptap-audio.mjs
+ * @module src/game-audio.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -186,7 +186,7 @@ async function main() {
     }
     const inArg = args.in ?? args.from ?? args._[1]
     if (typeof inArg !== 'string') {
-      process.stderr.write('usage: taptap-audio import --in <文件或目录> --project <dir> [--to wav] [--kind bgm|sfx] [--out name] [--mono] [--rate 44100]\n')
+      process.stderr.write('usage: game-audio import --in <文件或目录> --project <dir> [--to wav] [--kind bgm|sfx] [--out name] [--mono] [--rate 44100]\n')
       process.exitCode = 2
       return
     }
@@ -257,7 +257,7 @@ async function main() {
 
   const query = args._.slice(1).join(' ')
   if (query.length === 0) {
-    process.stderr.write('usage: taptap-audio search "<描述>" | add "<描述>" --project <dir> [--out name.wav] | sources | sync\n')
+    process.stderr.write('usage: game-audio search "<描述>" | add "<描述>" --project <dir> [--out name.wav] | sources | sync\n')
     process.exitCode = 2
     return
   }

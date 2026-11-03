@@ -40,7 +40,7 @@ export const PACKS = [
 ]
 
 const AUDIO_EXT = new Set(['.ogg', '.wav', '.mp3'])
-const UA = 'Mozilla/5.0 (dsh-taptap-maker-dev; CC0 audio fetcher)'
+const UA = 'Mozilla/5.0 (dsh-game-forge; CC0 audio fetcher)'
 
 /** Resolve the real (hash-bearing) zip URL for a pack by parsing its page. */
 export async function resolveZipUrl(slug, { timeoutMs = 30000, retries = 2 } = {}) {

@@ -1,5 +1,5 @@
 /**
- * Shared path + config helpers for dsh-taptap-maker-dev.
+ * Shared path + config helpers for dsh-game-forge.
  *
  * Everything the plugin persists lives UNDER $DSH_HOME (outside any TapTap
  * Maker project workspace) on purpose: the Maker runtime auto-commits and
@@ -19,9 +19,60 @@ export function resolveDshHome(explicit) {
   return path.resolve(value)
 }
 
+/** 旧插件名对应的数据目录名（改名前的历史位置）。 */
+const LEGACY_DATA_DIR_NAME = 'taptap-maker-dev'
+/** 迁移只做一次/进程：dataDir() 会被高频调用，不能每次都 stat。 */
+let legacyMigrationDone = false
+
+/**
+ * 改名迁移：`<DSH_HOME>/taptap-maker-dev/` → `<DSH_HOME>/game-forge/`。
+ *
+ * 为什么必须做：这个目录里装着用户的 API Key、章鱼账号、通道顺序、
+ * skill 禁用表、提交台账。只改名不迁移 = 用户升级后看到「设置全空了」，
+ * 而旧文件还静静躺在旁边没人读（这正是「设置页显示已保存、实际却报没有 Key」
+ * 那类 bug 的经典长相）。
+ *
+ * 规则：
+ *  - 首选 **rename**（同盘瞬时、数据完整搬走、磁盘上不留第二份）；
+ *  - 新目录**已存在**就完全不碰（用户可能已经在新目录里改过东西，不能被旧值覆盖）；
+ *  - rename 失败（跨盘 / 被占用）退化成「只复制顶层配置」，**绝不整目录复制**；
+ *  - 任何失败都静默 —— 迁移不能成为启动杀手。
+ *
+ * ⚠️ 第一版实现用的是 `fs.cpSync(recursive)`：这个目录里除了几十 KB 配置，还有
+ * Chromium 持久化 profile（本机实测 1.25GB / 9334 个文件）。一次迁移能把宿主
+ * 卡住好几分钟，还平白多占一份磁盘 —— 迁移本该是瞬时的。别改回去。
+ */
+function migrateLegacyDataDir(home) {
+  if (legacyMigrationDone) return
+  legacyMigrationDone = true
+  const target = path.join(home, 'game-forge')
+  const legacy = path.join(home, LEGACY_DATA_DIR_NAME)
+  try {
+    if (fs.existsSync(target) || !fs.existsSync(legacy)) return
+    if (!fs.statSync(legacy).isDirectory()) return
+    try {
+      fs.renameSync(legacy, target)
+      return
+    } catch {
+      // 跨盘符 / 被进程占用：只搬配置，重目录留在原地。
+    }
+    fs.mkdirSync(target, { recursive: true })
+    for (const entry of fs.readdirSync(legacy, { withFileTypes: true })) {
+      if (!entry.isFile() || !/\.(json|ya?ml)$/i.test(entry.name)) continue
+      try {
+        fs.copyFileSync(path.join(legacy, entry.name), path.join(target, entry.name))
+      } catch { /* 单个文件失败不影响其它配置 */ }
+    }
+  } catch {
+    // 迁移失败就退化成「全新开始」，但绝不阻断插件加载。
+  }
+}
+
 /** The plugin's private data directory, created on demand. */
 export function dataDir(dshHome) {
-  const dir = path.join(resolveDshHome(dshHome), 'taptap-maker-dev')
+  const home = resolveDshHome(dshHome)
+  migrateLegacyDataDir(home)
+  const dir = path.join(home, 'game-forge')
   fs.mkdirSync(dir, { recursive: true })
   return dir
 }
@@ -71,7 +122,7 @@ export function defaultCacheDir(dshHome) {
  * ZAIDUYU（章鱼生图积分站）站点账号
  *
  * 与 image.json / minimax.json 同一套隐私规则：凭据只写在
- * $DSH_HOME/taptap-maker-dev/ 下，**绝不落在会自动提交的 Maker 工作区里**。
+ * $DSH_HOME/game-forge/ 下，**绝不落在会自动提交的 Maker 工作区里**。
  *
  * 为什么不是环境变量：上游 skill 原版要求用户 `SetEnvironmentVariable`，
  * 但那对普通用户既难（要开终端、要重开宿主）又危险（命令会落进对话记录、
@@ -320,7 +371,7 @@ export function writeBgmConfig(dshHome, patch = {}) {
 
 /**
  * Slug an account id EXACTLY like the runtime profile-dir builders do
- * (taptap-gpt.mjs gptAccountProfileDir / taptap-bgm-web.mjs profileDir).
+ * (game-image-web.mjs gptAccountProfileDir / game-bgm-web.mjs profileDir).
  * Without this, a pool record for an id containing spaces/Chinese stored a
  * `profile` path the runtime would never touch — a landmine for any code that
  * trusts the stored field.
@@ -827,7 +878,7 @@ export function maskSecret(value) {
 
 /* ------------------------------------------------------------------------- *
  * MINIMAX VIDEO — config + pending-task recovery for the H3 video lane
- * (taptap-video.mjs). Same privacy rule as image.json: the API key lives
+ * (game-video.mjs). Same privacy rule as image.json: the API key lives
  * under $DSH_HOME, never inside a Maker workspace.
  *
  * - 国际站 api.minimax.io（美元计价，按量付费）
@@ -982,7 +1033,7 @@ export function discoverMinimaxKey(dshHome) {
         : `${key.slice(0, 5)}…`
   out.baseURL = fileBase || (out.region === 'global' ? 'https://api.minimax.io' : 'https://api.minimaxi.com')
   out.note = fileKey
-    ? '来自 MiniMax CLI（mmx）的登录态。跑一次 /taptap-video doctor 可确认走的是 M Plan 套餐额度还是账户余额。'
+    ? '来自 MiniMax CLI（mmx）的登录态。跑一次 /game-video doctor 可确认走的是 M Plan 套餐额度还是账户余额。'
     : '来自环境变量 MINIMAX_API_KEY。'
   return out
 }

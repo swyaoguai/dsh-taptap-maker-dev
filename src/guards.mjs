@@ -23,7 +23,7 @@
 /**
  * 从命令原文里提取显式授权。
  *
- * ⚠️ 中文口语里的「确认」很可能是**别的意思**：「/taptap-video prompt 确认一下
+ * ⚠️ 中文口语里的「确认」很可能是**别的意思**：「/game-video prompt 确认一下
  * 角色朝向」里的「确认」是提示词的一部分，绝不能当成用户授权了破坏性操作。
  * 所以只有当它**单独成句**（前面是行首或标点、后面是句尾或标点）时才算数。
  */
@@ -41,7 +41,7 @@ export function hasApproval(rawInput) {
  * @param {string} p.rawInput      原始命令文本（用来判断用户是否已授权）
  * @param {string} p.action        动作名，如 '清空 skill 禁用表'
  * @param {string} p.consequence   做了之后会发生什么（写给用户看）
- * @param {string} p.undo           怎么撤销（如「有备份，/taptap-skills restore」）
+ * @param {string} p.undo           怎么撤销（如「有备份，/game-skills restore」）
  * @returns {{ok: true} | {ok: false, text: string}}
  */
 export function requireApproval({ rawInput, action, consequence, undo }) {
@@ -73,6 +73,7 @@ export const USER_OWNED_SETTINGS = {
   'image.downloadDir': '图片保存目录',
   'video.downloadDir': '视频保存目录',
   'bgm.downloadDir': 'BGM 保存目录',
+  'skills.disabled': 'skill 禁用表',
 }
 
 /**
@@ -108,11 +109,11 @@ export function guardUserSetting(key, { rawInput, from, to } = {}) {
  * 凡是这里列出的，代码里都必须有对应的护栏。
  */
 export const AGENT_DO_NOT_SELF_RUN = [
-  '`/taptap-video run`（花钱，按秒计费）—— 必须用户明确要求才提交',
-  '`/taptap-video set --model …`（改用户选定的模型）',
-  '`/taptap-video lanes --order/--on/--off/--fallback`（改通道顺序与开关）',
-  '`/taptap-video use <mp4>`（会覆盖已生成的视频）',
-  '`/taptap-skills reset` / `disable`（改用户的 skill 禁用表）',
+  '`/game-video run`（花钱，按秒计费）—— 必须用户明确要求才提交',
+  '`/game-video set --model …`（改用户选定的模型）',
+  '`/game-video lanes --order/--on/--off/--fallback`（改通道顺序与开关）',
+  '`/game-video use <mp4>`（会覆盖已生成的视频）',
+  '`/game-skills reset` / `disable`（改用户的 skill 禁用表）',
   '任何会删除文件的操作',
   '任何会覆盖已有素材 / 作业的操作',
 ]

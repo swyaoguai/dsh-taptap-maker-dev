@@ -17,7 +17,7 @@ whenToUse: 做游戏内 UI、HUD、菜单、大厅界面，或要套某种 UI �
 ## 硬规则
 
 - **不要用** `.emmylua/` 里的原生 Urho3D C++ UI 组件（`UIElement`、`Button`、`Text` …）——**已废弃**，仅向后兼容。
-- **风格化 UI 禁止凭空编造**：用户要带风格特征的 UI 时，先查是否有对应风格 skill（引擎预置多套，如 `ui-astroon`、`ui-brawlforge`、`ui-pixelforge` 等，含配色/字体/圆角/阴影规范与模板），选合适的再做。
+- **风格化 UI 禁止凭空编造**：用户要带风格特征的 UI 时，先按 `skill` 列表里的**现有**名字找（本插件自带的风格/系统类：`art-bible`、`ui-asset-pipeline`、`ui-hud-patterns`、`game-ui-ux`、`ui-animation-pipeline`），找到就照它的配色/字体/圆角/阴影规范做；找不到就明说「本插件没有对应的风格 skill」，再按通用美术规范自己定一套并写清依据。**不要编造 skill 名字去加载。**
 
 ## 布局要点
 

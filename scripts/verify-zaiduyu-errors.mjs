@@ -5,9 +5,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import vm from 'node:vm'
-import * as zaiduyu from '../src/taptap-zaiduyu.mjs'
-import { parseSlashGenArgs } from '../src/taptap-gpt.mjs'
-const source = fs.readFileSync(new URL('../src/taptap-zaiduyu.mjs', import.meta.url), 'utf8')
+import * as zaiduyu from '../src/game-zaiduyu.mjs'
+import { parseSlashGenArgs } from '../src/game-image-web.mjs'
+const source = fs.readFileSync(new URL('../src/game-zaiduyu.mjs', import.meta.url), 'utf8')
 let passed = 0, failed = 0
 async function check(name, fn) {
   try { await fn(); passed++; console.log(`PASS ${name}`) }
@@ -126,7 +126,7 @@ await check('boolean image count rejects before any child submission', async () 
 })
 await check('explicit Zaiduyu model cannot be silently ignored by another paid lane', async () => {
   let submissions = 0
-  const code = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
+  const code = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
   const run = load('generateImage', {
     laneOrder: () => ['relayImage'], readGptLaneEnabled: () => false,
     readLanes: () => ({ autoFallback: true }),

@@ -20,7 +20,7 @@ const ok = (cond, label, extra = '') => {
   else { failed += 1; console.log(`  ✗ ${label}${extra ? ` — ${extra}` : ''}`) }
 }
 
-const src = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
+const src = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
 
 /** 从源码里取出某个函数内第一个 `const snippet = \`` 模板串的原文。 */
 function extractSnippet(fromMarker) {

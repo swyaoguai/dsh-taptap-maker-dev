@@ -23,7 +23,7 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
-import { dataDir } from './paths.js'
+import { dataDir, resolveDshHome } from './paths.js'
 
 /** 素材子目录名（三类）。 */
 export const ASSET_KINDS = {
@@ -35,10 +35,19 @@ export const ASSET_KINDS = {
 /** 素材根目录名（在项目下）。 */
 export const ASSET_ROOT = 'sucai'
 
-/** 目录是否像一个 TapTap Maker 工程根（有 assets/）。 */
+/**
+ * 目录是否像一个 TapTap Maker 工程根。
+ *
+ * ⚠️ 只看 `assets/` 是不够的：任何前端仓库、导出物、随手建的 demo 目录都可能带
+ * assets/。以前用它单独判定「在项目里」，结果是「打开一次设置页（只读路由）就能
+ * 在用户的无关仓库里造出 sucai/ 与 .gitignore」。Maker 工程另有 `.project/`、
+ * `scripts/`、`project.json`、`main.lua` 这些特征，必须同时命中其中之一才算。
+ */
 export function isMakerProject(dir) {
   try {
-    return fs.existsSync(path.join(dir, 'assets'))
+    if (!fs.existsSync(path.join(dir, 'assets'))) return false
+    return ['.project', 'scripts', 'project.json', 'main.lua']
+      .some((marker) => fs.existsSync(path.join(dir, marker)))
   } catch {
     return false
   }
@@ -49,8 +58,10 @@ export function isMakerProject(dir) {
  *
  * `@param {string} dir 目标目录
  * @param {boolean} insideProject 是否落在项目里（只有 true 才写 .gitignore）
+ * @param {boolean} dryRun 只算路径、**不在磁盘上留任何痕迹**（只读路由必须用它）
  */
-export function ensureAssetDir(dir, { insideProject }) {
+export function ensureAssetDir(dir, { insideProject, dryRun = false } = {}) {
+  if (dryRun) return dir
   fs.mkdirSync(dir, { recursive: true })
   if (insideProject) {
     const gi = path.join(dir, '.gitignore')
@@ -95,16 +106,18 @@ function expand(raw, cwd, home) {
  *   1. explicit —— 本次调用显式指定（`--dir`）；
  *   2. configured —— 设置页里配的目录（支持 {project} / {home}）；
  *   3. 在项目里 → `<项目>/sucai/<子目录>`；
- *   4. 不在项目里 → `$DSH_HOME/taptap-maker-dev/<兜底目录>`。
+ *   4. 不在项目里 → `$DSH_HOME/game-forge/<兜底目录>`。
  *
  * @param {string} dshHome
  * @param {'image'|'video'|'bgm'} kind
- * @param {{explicit?: string, configured?: string, projectDir?: string, fallback?: string}} [opts]
+ * @param {{explicit?: string, configured?: string, projectDir?: string, fallback?: string, dryRun?: boolean}} [opts]
+ *   dryRun: 只解析「东西会落在哪」，不建目录、不写 .gitignore —— 设置页的 GET 路由必须用它，
+ *   否则「打开设置页」这个只读动作就会在磁盘上留下 sucai/ 与 .gitignore。
  * @returns {{dir: string, source: 'flag'|'config'|'project'|'default', projectDir: string, insideProject: boolean}}
  */
-export function resolveAssetDir(dshHome, kind, { explicit, configured, projectDir, fallback } = {}) {
+export function resolveAssetDir(dshHome, kind, { explicit, configured, projectDir, fallback, dryRun = false } = {}) {
   const cwd = path.resolve(projectDir ?? process.cwd())
-  const home = dataDir(dshHome)
+  const home = dryRun ? path.join(resolveDshHome(dshHome), 'game-forge') : dataDir(dshHome)
   const inProject = isMakerProject(cwd)
   const sub = ASSET_KINDS[kind]
   if (!sub) throw new Error(`未知的素材类型：${kind}`)
@@ -126,7 +139,7 @@ export function resolveAssetDir(dshHome, kind, { explicit, configured, projectDi
     }
     const inside = inProject && startsWithDir(dir, cwd)
     return {
-      dir: ensureAssetDir(dir, { insideProject: inside }),
+      dir: ensureAssetDir(dir, { insideProject: inside, dryRun }),
       source: explicit ? 'flag' : 'config',
       projectDir: cwd,
       insideProject: inside,
@@ -135,8 +148,8 @@ export function resolveAssetDir(dshHome, kind, { explicit, configured, projectDi
 
   if (inProject) {
     const dir = path.join(cwd, ASSET_ROOT, sub)
-    return { dir: ensureAssetDir(dir, { insideProject: true }), source: 'project', projectDir: cwd, insideProject: true }
+    return { dir: ensureAssetDir(dir, { insideProject: true, dryRun }), source: 'project', projectDir: cwd, insideProject: true }
   }
   const dir = path.join(home, fallback ?? `${sub}`)
-  return { dir: ensureAssetDir(dir, { insideProject: false }), source: 'default', projectDir: cwd, insideProject: false }
+  return { dir: ensureAssetDir(dir, { insideProject: false, dryRun }), source: 'default', projectDir: cwd, insideProject: false }
 }

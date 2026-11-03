@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
- * taptap-gpt — drive the ChatGPT web app with a PERSISTENT browser profile so
+ * game-image — drive the ChatGPT web app with a PERSISTENT browser profile so
  * the user logs in ONCE and later runs are automatic.
  *
  * Why: this is the PRIMARY image lane (2026-10 change) — images come out of the
  * real ChatGPT web app, which the user already pays for / gets free quota on.
- * The relay-station API (taptap-image) is now the FALLBACK for when this lane
+ * The relay-station API (game-image-relay) is now the FALLBACK for when this lane
  * is unavailable (not logged in, quota exhausted everywhere, selectors broken).
- * The mechanics mirror the BGM lane (src/taptap-bgm-web.mjs): a dedicated
+ * The mechanics mirror the BGM lane (src/game-bgm-web.mjs): a dedicated
  * Chromium profile directory holds the session; after one manual login the
  * script reuses it. We never lift tokens out of a third-party page and never
  * touch the user's password.
@@ -37,7 +37,7 @@
  *
  * Requires python + playwright (`pip install playwright && playwright install chromium`).
  *
- * @module src/taptap-gpt.mjs
+ * @module src/game-image-web.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -46,9 +46,9 @@ import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readGptPending, writeGptPending, clearGptPending, accountSlug } from './paths.js'
-import { downscaleFile, generateImage as relayGenerate, editImage as relayEdit } from './taptap-image.mjs'
+import { downscaleFile, generateImage as relayGenerate, editImage as relayEdit } from './game-image-relay.mjs'
 import { flagOf, looksLikeFlag, splitTokens } from './tokens.mjs'
-import { generate as zaiduyuGenerate, zaiduyuLaneUsable } from './taptap-zaiduyu.mjs'
+import { generate as zaiduyuGenerate, zaiduyuLaneUsable } from './game-zaiduyu.mjs'
 import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
 import { resolveAssetDir } from './assets.mjs'
 import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
@@ -85,7 +85,7 @@ export function imageDownloadDir(dshHome) {
  *   2. configured `downloadDir` in imageLane.json (supports {project} / {home},
  *      relative paths resolve against the project dir)
  *   3. auto: inside a Maker project → <project>/sucai/images
- *            otherwise          → $DSH_HOME/taptap-maker-dev/gpt-images
+ *            otherwise          → $DSH_HOME/game-forge/gpt-images
  *
  * "Follow the project" is the DEFAULT because dumping game assets into C:\ by
  * surprise is exactly what the user objected to (2026-10-17).
@@ -534,9 +534,9 @@ export async function gen(dshHome, prompt, {
   referenceCacheDir, referenceMaxEdge, referenceMaxBytes, referenceMaxTotalBytes,
 } = {}) {
   // Master switch: when the lane is off, refuse honestly instead of opening a
-  // browser. The relay lane (taptap-image) is the documented fallback.
+  // browser. The relay lane (game-image-relay) is the documented fallback.
   if (!readGptLaneEnabled(dshHome)) {
-    return { ok: false, error: 'lane_disabled', hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。' }
+    return { ok: false, error: 'lane_disabled', hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 game-image-relay，或重新打开开关。' }
   }
   let referencePreparation
   const notes = []
@@ -1079,7 +1079,7 @@ return result`
         return {
           ok: false, error, steps: r.steps ?? null, account: accountId ?? null,
           pendingUrl: lostUrl, referencePreparation, notes,
-          hint: `这次没等到图（${error}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：taptap-gpt grab --url "${lostUrl}"`,
+          hint: `这次没等到图（${error}），但对话已经建好——**不要重新生成**，等 1~2 分钟用 grab 抓同一个对话：game-image grab --url "${lostUrl}"`,
         }
       }
       return { ok: false, error, steps: r.steps ?? null, account: accountId ?? null, referencePreparation, notes }
@@ -1106,7 +1106,7 @@ return result`
         ok: false, error: r.error, steps, account: accountId ?? null,
         referencePreparation, notes, pendingUrl: convUrl,
         hint: convUrl !== null
-          ? `这张图可能还在生成：稍后用 grab 抓取同一个对话即可（不用重新生成，省额度）：taptap-gpt grab --url "${convUrl}"`
+          ? `这张图可能还在生成：稍后用 grab 抓取同一个对话即可（不用重新生成，省额度）：game-image grab --url "${convUrl}"`
           : undefined,
       }
     }
@@ -1137,7 +1137,7 @@ return result`
       notes.push(
         `网页通道不支持指定尺寸：--size ${size} 已忽略（实际尺寸由 ChatGPT 决定）。`
         + '需要特定比例/尺寸请下载后用 --downscale 或图像工具裁切。'
-        + '（要精确控制尺寸请走中转站 taptap-image --size）',
+        + '（要精确控制尺寸请走中转站 game-image-relay --size）',
       )
     }
     if (refs.length > 0) notes.push(`图生图：已随提示词上传 ${refs.length} 张参考图（网页通道）`)
@@ -1182,7 +1182,7 @@ export async function generateWithRotation(dshHome, prompt, {
     return {
       ok: false,
       error: 'lane_disabled',
-      hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 taptap-image，或重新打开开关。',
+      hint: 'ChatGPT 网页生图已在设置里关闭；回退到中转站 game-image-relay，或重新打开开关。',
       rotated: false,
       tried: [],
       failures: [],
@@ -1191,12 +1191,12 @@ export async function generateWithRotation(dshHome, prompt, {
   // 设置页「生成通道」卡里的**逐条开关**（lanes.json image/gptWeb）也必须算数：
   // 只查上面的总开关（imageLane.json）时，用户在通道卡里单独关掉网页通道后，
   // 斜杠命令照样弹浏览器烧配额 —— 两套开关脱节（2026-10-24 实测）。CLI 的
-  // gen 子命令已查（isLaneEnabled），这里给所有调用方（含 /taptap-gpt）补上。
+  // gen 子命令已查（isLaneEnabled），这里给所有调用方（含 /game-image）补上。
   if (!isLaneEnabled(dshHome, 'image', 'gptWeb')) {
     return {
       ok: false,
       error: 'lane_disabled',
-      hint: '「ChatGPT 网页生图」通道已在设置页「生成通道」卡里关闭；打开它，或改用中转站 /taptap-image。',
+      hint: '「ChatGPT 网页生图」通道已在设置页「生成通道」卡里关闭；打开它，或改用中转站 /game-image-relay。',
       rotated: false,
       tried: [],
       failures: [],
@@ -1213,7 +1213,7 @@ export async function generateWithRotation(dshHome, prompt, {
           ok: false,
           error: 'pending_request',
           pendingUrl: pending.url,
-          hint: '还有另一条待抓取请求。先用 taptap-gpt grab 取回旧图；确认要开始新请求时才使用 gen --no-resume。',
+          hint: '还有另一条待抓取请求。先用 game-image grab 取回旧图；确认要开始新请求时才使用 gen --no-resume。',
           rotated: false,
           tried: [],
           failures: [],
@@ -1237,7 +1237,7 @@ export async function generateWithRotation(dshHome, prompt, {
         ok: false,
         error: got.error || 'pending_recovery_failed',
         pendingUrl: pending.url,
-        hint: got.hint ?? '续抓没有完成，不会重新生成。稍后用 taptap-gpt grab 抓取同一个对话。',
+        hint: got.hint ?? '续抓没有完成，不会重新生成。稍后用 game-image grab 抓取同一个对话。',
         rotated: false,
         tried: [pending.accountId || null],
         failures: [],
@@ -1252,7 +1252,7 @@ export async function generateWithRotation(dshHome, prompt, {
       return {
         ok: false,
         error: 'not_logged_in',
-        hint: only ? `账号未登录：taptap-gpt login --account ${only}` : '还没登录 ChatGPT 网页账号。先运行 taptap-gpt login；不会开始生成。',
+        hint: only ? `账号未登录：game-image login --account ${only}` : '还没登录 ChatGPT 网页账号。先运行 game-image login；不会开始生成。',
         rotated: false,
         tried: [],
         failures: [],
@@ -1314,7 +1314,7 @@ export async function generateWithRotation(dshHome, prompt, {
     // The browser window IS open and visible — the human can clear it.
     cloudflare_challenge: '被 Cloudflare 人机验证拦住（页面显示「请验证您是真人」，应用没渲染）。'
       + '重试时在弹出的浏览器窗口里手动勾选验证框即可；勾完它会自动继续。若反复出现，隔几分钟再试。',
-    not_logged_in: '账号未登录：/taptap-gpt login --account <id>（或设置页点「登录」）。',
+    not_logged_in: '账号未登录：/game-image login --account <id>（或设置页点「登录」）。',
     no_image: '没有等到新图（可能仍在生成或该账号额度不足）。先确认 pending，再决定是否重试。',
   }
   return {
@@ -1324,7 +1324,7 @@ export async function generateWithRotation(dshHome, prompt, {
     rotated: tried.length > 1,
     tried,
     failures,
-    hint: last?.hint ?? hints[lastErr] ?? 'pool: /taptap-gpt pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
+    hint: last?.hint ?? hints[lastErr] ?? 'pool: /game-image pool list 查看账号，login --account <id> 登录，unban 恢复冷却账号',
   }
 }
 
@@ -1332,7 +1332,7 @@ export async function generateWithRotation(dshHome, prompt, {
  * 生图的统一入口：按设置页排好的通道顺序 + 开关决定走哪条，额度不足时按开关
  * 决定要不要换下一条。
  *
- * 为什么不让调用方自己挑：`taptap-gpt gen`（网页）和 `taptap-image`（中转站）
+ * 为什么不让调用方自己挑：`game-image gen`（网页）和 `game-image-relay`（中转站）
  * 过去是两个独立命令，用户要自己判断该用哪个。现在「网页优先、中转站兜底」
  * 这条策略变成了**可排序、可关掉的显式配置**，由这一个函数统一执行。
  *
@@ -1361,6 +1361,29 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
 
   // 只有开了「额度不足自动换通道」才回退；否则就用第一条可用的。
   const chain = readLanes(dshHome).autoFallback ? usable : usable.slice(0, 1)
+  /**
+   * 这一次网页失败能不能换下一条通道？
+   *
+   * 只允许「这条通道自己跑不起来」的情况（未登录、通道被关、选择器失效、额度），
+   * 因为换一条确实能出图。明确**不许换**的四类：
+   *  - `pendingUrl` / `submitted`：请求已经发出、图可能正在生成，换通道 = 再花一次钱；
+   *  - `result_unknown` / `pending_request`：结果未知，同上的钱更危险；
+   *  - `kind === 'input'`：坏参考图 / 空提示词，换通道也一样失败，白花一次；
+   *  - `cloudflare_challenge`：浏览器已经开着等人点验证，切走等于把可救的现场扔掉。
+   */
+  const laneFailureIsRotatable = (r) => {
+    if (!r || typeof r !== 'object' || r.ok !== false) return false
+    if (r.pendingUrl) return false
+    if (r.submitted === true) return false
+    if (r.kind === 'input') return false
+    // 预检/输入类失败换通道也一样失败（配额字样的输入错误尤其不能当额度问题）。
+    if (r.phase === 'preflight') return false
+    const code = String(r.error ?? '')
+    // 额度错误有自己的抛出口（上面那段），这里不重复处理。
+    if (code.startsWith('quota:')) return false
+    if (code === 'result_unknown' || code === 'pending_request' || code === 'cloudflare_challenge') return false
+    return true
+  }
   const runLane = async (laneId) => {
     if (laneId === 'gptWeb') {
       const r = await generateWithRotation(dshHome, prompt, gptOpts)
@@ -1369,6 +1392,16 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
           && typeof r.error === 'string' && r.error.startsWith('quota:')) {
         const e = new Error(`quota:${r.error.slice(6)}`)
         e.laneError = r
+        throw e
+      }
+      // 网页通道「跑不起来」（未登录 / 通道被关 / 选择器失效）在用户开了自动
+      // 换通道时也该交给下一条 —— 以前只有配额错误会抛，其余都 return 回去被
+      // runWithFallback 当成「这条成功了」，于是自动换通道形同虚设，而守则里
+      // 却承诺了这几种情况会回退。链里还有别的通道才抛（否则保留详细结果给上层）。
+      if (!r.ok && chain.length > 1 && laneFailureIsRotatable(r)) {
+        const e = new Error(`lane_unavailable:${r.error ?? 'failed'}`)
+        e.laneError = r
+        e.laneRotate = true
         throw e
       }
       return r
@@ -1395,10 +1428,12 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
   }
 
   let lastReferenceAudit = {}
+  /** 最近一次「因为这条通道跑不起来而换下一条」的原始失败，用来给用户留可执行提示。 */
+  let lastLaneFailure = null
   const safeRunLane = async (laneId) => {
     if (zaiduyuOpts.model !== undefined && laneId !== 'zaiduyu') {
       return { ok: false, error: 'model_lane_mismatch', kind: 'input', requiresLogin: false, phase: 'preflight', submitted: false,
-        hint: '本次 --model 是章鱼参数，但当前可用通道不是章鱼；不会忽略指定模型、改通道顺序或提交。请用 /taptap-zaiduyu 直接调用，或由你决定配置。' }
+        hint: '本次 --model 是章鱼参数，但当前可用通道不是章鱼；不会忽略指定模型、改通道顺序或提交。请用 /game-zaiduyu 直接调用，或由你决定配置。' }
     }
     try {
       return await runLane(laneId)
@@ -1410,7 +1445,11 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
       // Quota opt-in never authorizes retrying bad references or an uncertain
       // submission. Preflight takes precedence over quota-looking input text.
       if (failure?.phase !== 'preflight' && failure?.kind !== 'input'
-          && (error?.quota === true || String(error?.message ?? '').startsWith('quota:'))) throw error
+          && (error?.quota === true || error?.laneRotate === true
+            || String(error?.message ?? '').startsWith('quota:'))) {
+        if (error?.laneRotate === true) lastLaneFailure = failure
+        throw error
+      }
       return {
         ok: false,
         error: error?.code ?? 'lane_failed',
@@ -1434,8 +1473,13 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
     ok: false,
     error: 'all_lanes_failed',
     lane: null,
-    hint: `所有生图通道都没成功：\n${summary}\n（可在设置页调整「生图通道优先级」与各通道开关）`,
+    hint: [
+      `所有生图通道都没成功：\n${summary}`,
+      lastLaneFailure?.hint ? `第一条通道的具体原因：${lastLaneFailure.hint}` : '',
+      '（可在设置页调整「生图通道优先级」与各通道开关）',
+    ].filter(Boolean).join('\n'),
     attempts: result.attempts,
+    ...(lastLaneFailure ? { lastFailure: lastLaneFailure } : {}),
     ...lastReferenceAudit,
   }
 }
@@ -1610,7 +1654,7 @@ return result`
 }
 
 /**
- * 解析 `/taptap-gpt <描述> [--ref …] [--downscale …] [--account …]` 的斜杠命令输入。
+ * 解析 `/game-image <描述> [--ref …] [--downscale …] [--account …]` 的斜杠命令输入。
  *
  * 为什么不能用正则剥 flag（旧写法）：`--ref` 后面**漏写值**时，
  * `(?:--ref)\s+(?:"[^"]+"|\S+)` 会把下一个 flag 名整个当成参考图吞掉，
@@ -1671,7 +1715,7 @@ export function parseSlashGenArgs(raw) {
  * 守则与 --help 都写明「--ref 可重复」，而消费端（gen 分支的
  * `Array.isArray(v) ? v : [v]`）本来就支持数组 —— 唯独解析端用赋值，
  * `--ref a --ref b` 只剩 b：**静默丢掉前面的参考图**，用户以为做了多图合成，
- * 实际得到只带一张图的结果。修法与 taptap-image 的 parseArgs 一致。
+ * 实际得到只带一张图的结果。修法与 game-image-relay 的 parseArgs 一致。
  * 导出是为了让测试能打真实实现（复刻一份解析器等于没测）。
  */
 export function parseCliArgs(argv) {
@@ -1715,7 +1759,7 @@ async function main() {
   const home = args.dshHome
 
   // Download dir: `dir` (show) | `dir --set <路径>` | `dir --reset`.
-  // Empty config = follow the project (…<project>/.taptap-images).
+  // Empty config = follow the project (…<project>/sucai/images).
   if (cmd === 'dir' || cmd === '目录') {
     if (args.reset === true) {
       writeGptDownloadDir(home, '')
@@ -1737,7 +1781,7 @@ async function main() {
       dir: r.dir,
       source: r.source,
       fallback: imageDownloadDir(home),
-      hint: '设置：taptap-gpt dir --set "<路径或 {project}/imgs>"；恢复默认：taptap-gpt dir --reset',
+      hint: '设置：game-image dir --set "<路径或 {project}/imgs>"；恢复默认：game-image dir --reset',
     }, null, 2)}\n`)
     return
   }
@@ -1752,7 +1796,7 @@ async function main() {
     }
     if (sub === 'off' || sub === '关') {
       const on = setLaneEnabled(home, false)
-      process.stdout.write(`${JSON.stringify({ ok: true, laneEnabled: on, hint: '网页生图已关闭，图片将回退到中转站 taptap-image' }, null, 2)}\n`)
+      process.stdout.write(`${JSON.stringify({ ok: true, laneEnabled: on, hint: '网页生图已关闭，图片将回退到中转站 game-image-relay' }, null, 2)}\n`)
       return
     }
     process.stdout.write(`${JSON.stringify({ ok: true, laneEnabled: laneEnabled(home) }, null, 2)}\n`)
@@ -1763,7 +1807,7 @@ async function main() {
     const prompt = args.prompt
     if (typeof prompt !== 'string' || prompt.length === 0) {
       process.stderr.write(
-        'usage: taptap-gpt gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>] [--no-resume]\n'
+        'usage: game-image gen --prompt "<描述>" [--out <file.png>] [--downscale 128x128] [--account <id>] [--no-resume]\n'
         + '       图生图：--ref <参考图>（可重复：--ref a.png --ref b.png，或 --ref "a.png,b.png"）\n'
         + '       注意：网页通道无法指定尺寸（尺寸由 ChatGPT 决定，需特定比例请下载后裁切）。\n',
       )
@@ -1776,7 +1820,7 @@ async function main() {
       process.stdout.write(`${JSON.stringify({
         ok: false,
         error: 'lane_disabled',
-        hint: '「ChatGPT 网页生图」通道已在设置页关闭。打开它，或改用中转站：/taptap-image <描述>。',
+        hint: '「ChatGPT 网页生图」通道已在设置页关闭。打开它，或改用中转站：/game-image-relay <描述>。',
       }, null, 2)}\n`)
       process.exitCode = 1
       return
@@ -1854,7 +1898,7 @@ async function main() {
       const id = args.id ?? args._?.[1]
       const label = args.label ?? id
       if (typeof id !== 'string' || id.length === 0) {
-        process.stderr.write('usage: taptap-gpt pool add --id <短名> [--label 备注]\n')
+        process.stderr.write('usage: game-image pool add --id <短名> [--label 备注]\n')
         process.exitCode = 2
         return
       }
@@ -1879,7 +1923,7 @@ async function main() {
       // DEFAULT profile, so `pool remove` with no id used to delete the user's
       // main ChatGPT login (and report ok:true).
       if (typeof id !== 'string' || id.length === 0) {
-        process.stderr.write('usage: taptap-gpt pool remove --id <短名>（不能省略，否则会误删主账号登录态）\n')
+        process.stderr.write('usage: game-image pool remove --id <短名>（不能省略，否则会误删主账号登录态）\n')
         process.exitCode = 2
         return
       }
@@ -1896,7 +1940,7 @@ async function main() {
     if (sub === 'ban') {
       const id = args.id ?? args._?.[1]
       if (typeof id !== 'string' || id.length === 0) {
-        process.stderr.write('usage: taptap-gpt pool ban --id <短名>\n')
+        process.stderr.write('usage: game-image pool ban --id <短名>\n')
         process.exitCode = 2
         return
       }

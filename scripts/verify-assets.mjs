@@ -25,19 +25,30 @@ const ok = (cond, label, extra = '') => {
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-assets-'))
 console.log(`临时目录：${scratch}\n`)
 
-/** 造一个像样的 Maker 工程（有 assets/ 就算）。 */
+/**
+ * 造一个像样的 Maker 工程。
+ *
+ * ⚠️ 光有 assets/ 不再算工程：那会把任何带 assets 目录的普通仓库都当成 Maker
+ * 工程（于是打开一次设置页就在人家仓库里造 sucai/）。现在要求 assets/ + 至少
+ * 一个特征文件（.project / scripts / project.json / main.lua），这里给 scripts/。
+ */
 function makeProject(name) {
   const dir = path.join(scratch, name)
   fs.mkdirSync(path.join(dir, 'assets'), { recursive: true })
+  fs.mkdirSync(path.join(dir, 'scripts'), { recursive: true })
   return dir
 }
 
 console.log('\n[1] 工程识别')
 {
-  ok(isMakerProject(makeProject('p-yes')) === true, '有 assets/ 的目录算工程')
+  ok(isMakerProject(makeProject('p-yes')) === true, 'assets/ + scripts/ 的目录算工程')
   const bare = path.join(scratch, 'p-no')
   fs.mkdirSync(bare, { recursive: true })
   ok(isMakerProject(bare) === false, '没有 assets/ 的不算工程')
+  // 回归：只有 assets/ 的普通仓库不能被当成 Maker 工程
+  const assetsOnly = path.join(scratch, 'p-assets-only')
+  fs.mkdirSync(path.join(assetsOnly, 'assets'), { recursive: true })
+  ok(isMakerProject(assetsOnly) === false, '只有 assets/ 的普通仓库不算工程（别在人家的仓库里造 sucai/）')
 }
 
 console.log('\n[2] 三类素材在项目里的落点')
@@ -62,7 +73,7 @@ console.log('\n[3] 不在项目里就退回 $DSH_HOME（绝不在 C 盘根造目
   for (const kind of Object.keys(ASSET_KINDS)) {
     const r = resolveAssetDir(home, kind, { projectDir: bare })
     ok(r.source === 'default', `${kind} 退回默认目录`, r.source)
-    ok(r.dir.startsWith(path.join(home, 'taptap-maker-dev')), `${kind} 落在 $DSH_HOME 下`, r.dir)
+    ok(r.dir.startsWith(path.join(home, 'game-forge')), `${kind} 落在 $DSH_HOME 下`, r.dir)
     ok(!fs.existsSync(path.join(r.dir, '.gitignore')), `${kind} 在 $DSH_HOME 下无需 .gitignore`)
   }
 }
@@ -83,7 +94,7 @@ console.log('\n[4] 显式指定优先，且只有真在项目里才 gitignore')
   ok(byConfig.insideProject === true, '展开后落在项目内 → insideProject 为 true')
 
   const homeExpanded = resolveAssetDir(home, 'bgm', { projectDir: proj, configured: '{home}/mymusic' })
-  ok(homeExpanded.dir === path.join(home, 'taptap-maker-dev', 'mymusic'), '{home} 占位符指向插件数据目录', homeExpanded.dir)
+  ok(homeExpanded.dir === path.join(home, 'game-forge', 'mymusic'), '{home} 占位符指向插件数据目录', homeExpanded.dir)
 }
 
 console.log('\n[5] 视频作业目录跟随项目，并记住位置')
@@ -130,9 +141,9 @@ console.log('\n[7] 旧位置（改造前）的作业能自动搬迁')
 {
   const proj = makeProject('p-legacy')
   const home = path.join(scratch, 'h-legacy')
-  const dataDir = path.join(home, 'taptap-maker-dev')
+  const dataDir = path.join(home, 'game-forge')
 
-  // 手工造一个改造前的作业：$DSH_HOME/taptap-maker-dev/video-jobs/<id>/
+  // 手工造一个改造前的作业：$DSH_HOME/game-forge/video-jobs/<id>/
   const id = 'vlegacy01'
   const oldRoot = path.join(dataDir, 'video-jobs', id)
   fs.mkdirSync(path.join(oldRoot, 'frames'), { recursive: true })

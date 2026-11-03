@@ -89,12 +89,12 @@ console.log('\n[4] 目录配置：空串在这里是**合法值**（reset 用）
   writeGptDownloadDir(home, '/custom/img')
   ok(readGptDownloadDir(home) === '/custom/img', '图片目录写入正常')
 
-  // ⚠️ 这里跟 image.json 的规则**故意不同**：`/taptap-gpt dir --reset`
+  // ⚠️ 这里跟 image.json 的规则**故意不同**：`/game-image dir --reset`
   // 就是靠传空串来「恢复跟随项目」的，所以不能把空串拦成「不修改」。
   writeGptDownloadDir(home, '')
   ok(readGptDownloadDir(home) === '', '空串在此处表示「恢复默认」（reset 的既有语义，不能改）')
 
-  const src = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
+  const src = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
   ok(/writeGptDownloadDir\(home, ''\)/.test(src), 'reset 走的是显式传空串，与其它配置区分开')
 }
 
@@ -197,8 +197,8 @@ console.log('\n[8] 版本升级迁移：music.json → minimax.json（升级不�
 
   // 真跑一遍迁移逻辑（函数未导出，按相同规则在临时目录里验证行为）。
   const home = path.join(scratch, 'h7')
-  fs.mkdirSync(path.join(home, 'taptap-maker-dev'), { recursive: true })
-  const legacy = path.join(home, 'taptap-maker-dev', 'music.json')
+  fs.mkdirSync(path.join(home, 'game-forge'), { recursive: true })
+  const legacy = path.join(home, 'game-forge', 'music.json')
   writeJson(legacy, { apiKey: 'sk-legacy-key', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
   writeMinimaxConfigPatch(home, { apiKey: 'sk-legacy-key', baseURL: 'https://api.minimaxi.com', model: 'MiniMax-H3' })
   ok(readMinimaxConfigRaw(home).apiKey === 'sk-legacy-key', '迁移后 minimax.json 可读到旧 Key（规则等价验证）')
@@ -250,7 +250,7 @@ console.log('\n[9] 章鱼生图站点账号：优先级 / 半截不算数 / 空�
     ok(clearZaiduyuCredentials(home) === false, 'zaiduyu：重复清除返回 false（本来就没有）')
 
     // 密码绝不进命令行参数（argv 会进进程列表/日志）—— 只能走子进程 env。
-    const zsrc = fs.readFileSync(new URL('../src/taptap-zaiduyu.mjs', import.meta.url), 'utf8')
+    const zsrc = fs.readFileSync(new URL('../src/game-zaiduyu.mjs', import.meta.url), 'utf8')
     const genBody = /export async function generate[\s\S]*?\n\}\n/.exec(zsrc)?.[0] ?? ''
     ok(!/--(password|pass|user|identifier)\b/.test(genBody), 'zaiduyu：不往生图参数里塞账号或密码')
     ok(/childEnv\.ZAIDUYU_PASS\s*=/.test(zsrc), 'zaiduyu：凭据通过子进程 env 注入')

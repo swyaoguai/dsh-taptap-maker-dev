@@ -1,5 +1,5 @@
 /**
- * Browser half of dsh-taptap-maker-dev — hand-written ModuleLoader bundle.
+ * Browser half of dsh-game-forge — hand-written ModuleLoader bundle.
  *
  * The web shell serves this file and executes it as a script: it must call
  * `window.__ModuleLoader__.load({ id, factory })` exactly once, where `id` is
@@ -9,7 +9,7 @@
  * doing require/exports at module top level is what crashed host startup
  * before; everything must live inside the factory.
  *
- * The page registers a dedicated "TapTap Maker" settings section. Persisting
+ * The page registers a dedicated "Game Forge" settings section. Persisting
  * config back to the host needs the Typert remote compiler or an embedded web
  * server (neither available to a hand-written bundle), so the form turns its
  * fields into the exact `image.json` text with one-click copy instead.
@@ -17,7 +17,7 @@
  * @module client.js
  */
 window.__ModuleLoader__.load({
-  id: 'dsh-taptap-maker-dev',
+  id: 'dsh-game-forge',
   factory: (require) => {
     const module = { exports: {} }
     const exports = module.exports
@@ -27,7 +27,7 @@ window.__ModuleLoader__.load({
 
     const inject = ['slots']
     const SIZES = ['1024x1024', '1024x1536', '1536x1024', '512x512', '768x768']
-    const API_BASE = '/api/taptap-maker-dev'
+    const API_BASE = '/api/game-forge'
 
     /**
      * 不再内置已知型号表 —— 型号各家中转站不同，会很快过时。
@@ -681,7 +681,7 @@ window.__ModuleLoader__.load({
         lib === null ? h('p', { style: S.hint }, '加载中…') : null,
         lib && !lib.ok
           ? h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } },
-            `没连上宿主服务（${lib.error}）。BGM 仍可在对话里生成；导入可用 /taptap-audio import。`)
+            `没连上宿主服务（${lib.error}）。BGM 仍可在对话里生成；导入可用 /game-audio import。`)
           : null,
         lib && lib.ok && files.length === 0 && !sel
           ? h('p', { style: { ...S.hint, lineHeight: 1.7 } },
@@ -728,7 +728,7 @@ window.__ModuleLoader__.load({
       }
       static getDerivedStateFromError() { return { err: true } }
       componentDidCatch(error) {
-        try { console.error('[taptap-maker-dev] BGM widget error:', error) } catch { /* ignore */ }
+        try { console.error('[game-forge] BGM widget error:', error) } catch { /* ignore */ }
       }
       render() {
         if (this.state.err) return null
@@ -891,7 +891,7 @@ window.__ModuleLoader__.load({
         return h('div', { style: S.card },
           h('h2', { style: S.cardTitle }, 'BGM 账号'),
           h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
-            '没连上宿主服务。可用命令 /taptap-bgm login。'))
+            '没连上宿主服务。可用命令 /game-bgm login。'))
       }
       const logged = info.hasCookies === true
       const pool = info.pool ?? { accounts: [], total: 0, loggedIn: 0, autoRotate: true, cooling: 0, banned: 0 }
@@ -1140,7 +1140,7 @@ window.__ModuleLoader__.load({
         return h('div', { style: S.card },
           h('h2', { style: S.cardTitle }, 'ChatGPT 网页生图'),
           h('p', { style: { ...S.sub, marginTop: 0, color: 'var(--dsh-warn, #f08c00)' } },
-            '没连上宿主服务。可用命令 /taptap-gpt login。'))
+            '没连上宿主服务。可用命令 /game-image login。'))
       }
       const pool = info.pool ?? { accounts: [], total: 0, loggedIn: 0, autoRotate: true }
       // Master switch: when OFF the lane is disabled end-to-end (CLI refuses,
@@ -1401,7 +1401,7 @@ window.__ModuleLoader__.load({
             const set = new Set(dis)
             setState((s) => ({ ...s, disabled: dis, skills: s.skills.map((k) => ({ ...k, disabled: set.has(k.name) })) }))
           })
-          .catch(() => setErr('保存失败：宿主 web 服务可能未就绪，可改用 /taptap-skills 命令。'))
+          .catch(() => setErr('保存失败：宿主 web 服务可能未就绪，可改用 /game-skills 命令。'))
           .finally(() => setBusy(false))
       }, [])
 
@@ -1422,7 +1422,7 @@ window.__ModuleLoader__.load({
           h('h2', { style: S.cardTitle }, 'Skill 管理'),
           h('p', { style: { ...S.sub, marginTop: 0 } },
             '没连上宿主的 skill 服务（可能此 DSH 组合未启用 web 服务，或刚启动还没就绪）。',
-            '可以点「重试」，或改用命令：', h('span', { style: S.codeInline }, '/taptap-skills disable <名>'), '。'),
+            '可以点「重试」，或改用命令：', h('span', { style: S.codeInline }, '/game-skills disable <名>'), '。'),
           h('div', { style: S.bar }, h('button', { style: S.ghostBtn, onClick: load }, '重试')))
       }
 
@@ -2214,7 +2214,7 @@ window.__ModuleLoader__.load({
             h('span', { style: S.codeInline }, 'sk-api-…'),
             '：控制台签发的都是 JWT 长得一样，光看字符串分不出订阅还是按量——',
             '以 ',
-            h('span', { style: S.codeInline }, '/taptap-video doctor'),
+            h('span', { style: S.codeInline }, '/game-video doctor'),
             ' 的实测结果为准。'),
           keyKindText ? h('p', { style: S.hint }, keyKindText) : null,
           h(LabeledInput, {
@@ -2409,7 +2409,7 @@ window.__ModuleLoader__.load({
               '（或用你装插件时的同一方式更新）。'))
           : null,
         h('p', { style: { ...S.hint, marginTop: 10 } },
-          '仓库：', h('span', { style: S.codeInline }, 'github.com/swyaoguai/dsh-taptap-maker-dev'),
+          '仓库：', h('span', { style: S.codeInline }, 'github.com/swyaoguai/dsh-game-forge'),
           ' · 版本源为该仓库 main 分支的 package.json。'),
       )
     }
@@ -2426,7 +2426,7 @@ window.__ModuleLoader__.load({
           h('li', null, '「让这个角色跑起来」—— 先出一段视频，再切成一帧一帧的图，导进 Maker。'),
           h('li', null, '「加个捡金币的声音」—— 先从免费音效库里找，找到就直接装进项目。'),
           h('li', null, '「来一首战斗背景音乐」—— 第一次会弹出浏览器让你登录 MiniMax，之后就自动了。做好后点右下角的 🎵 可以试听、剪掉不要的部分、导入项目。'),
-          h('li', null, '「帮我建一个 Maker 项目」—— AI 会先跟你确认，再帮你装好、建好。'),
+          h('li', null, '「帮我建一个 Maker 项目」—— AI 会先跟你确认，再帮你装好、建好；说「做个 Godot / 网页小游戏」也走同一套工作流。'),
         ),
         h('p', { style: { ...S.sub, margin: '10px 0 0' } }, '这个页面只在下面几种时候用一下：'),
         h('ul', { style: S.ul },
@@ -2436,13 +2436,13 @@ window.__ModuleLoader__.load({
         ),
         h('p', { style: { ...S.sub, margin: '10px 0 0' } }, '卡住了也可以自己敲命令：'),
         h('ul', { style: S.ul },
-          h('li', null, code('/taptap-gpt login'), ' 登录 ChatGPT 网页画图'),
-          h('li', null, code('/taptap-video doctor'), ' 看看视频哪条路能用'),
-          h('li', null, code('/taptap-bgm credits'), ' 看看 BGM 还剩多少次'),
-          h('li', null, code('/taptap-audio 金币'), ' 自己搜音效'),
+          h('li', null, code('/game-image login'), ' 登录 ChatGPT 网页画图'),
+          h('li', null, code('/game-video doctor'), ' 看看视频哪条路能用'),
+          h('li', null, code('/game-bgm credits'), ' 看看 BGM 还剩多少次'),
+          h('li', null, code('/game-audio 金币'), ' 自己搜音效'),
         ),
         h('p', { style: { ...S.hint, marginTop: 10 } },
-          '你的账号和 Key 只存在这台电脑的 ', code('$DSH_HOME/taptap-maker-dev/'),
+          '你的账号和 Key 只存在这台电脑的 ', code('$DSH_HOME/game-forge/'),
           ' 里，不会跟着游戏项目上传。'),
       )
     }
@@ -2453,20 +2453,173 @@ window.__ModuleLoader__.load({
      * 混在「治理与工具」里；现在图片 / 视频分开，额度红线和通道顺序放进第一组，
      * skill 开关收进「其他」（AI 自己按需挑 skill，用户一般不用动）。
      */
-    function TaptapMakerSettings() {
+    /**
+     * Cocos Creator 卡片：本机可能同时开着 2~3 个工程。
+     *
+     * 这张卡只做三件事：看现状、登记/撤销 MCP 服务、给某个工程装扩展。
+     * 所有写操作（登记改配置、装扩展下载文件）都需要用户点按钮，
+     * 卡片上明确写出「会改哪个文件/装到哪里」——不搞静默副作用。
+     */
+    function CocosCard() {
+      const [data, setData] = useState(null)
+      const [busy, setBusy] = useState('')
+      const [msg, setMsg] = useState(null)
+      const [projectPath, setProjectPath] = useState('')
+      const [installResult, setInstallResult] = useState(null)
+
+      const load = useCallback(async () => {
+        try {
+          const r = await fetch(`${API_BASE}/cocos`, { headers: { accept: 'application/json' } })
+          const j = await r.json()
+          if (j?.ok) { setData(j); setMsg(null) } else setMsg({ kind: 'err', text: j?.error ?? '读取失败' })
+        } catch (e) {
+          setMsg({ kind: 'err', text: `读取失败：${e?.message ?? e}` })
+        }
+      }, [])
+
+      useEffect(() => { load() }, [load])
+
+      const toggleRegister = async () => {
+        const next = !(data?.registered === true)
+        if (next && !window.confirm(
+          '将往 DSH profile 的 cordis.patch.yml 写入一条 mcp-cocos 配置（只增删这一条，会自动备份）。继续？')) return
+        setBusy('register')
+        setMsg(null)
+        try {
+          const r = await fetch(`${API_BASE}/cocos/register`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ enabled: next }),
+          })
+          const j = await r.json()
+          if (j?.ok) setMsg({ kind: 'ok', text: j.note ?? '已更新' })
+          else setMsg({ kind: 'err', text: j?.error ?? '操作失败' })
+        } catch (e) {
+          setMsg({ kind: 'err', text: `操作失败：${e?.message ?? e}` })
+        } finally {
+          setBusy('')
+          load()
+        }
+      }
+
+      const install = async () => {
+        const target = projectPath.trim()
+        if (target === '') { setMsg({ kind: 'err', text: '先填一个 Cocos 工程目录' }); return }
+        if (!window.confirm(
+          `将从 GitHub 下载 funplay-cocos-mcp（MIT）并校验 SHA256，解压到：\n${target}\\extensions\\\n\n继续？`)) return
+        setBusy('install')
+        setMsg(null)
+        setInstallResult(null)
+        try {
+          const r = await fetch(`${API_BASE}/cocos/install`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ project: target }),
+          })
+          const j = await r.json()
+          if (j?.ok) {
+            setInstallResult(j)
+            setMsg({ kind: 'ok', text: j.alreadyInstalled ? `已装过（${j.version}），未重复下载` : `已安装 v${j.version} → ${j.dir}` })
+          } else setMsg({ kind: 'err', text: j?.error ?? '安装失败' })
+        } catch (e) {
+          setMsg({ kind: 'err', text: `安装失败：${e?.message ?? e}` })
+        } finally {
+          setBusy('')
+          load()
+        }
+      }
+
+      const projects = data?.projects ?? []
+      const running = projects.filter((item) => item.running).length
+      const registered = data?.registered === true
+
+      return h('section', { style: S.card },
+        h('div', { style: S.rowBetween },
+          h('h3', { style: S.cardTitle },
+            'Cocos Creator',
+            h('span', { style: registered ? S.pill : S.offPill }, registered ? '已登记' : '未登记'),
+          ),
+          h('div', { style: S.btnRow },
+            h('button', { style: S.ghostBtn, onClick: load, disabled: busy !== '' }, '刷新'),
+            h('button', {
+              style: registered ? S.ghostBtn : S.btn,
+              onClick: toggleRegister,
+              disabled: busy !== '',
+            }, busy === 'register' ? '处理中…' : (registered ? '撤销登记' : '登记 MCP 服务')),
+          ),
+        ),
+
+        h('p', { style: S.hint },
+          '多个 Cocos 工程可以同时开：工具只登记一个 cocos 服务，用 project 参数路由到具体工程；'
+          + '同一工程的写操作串行（写锁），构建全机排队 —— 不会把改动写进另一个工程里。'),
+
+        projects.length === 0
+          ? h('p', { style: S.hint }, '还没有登记或正在运行的 Cocos 工程。先在 Cocos Creator 里打开一个，或重启 DSH 后点「刷新」。')
+          : h('div', { style: S.scrollBox },
+            projects.map((item) => h('div', {
+              key: item.slug,
+              style: { display: 'flex', flexDirection: 'column', gap: 3, padding: '8px 10px', borderBottom: '1px solid var(--dsh-border, rgba(128,128,128,0.18))' },
+            },
+              h('div', { style: S.rowBetween },
+                h('span', { style: { fontSize: 13, fontWeight: 600 } }, item.name,
+                  item.registered ? null : h('span', { style: { ...S.hint, marginLeft: 8 } }, '未登记')),
+                h('span', { style: item.running ? S.chipOn : S.chipOff },
+                  item.running ? `运行中 :${item.port ?? '?'}` : '未运行'),
+              ),
+              h('span', { style: { ...S.hint, wordBreak: 'break-all' } }, item.path),
+              item.mcp && item.mcp.matchesRegistry === false
+                ? h('span', { style: S.warn }, `⚠ 端口上报的工程是 ${item.mcp.projectPath}`)
+                : null,
+            )),
+          ),
+
+        data && data.buildSlots && data.buildSlots.length > 0
+          ? h('p', { style: S.hint }, `构建槽位：${data.buildSlots.map((slot) => `slot${slot.slot} 被 ${slot.holder?.label ?? '?'} 占用`).join('；')}（上限 ${data.buildSlotLimit}）`)
+          : h('p', { style: S.hint }, `构建槽位：空闲（上限 ${data?.buildSlotLimit ?? 1}，可在 config.cocos.buildSlots 调整）`),
+
+        h('div', { style: S.row },
+          h('span', { style: S.label }, '给某个工程安装 MCP 扩展（编辑器内嵌服务，MIT）'),
+          h('div', { style: S.bar },
+            h('input', {
+              style: S.search,
+              placeholder: '例如 D:\\wxzj-cocos',
+              value: projectPath,
+              onChange: (e) => setProjectPath(e.target.value),
+            }),
+            h('button', { style: S.ghostBtn, onClick: install, disabled: busy !== '' },
+              busy === 'install' ? '安装中…' : '装到这个工程'),
+          ),
+          h('p', { style: S.hint },
+            '只下载官方 release 并校验 SHA256，解压到 <工程>/extensions/；已有配置不会被覆盖。'
+            + '装完要在 Cocos 里重新加载扩展（或重启编辑器）。'),
+        ),
+
+        registered
+          ? h('p', { style: S.hint },
+            `已登记到 ${data?.patchFile ?? 'profile patch'}；桌面端通常需要重启一次才会出现 cocos_* 工具。`)
+          : h('p', { style: S.hint }, '未登记时 agent 手里没有 cocos_* 工具，只能看这张卡。'),
+
+        msg === null ? null : h('p', { style: msg.kind === 'ok' ? S.ok : S.warn }, msg.text),
+        installResult === null ? null : h('p', { style: S.hint },
+          `安装位置：${installResult.dir}（${installResult.scope === 'global' ? '全局' : '工程级'}）`
+          + (installResult.checksum?.expected ? '；SHA256 校验通过' : '')),
+      )
+    }
+
+    function GameForgeSettings() {
       const [group, setGroup] = useState('start')
       const groups = [
         { id: 'start', icon: '🎯', label: '开始', desc: '怎么用、花钱红线、先用哪条', count: 0 },
         { id: 'image', icon: '🎨', label: '图片', desc: 'ChatGPT 网页 / 中转站 / 章鱼', count: 3 },
         { id: 'video', icon: '🎬', label: '视频', desc: 'MiniMax / 中转站 / 自己的视频', count: 3 },
         { id: 'audio', icon: '🔊', label: '音频', desc: 'BGM 账号与免费音效库', count: 2 },
-        { id: 'more', icon: '⚙️', label: '其他', desc: 'Skill 开关、版本更新', count: 0 },
+        { id: 'more', icon: '⚙️', label: '其他', desc: 'Cocos 集成、Skill 开关、版本更新', count: 0 },
       ]
       return h('div', { style: S.page },
         h('div', null,
-          h('h1', { style: S.h1 }, 'TapTap Maker 本地开发'),
+          h('h1', { style: S.h1 }, '游戏工坊 · Game Forge'),
           h('p', { style: S.sub },
-            '登录账号、填 Key、排先后顺序都在这里。日常要素材直接在对话里说。'),
+            '游戏开发工作流插件：素材、音效、BGM、动作帧都在这里配。TapTap Maker 只是其中一条引擎链路，Godot / Unity / 网页项目一样能用；日常直接在对话里说要什么就行。'),
         ),
 
         h(GroupTabs, { groups, value: group, onChange: setGroup }),
@@ -2499,6 +2652,7 @@ window.__ModuleLoader__.load({
         ),
 
         h(PanelGroup, { active: group === 'more' },
+          h(CocosCard),
           h(SkillManager),
           h(AboutCard),
         ),
@@ -2509,11 +2663,11 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('settings.section', () => ctx.slots.register(
         {
           name: 'settings.section',
-          id: 'taptap-maker-dev',
+          id: 'game-forge',
           order: 42,
-          label: () => 'TapTap Maker',
+          label: () => '游戏工坊',
         },
-        TaptapMakerSettings,
+        GameForgeSettings,
       ))
 
       // BGM workbench on the MAIN interface (composer dock): preview /
@@ -2522,7 +2676,7 @@ window.__ModuleLoader__.load({
       ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register(
         {
           name: 'conversation.composer.dock',
-          id: 'taptap-maker-dev-bgm',
+          id: 'game-forge-bgm',
           order: 90,
           label: () => 'BGM 工作台',
         },
@@ -2532,7 +2686,7 @@ window.__ModuleLoader__.load({
 
     exports.apply = apply
     exports.inject = inject
-    exports.name = 'taptap-maker-dev-client'
+    exports.name = 'game-forge-client'
     return module.exports
   },
 })

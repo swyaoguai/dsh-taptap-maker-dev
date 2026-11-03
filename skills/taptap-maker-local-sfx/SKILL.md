@@ -1,7 +1,7 @@
 ---
 name: taptap-maker-local-sfx
 description: 用本地 Stable Audio Open 1.0 模型生成游戏音效（零额度、不联网付费），作为 CC0 音效库找不到合适素材时的兜底。模型约 5.3GB 权重**绝不自动下载**——必须先硬件体检、由用户手动下载。触发词：想要一个库里没有的定制音效、"本地生成音效"、"自己跑模型做音效"。
-whenToUse: CC0 音效库（taptap-audio）搜不到合适素材、且用户机器有 NVIDIA 显卡（建议 8GB 显存）时的本地音效兜底；普通音效需求一律先用 CC0 库。
+whenToUse: CC0 音效库（game-audio）搜不到合适素材、且用户机器有 NVIDIA 显卡（建议 8GB 显存）时的本地音效兜底；普通音效需求一律先用 CC0 库。
 ---
 
 # taptap-maker-local-sfx — 本地音效生成（Stable Audio Open 1.0）
@@ -24,7 +24,7 @@ whenToUse: CC0 音效库（taptap-audio）搜不到合适素材、且用户机�
 ## 标准流程（用 pwsh 真正执行，不要只打印指引）
 
 ```powershell
-$cli = "<插件目录>/src/taptap-sfx.mjs"
+$cli = "<插件目录>/src/game-sfx.mjs"
 
 # 1) 硬件体检：NVIDIA 显卡 + 建议 8GB 显存；不够就止步于此
 node $cli check
@@ -45,13 +45,13 @@ node $cli gen "coin pickup, bright arcade blip" --project <Maker项目目录> -s
 ```
 
 `gen` 带 `--project` 时自动写入 `assets/audio/sfx/` 并补同名 `.meta`（uuid），
-Maker 直接可用；不带则落在临时目录，之后用 `/taptap-audio import` 导入。
+Maker 直接可用；不带则落在临时目录，之后用 `/game-audio import` 导入。
 
 ## 失败码怎么处理（不要盲目重试）
 
 | code | 含义 | 正确动作 |
 |---|---|---|
-| `hardware_insufficient` | 无独显 / 显存不足 | 停下，回退 CC0 库（`/taptap-audio add`），如实告知 |
+| `hardware_insufficient` | 无独显 / 显存不足 | 停下，回退 CC0 库（`/game-audio add`），如实告知 |
 | `model_missing` | 权重还没下载 | 把 `guide` 输出交给用户，等用户下完再 `verify` |
 | `venv_missing` | 依赖没装 | `deps` 给用户看，确认后 `deps --yes` |
 | `gen_failed` | torch 运行期报错 | 转达 stderr 摘要；先 `doctor` 定位，不要连着重跑生成 |
@@ -62,13 +62,13 @@ Maker 直接可用；不带则落在临时目录，之后用 `/taptap-audio impo
 - 时长用 `-s` 秒（最长 47s；游戏音效一般 0.5-3 秒，`audio_end_in_s` 会钳制）。
 - `--steps` 60~200：越高越好越慢；默认 100。8GB 显存实测约 35-55 秒/条（低显存流式模式）。
 - `-n 3` 同提示词出 3 个不同 seed 备选，比反复重跑单条省时间。
-- 生成后通常需要裁剪/淡入淡出/转 wav 统一：用 `/taptap-audio-convert`
+- 生成后通常需要裁剪/淡入淡出/转 wav 统一：用 `/game-audio-convert`
   （`--trim --fade-out 0.1 --normalize`）。
 
 ## 与其它链路的边界
 
-- **音效优先级**：CC0 库（taptap-audio）→ 本地生成（本 skill）→ 用户明确同意才动用 Maker 内置额度。
-- **BGM 不走这里**：Stable Audio Open 做不出可无缝循环的完整配乐；完整 BGM 走 `/taptap-bgm`。
+- **音效优先级**：CC0 库（game-audio）→ 本地生成（本 skill）→ 用户明确同意才动用 Maker 内置额度。
+- **BGM 不走这里**：Stable Audio Open 做不出可无缝循环的完整配乐；完整 BGM 走 `/game-bgm`。
 - 短 jingle 可以拿本 skill 生成（如 3 秒胜利音），但库里大概率已有现成的。
 - 环境目录解析顺序：`TAPTAP_SFX_HOME` > 现成安装（如 `D:\stable-audio`）> `%LOCALAPPDATA%\taptap-maker-sfx`。
 

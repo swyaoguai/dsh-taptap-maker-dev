@@ -26,27 +26,27 @@ const ok = (cond, label, extra = '') => {
 
 console.log('\n[1] 显式授权识别')
 {
-  ok(hasApproval('/taptap-skills reset --yes'), '--yes 视为授权')
-  ok(hasApproval('/taptap-skills reset --force'), '--force 视为授权')
+  ok(hasApproval('/game-skills reset --yes'), '--yes 视为授权')
+  ok(hasApproval('/game-skills reset --force'), '--force 视为授权')
   ok(hasApproval('run -y'), '-y 视为授权')
   ok(hasApproval('确认'), '用户说「确认」视为授权')
   ok(hasApproval('确定。'), '带句号也算授权')
   ok(hasApproval('清空禁用表，确认'), '句尾的「确认」也算')
   ok(!hasApproval('确认清空'), '「确认」后接动词不算授权（要求独立成句）')
-  ok(!hasApproval('/taptap-skills reset'), '裸命令不算授权')
-  ok(!hasApproval('/taptap-video use a.mp4'), '普通命令不算授权')
+  ok(!hasApproval('/game-skills reset'), '裸命令不算授权')
+  ok(!hasApproval('/game-video use a.mp4'), '普通命令不算授权')
   ok(!hasApproval(''), '空输入不算授权')
-  ok(!hasApproval('/taptap-video prompt 确认一下'), '提示词里出现「确认」不应误判为授权')
-  ok(!hasApproval('/taptap-video prompt 确定角色朝向'), '提示词里出现「确定」不应误判为授权')
+  ok(!hasApproval('/game-video prompt 确认一下'), '提示词里出现「确认」不应误判为授权')
+  ok(!hasApproval('/game-video prompt 确定角色朝向'), '提示词里出现「确定」不应误判为授权')
 }
 
 console.log('\n[2] 破坏性动作：默认停下')
 {
   const gate = requireApproval({
-    rawInput: '/taptap-skills reset',
+    rawInput: '/game-skills reset',
     action: '清空 skill 禁用表',
     consequence: '当前禁用 12 个 skill',
-    undo: '/taptap-skills restore',
+    undo: '/game-skills restore',
   })
   ok(gate.ok === false, '没授权 → 拒绝执行')
   ok(/清空 skill 禁用表/.test(gate.text), '说清楚要做什么')
@@ -58,7 +58,7 @@ console.log('\n[2] 破坏性动作：默认停下')
 
 console.log('\n[3] 用户已选定的配置：改之前必须问')
 {
-  const g1 = guardUserSetting('model', { rawInput: '/taptap-video set --model X', from: 'MiniMax-H3', to: 'X' })
+  const g1 = guardUserSetting('model', { rawInput: '/game-video set --model X', from: 'MiniMax-H3', to: 'X' })
   ok(g1.ok === false, '改模型 → 拒绝（视频按秒计费）')
   ok(/MiniMax-H3/.test(g1.text) && /\bX\b/.test(g1.text), '把「现在是什么 / 想改成什么」都讲清楚')
 
@@ -99,7 +99,14 @@ console.log('\n[5] 注入 agent 的守则与代码护栏对得上')
   // index.js 真的 import 并用上了这些护栏（文档写了但代码没接 = 白写）
   const src = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   ok(/from '\.\/src\/guards\.mjs'/.test(src), 'index.js 引入了 guards.mjs')
-  ok(/guardrailLines\(\)/.test(src), 'index.js 把守则注入了 system prompt')
+  // 守则文本已搬到 src/policy.mjs（拆成「额度红线」「工作流」两段）：
+  // index.js 负责注册 section，policy.mjs 负责把 guardrailLines() 拼进红线那段。
+  const policySrc = fs.readFileSync(new URL('../src/policy.mjs', import.meta.url), 'utf8')
+  ok(/from '\.\/src\/policy\.mjs'/.test(src), 'index.js 引入了 policy.mjs')
+  ok(/creditPolicyText\(\)/.test(src) && /workflowPolicyText\(/.test(src),
+    'index.js 把两段守则都注入了 system prompt')
+  ok(/guardrailLines\(\)/.test(policySrc), '额度红线那段真的带上了 guardrailLines()')
+  ok(/systemPrompt/.test(src) && /\.section\(/.test(src), '确实通过 systemPrompt.section() 注入')
   ok(/requireApproval\(/.test(src), 'index.js 用上了 requireApproval（skills reset）')
   ok(/guardUserSetting\(/.test(src), 'index.js 用上了 guardUserSetting（模型 / 通道）')
   const uses = (src.match(/guardUserSetting\(/g) ?? []).length

@@ -9,7 +9,7 @@ const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace
 const imp = async (rel) => import(pathToFileURL(path.join(root, 'src', rel)).href)
 
 const { writeLanes } = await imp('lanes.mjs')
-const { generateImage } = await imp('taptap-gpt.mjs')
+const { generateImage } = await imp('game-image-web.mjs')
 
 // 落盘配置用系统临时目录，不在仓库里留 .tmp-e2e-home。
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-e2e-'))

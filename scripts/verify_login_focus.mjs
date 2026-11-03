@@ -29,8 +29,8 @@ const POOL_ANCHOR = 'sub === ' + Q + 'gpt-pool' + Q
 const ADD_ANCHOR = 'if (action === ' + Q + 'add' + Q + ')'
 const LOGIN_TOKEN = Q + 'login' + Q
 
-const gptSrc = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
-const bgmSrc = fs.readFileSync(new URL('../src/taptap-bgm-web.mjs', import.meta.url), 'utf8')
+const gptSrc = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
+const bgmSrc = fs.readFileSync(new URL('../src/game-bgm-web.mjs', import.meta.url), 'utf8')
 const idxSrc = fs.readFileSync(new URL('../index.js', import.meta.url), 'utf8')
 const cliSrc = fs.readFileSync(new URL('../client.js', import.meta.url), 'utf8')
 const focusSrc = fs.readFileSync(new URL('../src/win-focus.mjs', import.meta.url), 'utf8')
@@ -44,7 +44,7 @@ const bodyOf = (src, name) => {
 
 console.log('\n[1] 两条链路的 runBrowser 都会主动把窗口拉到前台')
 {
-  const pairs = [['taptap-gpt.mjs', gptSrc], ['taptap-bgm-web.mjs', bgmSrc]]
+  const pairs = [['game-image-web.mjs', gptSrc], ['game-bgm-web.mjs', bgmSrc]]
   for (const pair of pairs) {
     const name = pair[0]
     const fn = bodyOf(pair[1], 'runBrowser')
@@ -60,7 +60,11 @@ console.log('\n[1] 两条链路的 runBrowser 都会主动把窗口拉到前台'
 
 console.log('\n[2] 置前按 profile 路径匹配，不抓「最新 chrome」')
 {
-  ok(focusSrc.includes('CommandLine -like'), '用命令行匹配 profile 路径')
+  // 实现已从 `-like '*${path}*'` 改为 `-match ([regex]::Escape(...)) + 负向前瞻`
+  // （与 win-proc 同一套：避免前缀误配、也避免路径里的 [ ] 被当字符类）。
+  ok(focusSrc.includes('CommandLine -match'), '用命令行匹配 profile 路径')
+  ok(focusSrc.includes('[regex]::Escape'), '路径先做 regex 转义')
+  ok(focusSrc.includes('(?!['), '带负向前瞻，不会把 browser-profile-gpt 当成 browser-profile')
   ok(focusSrc.includes('--type=*'), '排除 helper 进程，只找主窗口')
   ok(!focusSrc.includes('MainWindowTitle -match'), '不会按标题乱抓用户自己的窗口')
   ok(focusSrc.includes('AttachThreadInput'), '用 AttachThreadInput 绕过抢焦点限制')
@@ -73,7 +77,7 @@ console.log('\n[2] 置前按 profile 路径匹配，不抓「最新 chrome」')
 console.log('\n[3] 转义：路径含单引号时不能被当成命令')
 {
   ok(focusSrc.includes("replace(/'/g, \"''\")"), '单引号被转义（与 win-proc 一致）')
-  ok(focusSrc.includes('[?]') && focusSrc.includes('[*]'), '-like 模式里的 * ? 被转义')
+  ok(!/-like\s+'\*\$\{/.test(focusSrc), '不再把变量拼进 -like 单引号模式')
   const ps = 'Write-Output ' + Q.replace(Q, Q + Q) + 'O' + Q + Q + 'Brien' + Q.replace(Q, Q + Q)
   const probe = spawnSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8' })
   ok(/Brien/.test(probe.stdout ?? ''), 'PowerShell 侧解析正常', (probe.stdout ?? '').trim())

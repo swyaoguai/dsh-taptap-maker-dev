@@ -9,7 +9,7 @@ const note = 'OFFLINE_PREPARATION: 2048 KiB -> 512 KiB; originals preserved'
 function command(name, result) {
   const at = source.indexOf(`name: '${name}'`)
   const start = source.lastIndexOf('scoped.commands.register({', at)
-  const end = source.indexOf(name === 'taptap-gpt' ? '// /taptap-gpt 作为首选后' : '// /taptap-sfx ——', at)
+  const end = source.indexOf(name === 'game-image' ? '// /game-image 作为首选后' : '// /game-sfx ——', at)
   assert.ok(start >= 0 && end > start)
   let handler
   const provide = async () => { if (result instanceof Error) throw result; return result }
@@ -30,35 +30,35 @@ async function test(name, body) {
   catch (e) { failed++; console.error(`FAIL ${name}: ${e.message}`) }
 }
 await test('direct Zaiduyu success displays actual preparation notes', async () => {
-  const r = await command('taptap-zaiduyu', { ok: true, saved: 'MEMORY.png', notes: [note] })
+  const r = await command('game-zaiduyu', { ok: true, saved: 'MEMORY.png', notes: [note] })
   assert.ok(r.text.includes(note))
 })
 await test('direct Zaiduyu preflight failure does not misread a quota-looking filename', async () => {
   const error = Object.assign(new Error('bad reference quota.png'), { code: 'reference_decode_failed', kind: 'input', phase: 'preflight', submitted: false, notes: [note] })
-  const r = await command('taptap-zaiduyu', error)
+  const r = await command('game-zaiduyu', error)
   assert.ok(r.text.includes(note))
   assert.doesNotMatch(r.text, /这是积分不足|去站点充值|或换其它生图通道/)
 })
 await test('confirmed Zaiduyu quota failure retains existing quota guidance', async () => {
   const error = Object.assign(new Error('quota exhausted'), { code: 'quota_exhausted', kind: 'quota', phase: 'generation' })
-  const r = await command('taptap-zaiduyu', error)
+  const r = await command('game-zaiduyu', error)
   assert.match(r.text, /这是积分不足/)
 })
 await test('unified host failure displays preparation notes', async () => {
-  const r = await command('taptap-gpt', { ok: false, error: 'local-error', hint: 'local only', notes: [note], phase: 'preflight', submitted: false })
+  const r = await command('game-image', { ok: false, error: 'local-error', hint: 'local only', notes: [note], phase: 'preflight', submitted: false })
   assert.ok(r.text.includes(note))
 })
 await test('unified host gives local hint, not account rotation, for preflight quota text', async () => {
-  const r = await command('taptap-gpt', { ok: false, error: 'quota:bad-input', hint: 'LOCAL_PREFLIGHT_HINT', phase: 'preflight', kind: 'input', submitted: false })
+  const r = await command('game-image', { ok: false, error: 'quota:bad-input', hint: 'LOCAL_PREFLIGHT_HINT', phase: 'preflight', kind: 'input', submitted: false })
   assert.match(r.text, /LOCAL_PREFLIGHT_HINT/)
   assert.doesNotMatch(r.text, /所有可用账号都触到配额|pool unban/)
 })
 await test('unified success already preserves preparation notes', async () => {
-  const r = await command('taptap-gpt', { ok: true, saved: 'MEMORY.png', notes: [note] })
+  const r = await command('game-image', { ok: true, saved: 'MEMORY.png', notes: [note] })
   assert.ok(r.text.includes(note))
 })
 await test('no-reference success requires no preparation metadata', async () => {
-  const r = await command('taptap-zaiduyu', { ok: true, saved: 'MEMORY.png' })
+  const r = await command('game-zaiduyu', { ok: true, saved: 'MEMORY.png' })
   assert.equal(r.kind, 'success')
 })
 console.log(`Result: ${passed} passed, ${failed} failed`)

@@ -48,7 +48,7 @@ const server = http.createServer((req, res) => {
   })
 })
 await new Promise((r) => server.listen(0, '127.0.0.1', r))
-const BASE = `http://127.0.0.1:${server.address().port}/api/taptap-maker-dev`
+const BASE = `http://127.0.0.1:${server.address().port}/api/game-forge`
 const req = async (method, sub, body) => {
   const r = await fetch(`${BASE}/${sub}`, {
     method,
@@ -87,12 +87,12 @@ console.log('\n[2] POST：只填一半 → 拒绝，不落盘')
 console.log('\n[3] POST：换账号但没重填密码 → 拦下并说明原因')
 {
   // 先塞一组「看起来已保存」的凭据（直接写文件，绕开验证）。
-  fs.mkdirSync(path.join(home, 'taptap-maker-dev'), { recursive: true })
-  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json'),
+  fs.mkdirSync(path.join(home, 'game-forge'), { recursive: true })
+  fs.writeFileSync(path.join(home, 'game-forge', 'zaiduyu.json'),
     JSON.stringify({ identifier: 'old_user', password: 'old_pw_123456' }), 'utf8')
   const swapped = await req('POST', 'zaiduyu', { identifier: 'new_user', password: '' })
   ok(swapped.status === 400 && /换了账号/.test(swapped.json.error ?? ''), '换号未填新密码被拦下', JSON.stringify(swapped.json))
-  ok(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json'), 'utf8').includes('old_user'), '被拦下时文件没被改动')
+  ok(fs.readFileSync(path.join(home, 'game-forge', 'zaiduyu.json'), 'utf8').includes('old_user'), '被拦下时文件没被改动')
 }
 
 console.log('\n[4] POST：掩码串原样回传 → 识别为「未修改」，不把掩码当密码存')
@@ -103,7 +103,7 @@ console.log('\n[4] POST：掩码串原样回传 → 识别为「未修改」，�
   // 环境未就绪时验证会失败（kind=environment），但**掩码必须已被归一化为不修改**，
   // 而不是把 `ol…3456` 这种掩码串写进 password 字段。
   await req('POST', 'zaiduyu', { identifier: 'old_user', password: masked })
-  const raw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json'), 'utf8'))
+  const raw = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'zaiduyu.json'), 'utf8'))
   ok(raw.password === 'old_pw_123456', '掩码回传没有覆盖掉真密码', `实际=${raw.password}`)
   ok(!String(raw.password).includes('…'), '文件里没有掩码串')
 }
@@ -117,7 +117,7 @@ console.log('\n[5] POST 登录：环境未就绪 → 503 + kind=environment，�
   ok(bad.status === 401 || bad.status === 503, `验证不过时不落盘（实际 ${bad.status}）`)
   ok(bad.json.ok === false && bad.json.verified === false, '明确报 verified=false')
   ok(['auth', 'network', 'environment'].includes(bad.json.kind), `失败有可分诊的 kind（${bad.json.kind}）`)
-  const raw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json'), 'utf8'))
+  const raw = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'zaiduyu.json'), 'utf8'))
   ok(raw.identifier === 'old_user', '失败的假凭据没有被写进文件')
   ok(!JSON.stringify(raw).includes('obviously_fake'), '假凭据完全没落盘')
 }
@@ -127,13 +127,13 @@ console.log('\n[6] POST clear：清除本机凭据（env 兜底时如实警告�
   const c = await req('POST', 'zaiduyu', { clear: true })
   ok(c.status === 200 && c.json.ok === true, 'clear 返回 200')
   ok(c.json.credentials === false, '清除后状态为未配置')
-  ok(!fs.existsSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json')), '凭据文件已删除')
+  ok(!fs.existsSync(path.join(home, 'game-forge', 'zaiduyu.json')), '凭据文件已删除')
   const g = await req('GET', 'zaiduyu')
   ok(g.json.hasCredentials === false && g.json.password === '(unset)', 'GET 如实反映已清除')
 
   // 回归护栏：只有文件在、env 也有一组时，删文件**不等于退登**，
   // 必须把「env 仍在兜底」说出来，否则用户以为退出了、实际还在花那个号的积分。
-  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json'),
+  fs.writeFileSync(path.join(home, 'game-forge', 'zaiduyu.json'),
     JSON.stringify({ identifier: 'file_u', password: 'file_p' }), 'utf8')
   process.env.ZAIDUYU_USER = 'env_u'
   process.env.ZAIDUYU_PASS = 'env_p'
@@ -163,7 +163,7 @@ console.log('\n[8] 通道状态点跟着登录结果变（GET /lanes 的 zaiduyu
   ok(lb && lb.ready === false, '未登录时状态点为未配置')
   ok(/设置页|章鱼生图/.test(lb.reason || ''), '未配置时指引去设置页（不再是环境变量口径）', lb.reason)
   // 直接写一组凭据（模拟登录成功后的落盘），状态点应当亮起来。
-  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'zaiduyu.json'),
+  fs.writeFileSync(path.join(home, 'game-forge', 'zaiduyu.json'),
     JSON.stringify({ identifier: 'u', password: 'p', _comment: 'x' }), 'utf8')
   const after = await req('GET', 'lanes')
   const la = after.json.groups.image.lanes.find((l) => l.id === 'zaiduyu')

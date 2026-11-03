@@ -38,21 +38,33 @@ console.log('\n[1] 单引号转义')
   ok(psSingleQuote('') === "''", '空串也不破语法')
 }
 
-console.log('\n[2] -like 通配符：路径里的 * 和 ? 不能被当模式')
+console.log('\n[2] 匹配模式：不用 -like，且不会前缀误配')
 {
   const src = fs.readFileSync(new URL('../src/win-proc.mjs', import.meta.url), 'utf8')
-  ok(/psLikePattern/.test(src), '有专门处理 -like 通配符的函数')
-  ok(src.includes('[*]'), '星号被转成 [*]（避免被当成 -like 通配符）')
-  ok(src.includes('[?]'), '问号被转成 [?]')
-  // 转义后的模式里必须没有裸露的 * / ?
-  const fnBody = /function psLikePattern[\s\S]*?\n\}/.exec(src)?.[0] ?? ''
-  ok(fnBody.length > 0, '找到 psLikePattern 实现')
-  ok(fnBody.includes("replace(/'/g, \"''\")"), '单引号先转义')
+  // 只看代码行（模块注释里仍引用旧的 -like 写法作为反例，不能算违规）
+  const code = src.split('\n').filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l)).join('\n')
+  ok(/function psCommandLineMatch/.test(code), '有统一的命令行匹配构造器')
+  ok(code.includes('[regex]::Escape'), 'needle 先做 regex 转义（路径里的 [ ] . 不再当元字符）')
+  ok(code.includes('(?!['), '带负向前瞻：不把 -gpt / -bgm-a 这类兄弟目录当成同一个 profile')
+  ok(!/-like\s+'\*\$\{/.test(code), '不再把变量拼进 -like 单引号模式')
+
+  // 行为验证（不依赖 PowerShell）：同样的语义在 JS 里跑一遍
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const matcher = (needle) => new RegExp(esc(needle) + '(?![\\w.-])')
+  const cmd = (...parts) => parts.join(' ')
+  ok(matcher('C:\\p\\browser-profile').test(cmd('chrome.exe', '--user-data-dir=C:\\p\\browser-profile')),
+    '命中自己的 profile')
+  ok(!matcher('C:\\p\\browser-profile').test(cmd('chrome.exe', '--user-data-dir=C:\\p\\browser-profile-gpt')),
+    '不误杀 browser-profile-gpt（前缀误配回归）')
+  ok(!matcher('C:\\p\\bgm-a').test(cmd('chrome.exe', '--user-data-dir=C:\\p\\bgm-ab')),
+    '不误杀 bgm-ab')
+  ok(matcher('C:\\p[a]\\prof').test(cmd('chrome.exe', '--user-data-dir=C:\\p[a]\\prof')),
+    '路径带方括号也能命中（旧 -like 写法会失败）')
 }
 
 console.log('\n[3] 源码里不再有裸拼接')
 {
-  for (const f of ['taptap-gpt.mjs', 'taptap-bgm-web.mjs', 'audio-library.mjs']) {
+  for (const f of ['game-image-web.mjs', 'game-bgm-web.mjs', 'audio-library.mjs']) {
     const s = fs.readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8')
     // 只看真正的代码行（跳过注释），确认没有把变量塞进 PowerShell 单引号串
     const code = s.split('\n').filter((l) => !/^\s*(\*|\/\/)/.test(l)).join('\n')

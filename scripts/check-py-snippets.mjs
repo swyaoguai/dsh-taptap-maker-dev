@@ -4,8 +4,8 @@ import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-const SRC = path.join(process.cwd(), 'src', 'taptap-gpt.mjs')
-const SRC_BGM = path.join(process.cwd(), 'src', 'taptap-bgm-web.mjs')
+const SRC = path.join(process.cwd(), 'src', 'game-image-web.mjs')
+const SRC_BGM = path.join(process.cwd(), 'src', 'game-bgm-web.mjs')
 const text = fs.readFileSync(SRC, 'utf8')
 const textBgm = fs.readFileSync(SRC_BGM, 'utf8')
 

@@ -1,5 +1,5 @@
 /**
- * taptap-image edit（/images/edits 图生图）的本地仿真测试（不联网、不花额度）。
+ * game-image-relay edit（/images/edits 图生图）的本地仿真测试（不联网、不花额度）。
  *
  * 起一个 mock OpenAI 兼容端点：
  *   - POST /v1/images/edits（multipart）：校验 Authorization、image 文件字段、
@@ -91,7 +91,7 @@ const server = http.createServer((req, res) => {
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
 const port = server.address().port
 
-const cli = path.resolve('src/taptap-image.mjs')
+const cli = path.resolve('src/game-image-relay.mjs')
 // ⚠️ 隔离 DSH_HOME：配置优先级现在是「文件 > env」，不隔离的话本机真实的
 // image.json 会压过测试注入的 env 变量，测试结果取决于开发机的配置状态。
 const isolatedHome = path.join(scratch, 'dsh-home')
@@ -134,14 +134,16 @@ console.log('\n[2] edit：multipart 被拒 → 回退 JSON+base64')
   ok(received.requests.length === 2, '恰好两次请求（multipart + json 回退）')
   ok(received.requests[0].isMultipart && received.requests[1].isJson, '先 multipart 后 JSON')
   ok(received.requests[1].hasImage, 'JSON 回退也带了 base64 图')
-  ok(Array.isArray(r.notes) && r.notes.length > 0 && /JSON\+base64/.test(r.notes[0]), 'notes 里如实说明走了回退')
+  // ⚠️ 不能只看 notes[0]：参考图准备也会往 notes 里写（单图模型、缩放等），
+  // 回退说明未必排第一句。这里要的是「如实说了」，不是「排在第一」。
+  ok(Array.isArray(r.notes) && r.notes.some((n) => /JSON\+base64/.test(n)), 'notes 里如实说明走了回退', JSON.stringify(r.notes))
   rejectMultipart = false
 }
 
 console.log('\n[3] 业务 400 不触发格式回退（不多烧请求）')
 {
   // 从实现源码里提取真实回退正则（手抄副本会在实现改动后静默失效）
-  const src = fs.readFileSync(new URL('../src/taptap-image.mjs', import.meta.url), 'utf8')
+  const src = fs.readFileSync(new URL('../src/game-image-relay.mjs', import.meta.url), 'utf8')
   const reSrc = /const bodyFormatRejected = first\.status === 400\s*&&\s*\/(.+?)\/i/.exec(src)?.[1]
   ok(reSrc !== undefined, '能从源码提取回退正则（实现与测试不再漂移）')
   const re = new RegExp(reSrc, 'i')

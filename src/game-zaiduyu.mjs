@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * taptap-zaiduyu — 「章鱼生图」通道（pai.zaiduyu.top 积分制多模型站）。
+ * game-zaiduyu — 「章鱼生图」通道（pai.zaiduyu.top 积分制多模型站）。
  *
  * 这是第三方 skill `zaiduyu-imagegen`（scripts/generate.py，纯 Python 标准库）
  * 的 Node 包装层：本模块**不重新实现任何站点协议**，只负责
@@ -19,14 +19,14 @@
  *    不要替用户挑高价模型（= 替用户决定花多少钱）。
  *
  * Usage（CLI）:
- *   node taptap-zaiduyu.mjs status
- *   node taptap-zaiduyu.mjs models
- *   node taptap-zaiduyu.mjs gen --prompt "<描述>" [--model <id>] [--ratio 16:9]
+ *   node game-zaiduyu.mjs status
+ *   node game-zaiduyu.mjs models
+ *   node game-zaiduyu.mjs gen --prompt "<描述>" [--model <id>] [--ratio 16:9]
  *                               [--resolution 2K] [--size 2048x2048] [--n 2]
  *                               [--ref a.png --ref b.png] [--out <file.png>]
- *   node taptap-zaiduyu.mjs balance
+ *   node game-zaiduyu.mjs balance
  *
- * @module src/taptap-zaiduyu.mjs
+ * @module src/game-zaiduyu.mjs
  */
 import fs from 'node:fs'
 import os from 'node:os'
@@ -251,6 +251,14 @@ export function classifyZaiduyuFailure(text) {
   const ticketProblem = /服务器.*票据|compute.*ticket|X-Qx-Compute-Ticket/i.test(message)
   if (ticketProblem) return { ...result, code: 'server_allocation_required', phase: 'allocation', submitted: !/未提交生成/.test(message) }
   const imageContext = /图片(?:生成|编辑)|生成节点/.test(message)
+  // 站点用 **HTTP 400 + 「用户名、邮箱或密码错误」** 表示登录失败（不是 401）。
+  // 只按 401/403 判的话，这类失败会掉进 upstream_error/service，界面就只会说
+  // 「服务异常」，用户永远不知道该去改密码 —— 实测 pai.zaiduyu.top 就是 400。
+  const credentialWord = /账号或密码|密码错误|用户名[、,，]?邮箱或密码|用户名.*错误/i
+  if ((httpStatus === 400 || httpStatus === 401 || httpStatus === 403 || httpStatus === null)
+      && credentialWord.test(message)) {
+    return { ...result, code: 'authentication_failed', kind: 'auth', requiresLogin: true, phase: 'authentication', submitted: false }
+  }
   const authentication = (httpStatus === 401 && !imageContext) || ((httpStatus === 401 || httpStatus === 403 || (httpStatus === null && /登录失败/.test(message)))
     && /账号或密码|密码错误|登录.*(?:失效|过期)/i.test(message))
     || ((httpStatus === 403 || (httpStatus === null && /登录失败/.test(message))) && !imageContext && /authentication_required|认证失败|未登录/i.test(message))
@@ -332,7 +340,10 @@ export async function generate(dshHome, prompt, {
       assertReferenceOutputIsSeparate(target, uploadPaths)
     }
 
-    model = resolveZaiduyuModel(dshHome, model)
+    // 校验顺序：参数 → 环境 → 凭据 → 模型。
+    // 模型放在凭据之后是有意的：连账号都还没登录时先要求「挑一个模型」，
+    // 等于让用户先做一个还不能用的决定（而且 model_required 会盖掉更该先说的
+    // 「请先登录」）。用户已经选定模型时这里什么都不会发生。
     const status = zaiduyuLaneUsable({ dshHome })
     if (!status.script) throw new Error(`章鱼生图脚本缺失：${zaiduyuScriptPath()}`)
     if (status.python === null) throw new Error('未找到可用的 Python 3，章鱼生图通道不可用（脚本只用标准库，装 python 3.10+ 即可）')
@@ -344,6 +355,7 @@ export async function generate(dshHome, prompt, {
       e.submitted = false
       throw e
     }
+    model = resolveZaiduyuModel(dshHome, model)
     target ??= resolveTarget()
 
     const argv = []
@@ -690,7 +702,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     return
   }
-  process.stderr.write('usage: taptap-zaiduyu status | models | balance | plan --prompt "…" | gen --prompt "…" [--model ID] [--ratio 16:9] [--resolution 2K] [--n 2] [--ref 图1 --ref 图2] [--out file.png]\n')
+  process.stderr.write('usage: game-zaiduyu status | models | balance | plan --prompt "…" | gen --prompt "…" [--model ID] [--ratio 16:9] [--resolution 2K] [--n 2] [--ref 图1 --ref 图2] [--out file.png]\n')
   process.exitCode = 2
 }
 

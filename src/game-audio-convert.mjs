@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * taptap-audio-convert — batch-convert / compress / normalize game audio with
+ * game-audio-convert — batch-convert / compress / normalize game audio with
  * ffmpeg, so assets downloaded from CC0 libraries (often .ogg or .mp3) land in
  * the format a Maker project expects (the bundled project uses .wav), at a sane
  * size and loudness.
@@ -8,18 +8,18 @@
  * Every conversion is local and offline; no Maker credits, no network.
  *
  * Usage:
- *   node taptap-audio-convert.mjs --in D:\tmp\coin.ogg --out D:\tmp\coin.wav
- *   node taptap-audio-convert.mjs --in <maker-project>\assets\audio\sfx --out D:\tmp\wav --to wav
- *   node taptap-audio-convert.mjs --in sfx --out out --to wav --mono --rate 44100 --normalize --trim --fade-out 0.05
- *   node taptap-audio-convert.mjs --in bgm.ogg --out bgm_loop.ogg --loop 8
- *   node taptap-audio-convert.mjs --in bgm.mp3 --out cut.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5
- *   node taptap-audio-convert.mjs --probe D:\tmp\coin.ogg
+ *   node game-audio-convert.mjs --in D:\tmp\coin.ogg --out D:\tmp\coin.wav
+ *   node game-audio-convert.mjs --in <maker-project>\assets\audio\sfx --out D:\tmp\wav --to wav
+ *   node game-audio-convert.mjs --in sfx --out out --to wav --mono --rate 44100 --normalize --trim --fade-out 0.05
+ *   node game-audio-convert.mjs --in bgm.ogg --out bgm_loop.ogg --loop 8
+ *   node game-audio-convert.mjs --in bgm.mp3 --out cut.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5
+ *   node game-audio-convert.mjs --probe D:\tmp\coin.ogg
  *
  * Requires ffmpeg + ffprobe on PATH (or set FFMPEG_PATH / FFMPEG — both names
  * are accepted, matching the video lane). If missing, the
  * script prints the exact install hint instead of failing silently.
  *
- * @module src/taptap-audio-convert.mjs
+ * @module src/game-audio-convert.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -248,7 +248,7 @@ function main() {
 
   const input = typeof args.in === 'string' ? path.resolve(args.in) : null
   if (input === null) {
-    process.stderr.write('usage: taptap-audio-convert --in <file|dir> --out <file|dir> [--to wav] [--start <sec>] [--end <sec>] [--mono] [--rate 44100] [--normalize] [--trim] [--fade-in 0.3] [--fade-out 0.5] [--loop N]\n')
+    process.stderr.write('usage: game-audio-convert --in <file|dir> --out <file|dir> [--to wav] [--start <sec>] [--end <sec>] [--mono] [--rate 44100] [--normalize] [--trim] [--fade-in 0.3] [--fade-out 0.5] [--loop N]\n')
     process.exitCode = 2
     return
   }

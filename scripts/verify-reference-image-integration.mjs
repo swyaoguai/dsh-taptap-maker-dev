@@ -19,8 +19,10 @@ import {
 } from '../src/reference-image-preparation.mjs'
 import { runWithFallback } from '../src/lanes.mjs'
 
+// 模块文件改名后按 lane 映射取源码（taptap-* → game-*）。
+const SOURCE_FILE = { image: 'game-image-relay', gpt: 'game-image-web', zaiduyu: 'game-zaiduyu' }
 const source = Object.fromEntries(['image', 'gpt', 'zaiduyu'].map((name) => [name,
-  fs.readFileSync(new URL(`../src/taptap-${name}.mjs`, import.meta.url), 'utf8'),
+  fs.readFileSync(new URL(`../src/${SOURCE_FILE[name]}.mjs`, import.meta.url), 'utf8'),
 ]))
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-reference-integration-'))
 const marker = 'offline reference preparation note'
@@ -557,7 +559,7 @@ for (const jsonFallback of [false, true]) await check(`actual imported editImage
   const out = path.join(f.dir, 'new-output.png'), calls = [], returnedImage = png(9, 7, 161)
   assert.equal(fs.existsSync(out), false, 'this run may only create a new output')
   const previousFetch = globalThis.fetch
-  const { editImage } = await import('../src/taptap-image.mjs')
+  const { editImage } = await import('../src/game-image-relay.mjs')
   try {
     globalThis.fetch = async (url, options) => {
       assert.equal(url, 'https://offline.invalid/v1/images/edits')

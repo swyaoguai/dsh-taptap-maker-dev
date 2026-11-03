@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * taptap-sfx — 本地音效生成（Stable Audio Open 1.0），零额度、零 API 费。
+ * game-sfx — 本地音效生成（Stable Audio Open 1.0），零额度、零 API 费。
  *
- * 定位：CC0 音效库（taptap-audio）找不到合适素材时的**本地兜底**。
+ * 定位：CC0 音效库（game-audio）找不到合适素材时的**本地兜底**。
  * 模型与 torch 都在用户自己机器上跑，不消耗任何 Maker 额度。
  *
  * 🛡️ 防呆红线（用户明确要求）：
@@ -16,21 +16,21 @@
  *   gen                                     → 同目录 generate.py（需要 venv 里的 torch）
  *
  * Usage:
- *   node taptap-sfx.mjs check
- *   node taptap-sfx.mjs guide
- *   node taptap-sfx.mjs verify [--fast]
- *   node taptap-sfx.mjs deps            # 只打印安装命令
- *   node taptap-sfx.mjs deps --yes      # 真的装 venv + torch（约 3GB 下载）
- *   node taptap-sfx.mjs doctor
- *   node taptap-sfx.mjs gen "coin pickup, bright arcade blip" [--project <dir>] [-s 3] [-n 3] [--steps 100]
+ *   node game-sfx.mjs check
+ *   node game-sfx.mjs guide
+ *   node game-sfx.mjs verify [--fast]
+ *   node game-sfx.mjs deps            # 只打印安装命令
+ *   node game-sfx.mjs deps --yes      # 真的装 venv + torch（约 3GB 下载）
+ *   node game-sfx.mjs doctor
+ *   node game-sfx.mjs gen "coin pickup, bright arcade blip" [--project <dir>] [-s 3] [-n 3] [--steps 100]
  *
- * @module src/taptap-sfx.mjs
+ * @module src/game-sfx.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { installFile } from './taptap-audio.mjs'
+import { installFile } from './game-audio.mjs'
 import { splitTokens, flagOf, looksLikeFlag } from './tokens.mjs'
 
 const PKG_DIR = path.dirname(fileURLToPath(import.meta.url))
@@ -197,11 +197,11 @@ export function generate(prompt, {
   const py = sfxVenvPython()
   if (!sfxModelReady()) {
     return { ok: false, code: 'model_missing', hint: '本地音效模型尚未下载（约 5.3GB，本插件不自动下载）。\n'
-      + '先跑 /taptap-sfx check 看显卡是否够；够的话 /taptap-sfx guide 会打印逐条手动下载命令，'
-      + '下载完 /taptap-sfx verify 校验。' }
+      + '先跑 /game-sfx check 看显卡是否够；够的话 /game-sfx guide 会打印逐条手动下载命令，'
+      + '下载完 /game-sfx verify 校验。' }
   }
   if (py === null) {
-    return { ok: false, code: 'venv_missing', hint: '依赖环境还没装好。运行 /taptap-sfx deps 查看要装什么（约 3GB 下载），'
+    return { ok: false, code: 'venv_missing', hint: '依赖环境还没装好。运行 /game-sfx deps 查看要装什么（约 3GB 下载），'
       + '确认后加 --yes 才真正安装。' }
   }
   const outDir = fs.mkdtempSync(path.join(process.env.TEMP ?? process.env.TMP ?? '/tmp', 'sfx-'))
@@ -274,7 +274,7 @@ export async function checkHardwareAsync() {
 }
 
 /**
- * 解析 `/taptap-sfx gen` 的参数：先按引号感知规则分词（共用 tokens.mjs），
+ * 解析 `/game-sfx gen` 的参数：先按引号感知规则分词（共用 tokens.mjs），
  * 再逐个摘掉已知 flag，**剩下的全部 token 拼回提示词**。
  *
  * 为什么不用正则剥 flag：旧写法只在「提示词带引号」时才干净 ——
@@ -356,7 +356,7 @@ export function consumeGenFlags(tokens) {
   return out
 }
 
-/** 导出以便测试直接打真实实现（与 taptap-zaiduyu 的 parseArgs 对称）。 */
+/** 导出以便测试直接打真实实现（与 game-zaiduyu 的 parseArgs 对称）。 */
 export function parseArgs(argv) {
   // 与宿主消费器共用 flagOf / looksLikeFlag 一套语义：
   //  - `--key=value` 内联值直接认（下游 argparse 支持，实测不认会把值弄丢）；
@@ -394,7 +394,7 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (cmd === 'help') {
     process.stdout.write([
-      'taptap-sfx — 本地音效生成（Stable Audio Open 1.0，零额度）',
+      'game-sfx — 本地音效生成（Stable Audio Open 1.0，零额度）',
       '',
       '  check                  硬件/环境体检（显卡、显存、磁盘、模型完整度）',
       '  guide                  模型手动下载指引（本插件绝不自动下载 5.3GB 权重）',
@@ -405,7 +405,7 @@ export async function main(argv = process.argv.slice(2)) {
       '                         本地生成音效；有 --project 则直接进 assets/audio/sfx 并补 .meta',
       '',
       `skill 目录：${sfxSkillDir()}`,
-      '提示：音效优先用 CC0 库（taptap-audio），本地生成是兜底 —— 首次要手动下 5.3GB 模型。',
+      '提示：音效优先用 CC0 库（game-audio），本地生成是兜底 —— 首次要手动下 5.3GB 模型。',
       '提示：提示词用英文效果最好（模型只用英文数据训练）。',
     ].join('\n') + '\n')
     return
@@ -443,7 +443,7 @@ export async function main(argv = process.argv.slice(2)) {
     }
     const prompt = genArgs.prompt
     if (prompt.length === 0) {
-      process.stderr.write('用法：taptap-sfx gen "<英文音效描述>" [--project <dir>] [-s 10] [-n 1] [--steps 100]\n')
+      process.stderr.write('用法：game-sfx gen "<英文音效描述>" [--project <dir>] [-s 10] [-n 1] [--steps 100]\n')
       process.exitCode = 2
       return
     }
@@ -456,7 +456,7 @@ export async function main(argv = process.argv.slice(2)) {
         ok: false,
         code: 'env_check_failed',
         error: hw.text.split(/\r?\n/).filter(Boolean).slice(-2).join(' / ') || '体检子进程没有正常退出',
-        hint: '硬件体检没能执行完成，先修好本机 Python（跑 taptap-sfx check 看详情）；期间不会开始任何生成。',
+        hint: '硬件体检没能执行完成，先修好本机 Python（跑 game-sfx check 看详情）；期间不会开始任何生成。',
       }, null, 2)}\n`)
       process.exitCode = 1
       return
@@ -467,7 +467,7 @@ export async function main(argv = process.argv.slice(2)) {
         code: 'hardware_insufficient',
         gpu: hw.gpu || '未检测到',
         verdict: hw.verdict || '不建议在本机跑本地生成',
-        hint: '建议改用 CC0 音效库：node "<插件目录>/src/taptap-audio.mjs" add "<描述>" --project <项目目录>',
+        hint: '建议改用 CC0 音效库：node "<插件目录>/src/game-audio.mjs" add "<描述>" --project <项目目录>',
       }, null, 2)}\n`)
       process.exitCode = 1
       return
@@ -487,7 +487,7 @@ export async function main(argv = process.argv.slice(2)) {
     return
   }
 
-  process.stderr.write(`未知子命令：${cmd}（跑 taptap-sfx help）\n`)
+  process.stderr.write(`未知子命令：${cmd}（跑 game-sfx help）\n`)
   process.exitCode = 2
 }
 

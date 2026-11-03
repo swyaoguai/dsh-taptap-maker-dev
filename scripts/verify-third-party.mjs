@@ -94,10 +94,11 @@ console.log('\n[3] 核心洞见没有被"优化"掉')
 
 console.log('\n[4] agent 守则里真的提到了这两个技能（否则等于没接上）')
 {
-  const idx = read('index.js')
-  ok(/asset-orientation-qa/.test(idx), 'system prompt 提到 asset-orientation-qa')
-  ok(/asset-visual-qa/.test(idx), 'system prompt 提到 asset-visual-qa')
-  ok(/acceptance-gate\.md/.test(idx), 'system prompt 指向验收门槛文档')
+  // 守则文本已从 index.js 搬到 src/policy.mjs（拆成「额度红线」+「工作流」两段）。
+  const policy = read('src/policy.mjs')
+  ok(/asset-orientation-qa/.test(policy), 'system prompt 提到 asset-orientation-qa')
+  ok(/asset-visual-qa/.test(policy), 'system prompt 提到 asset-visual-qa')
+  ok(/acceptance-gate\.md/.test(policy), 'system prompt 指向验收门槛文档')
 }
 
 console.log('\n[5] 没有把引擎专属代码搬进来')

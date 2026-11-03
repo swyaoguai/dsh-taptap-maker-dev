@@ -2,6 +2,7 @@
 name: taptap-maker-core
 description: TapTap Maker (UrhoX + Lua 5.4) 项目的总入口：工程结构、脚本生命周期、API 查法、构建与额度守则。开始任何 Maker 开发前先读。
 whenToUse: 开始一个 TapTap Maker 游戏、搞不清工程结构/脚本入口/文档在哪、或拿不准该不该调用会花额度的工具时。
+pinned: true  # 治理类：不允许被外部 skill 源同名覆盖（额度红线在这里）
 ---
 
 # TapTap Maker 开发总览

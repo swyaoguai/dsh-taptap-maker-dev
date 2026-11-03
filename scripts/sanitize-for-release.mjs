@@ -34,8 +34,8 @@ const REPLACEMENTS = [
   [new RegExp(`C:/Users/${USER}`, 'g'), 'C:/Users/<you>'],
   [new RegExp(`C:\\\\Users\\\\${USER}(?=[\\\\/])`, 'gi'), 'C:\\Users\\<you>'],
   // Local dev dir for THIS plugin
-  [/D:\\dsh-taptap-maker-dev/g, '<plugin-dir>'],
-  [/D:\/dsh-taptap-maker-dev/g, '<plugin-dir>'],
+  [/D:\\dsh-game-forge/g, '<plugin-dir>'],
+  [/D:\/dsh-game-forge/g, '<plugin-dir>'],
   // Local Maker workspace
   [/D:\\tapyx/g, '<maker-project>'],
   [/D:\/tapyx/g, '<maker-project>'],

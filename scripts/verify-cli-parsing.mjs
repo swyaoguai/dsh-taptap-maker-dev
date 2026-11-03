@@ -13,7 +13,7 @@
  *     当未知 flag 报错 —— 必须 `--` 收尾。
  *  5. `--key=value` 连写、负数值、漏值：四条链路各写一套判断，同一句话
  *     在不同链路上结果不同（统一走 tokens.mjs 的 flagOf / looksLikeFlag）。
- *  6. /taptap-gpt 的 `--ref` 漏值会把下一个 flag 名当参考图，其值泄漏进提示词。
+ *  6. /game-image 的 `--ref` 漏值会把下一个 flag 名当参考图，其值泄漏进提示词。
  *
  * 用法：node scripts/verify-cli-parsing.mjs
  */
@@ -25,9 +25,9 @@ import { pathToFileURL } from 'node:url'
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..')
 const imp = async (rel) => import(pathToFileURL(path.join(root, 'src', rel)).href)
 
-const z = await imp('taptap-zaiduyu.mjs')
-const g = await imp('taptap-gpt.mjs')
-const s = await imp('taptap-sfx.mjs')
+const z = await imp('game-zaiduyu.mjs')
+const g = await imp('game-image-web.mjs')
+const s = await imp('game-sfx.mjs')
 
 let passed = 0
 let failed = 0
@@ -180,7 +180,7 @@ console.log('\n[7] 章鱼通道：flag 不漏进中文提示词、且全部转�
     ok(call.includes(`gen.${k}`), `命令层把解析出的 ${k} 转发给 generate()`, call.slice(0, 100))
   }
   // 上游 generate() 也得真的把这些拼进 argv
-  const zsrc = fs.readFileSync(path.join(root, 'src', 'taptap-zaiduyu.mjs'), 'utf8')
+  const zsrc = fs.readFileSync(path.join(root, 'src', 'game-zaiduyu.mjs'), 'utf8')
   const genBody = /export async function generate[\s\S]*?\n\}\n/.exec(zsrc)?.[0] ?? ''
   ok(genBody.includes("'--size'"), 'generate() 会把 size 下发给脚本')
   ok(genBody.includes("'--quality'"), 'generate() 会把 quality 下发给脚本')
@@ -247,7 +247,7 @@ console.log('\n[9] `--key=value` 连写与负数值：四条链路必须同一�
   ok(dd.variants === '' && dd.prompt.includes('-n 2'), '宿主：`--` 之后的 flag 不再解析', JSON.stringify(dd))
 }
 
-console.log('\n[10] /taptap-gpt 斜杠命令：--ref 漏值不再吞掉下一个 flag')
+console.log('\n[10] /game-image 斜杠命令：--ref 漏值不再吞掉下一个 flag')
 {
   // 旧写法的实测结果（本轮修掉的真实缺陷）：
   //   refs = ["--account"]，提示词 = "a2 画一只猫"
@@ -272,8 +272,8 @@ console.log('\n[10] /taptap-gpt 斜杠命令：--ref 漏值不再吞掉下一个
 
   // 命令层必须真的消费 missing（否则报告了也没用）。
   const idxSrc2 = fs.readFileSync(path.join(root, 'index.js'), 'utf8')
-  ok(/genArgs\.missing\.length > 0/.test(idxSrc2), '/taptap-gpt 命令层拒绝带漏值提交（不消耗额度）')
-  ok(/gen\.missing/.test(idxSrc2), '/taptap-zaiduyu 命令层拒绝带漏值提交（不扣积分）')
+  ok(/genArgs\.missing\.length > 0/.test(idxSrc2), '/game-image 命令层拒绝带漏值提交（不消耗额度）')
+  ok(/gen\.missing/.test(idxSrc2), '/game-zaiduyu 命令层拒绝带漏值提交（不扣积分）')
 }
 
 console.log('\n[11] 参数校验必须先于环境/凭据校验，且张数不许静默改')
@@ -297,9 +297,9 @@ console.log('\n[11] 参数校验必须先于环境/凭据校验，且张数不�
   ok(credCode === 'no_credentials', '合法参数才会继续走到凭据检查（顺序正确）', String(credCode))
 }
 
-console.log('\n[12] /taptap-image：--transparent 等漏项与「转发但下游不读」')
+console.log('\n[12] /game-image-relay：--transparent 等漏项与「转发但下游不读」')
 {
-  const img = await imp('taptap-image.mjs')
+  const img = await imp('game-image-relay.mjs')
   ok(typeof img.parseSlashArgs === 'function', '命令层解析器已导出（单一 spec 表，不在 index.js 里再抄一份）')
 
   // 实测过的旧缺陷：--transparent 既不剥掉也不转发 → 字面量进了提示词、透明底没生效。
@@ -336,7 +336,7 @@ console.log('\n[12] /taptap-image：--transparent 等漏项与「转发但下游
   // 尺寸格式当场拒绝：把 "foo" 丢给下游会"就近吸附"成用户没写过的尺寸。
   ok(/需要「宽x高」形式/.test(idxSrc3), '非法尺寸被当场拒绝（不静默吸附）')
   // 漏值必须被命令层消费，否则解析器报告了也没人管。
-  ok(/relayParsed\.missing\.length > 0/.test(idxSrc3), '/taptap-image 命令层拒绝带漏值提交')
+  ok(/relayParsed\.missing\.length > 0/.test(idxSrc3), '/game-image-relay 命令层拒绝带漏值提交')
 }
 
 console.log('\n[13] flag 语义只有一个来源（防止"修一处漏三处"复发）')
@@ -345,22 +345,22 @@ console.log('\n[13] flag 语义只有一个来源（防止"修一处漏三处"�
   ok(typeof tk.consumeFlags === 'function' && typeof tk.flagValue === 'function' && typeof tk.flagList === 'function',
     '通用消费器在 tokens.mjs 里')
   // 四条链路的斜杠命令解析都必须走 tokens 的实现，不允许再各自手写正则白名单。
-  const gptSrc = fs.readFileSync(path.join(root, 'src', 'taptap-gpt.mjs'), 'utf8')
-  const imgSrc = fs.readFileSync(path.join(root, 'src', 'taptap-image.mjs'), 'utf8')
-  ok(/consumeFlags\(splitTokens\(/.test(imgSrc), 'taptap-image 用通用消费器')
-  ok(/export function parseSlashGenArgs/.test(gptSrc), 'taptap-gpt 有导出的斜杠解析器')
+  const gptSrc = fs.readFileSync(path.join(root, 'src', 'game-image-web.mjs'), 'utf8')
+  const imgSrc = fs.readFileSync(path.join(root, 'src', 'game-image-relay.mjs'), 'utf8')
+  ok(/consumeFlags\(splitTokens\(/.test(imgSrc), 'game-image-relay 用通用消费器')
+  ok(/export function parseSlashGenArgs/.test(gptSrc), 'game-image 有导出的斜杠解析器')
   const slashBody = /export function parseSlashGenArgs[\s\S]*?\n\}\n/.exec(gptSrc)?.[0] ?? ''
-  ok(slashBody.includes('flagOf(') && slashBody.includes('looksLikeFlag('), 'taptap-gpt 斜杠解析走统一语义')
+  ok(slashBody.includes('flagOf(') && slashBody.includes('looksLikeFlag('), 'game-image 斜杠解析走统一语义')
   // 命令层不许留裸正则（那是本轮所有泄漏缺陷的源头）。
   const idxSrc4 = fs.readFileSync(path.join(root, 'index.js'), 'utf8')
   ok(!/matchAll\(\/\(\?:--ref/.test(idxSrc4), 'index.js 里不再有裸的 --ref 正则提取')
   ok(!/\.replace\(\/\(\?:--ref[\s\S]{0,40}\)\/g, ''\)/.test(idxSrc4), 'index.js 里不再有正则剥 flag')
   // 未导入就被使用 = 运行时 ReferenceError（node --check 抓不到，本轮踩过三次）。
   for (const [file, names] of [
-    ['src/taptap-image.mjs', ['consumeFlags', 'splitTokens', 'flagValue', 'flagList', 'flagOf', 'looksLikeFlag']],
-    ['src/taptap-sfx.mjs', ['splitTokens', 'flagOf', 'looksLikeFlag']],
-    ['src/taptap-zaiduyu.mjs', ['splitTokens', 'flagOf', 'looksLikeFlag']],
-    ['src/taptap-gpt.mjs', ['flagOf', 'looksLikeFlag', 'splitTokens']],
+    ['src/game-image-relay.mjs', ['consumeFlags', 'splitTokens', 'flagValue', 'flagList', 'flagOf', 'looksLikeFlag']],
+    ['src/game-sfx.mjs', ['splitTokens', 'flagOf', 'looksLikeFlag']],
+    ['src/game-zaiduyu.mjs', ['splitTokens', 'flagOf', 'looksLikeFlag']],
+    ['src/game-image-web.mjs', ['flagOf', 'looksLikeFlag', 'splitTokens']],
   ]) {
     const src = fs.readFileSync(path.join(root, file), 'utf8')
     const importLine = (src.split('\n').find((l) => l.includes('./tokens.mjs')) ?? '')

@@ -1,19 +1,25 @@
 /**
- * dsh-taptap-maker-dev — TapTap Maker 本地开发插件 (Host half).
+ * dsh-game-forge（游戏工坊）— 通用游戏开发工作流插件 (Host half).
+ *
+ * 定位：游戏开发工作流插件（立项→原型→内容→美术音频→手感→测试→上线），
+ * TapTap Maker (UrhoX + Lua) 只是其中一条引擎链路，Godot / Unity / Unreal /
+ * 网页项目同样适用。
  *
  * What it wires into a dsh composition:
  *
- *  1. A high-priority system-prompt section (`taptap-maker-dev:policy`) that
- *     FORBIDS spending TapTap Maker MCP built-in generation quota unless the
- *     user explicitly asks, steers the model to the custom image lane + bundled
- *     skills first, and leaves read-only Maker tools (status/build/LSP) free.
+ *  1. Two high-priority system-prompt sections (verified canonical order:
+ *     HARNESS_IDENTITY -1000 → PERSONA 0 → ours 290/300 → PLAN_POLICY 500 →
+ *     tool docs 1000+):
+ *       - `game-forge:credit`   (order 290, toggleable)  额度红线 + 防呆红线；
+ *       - `game-forge:workflow` (order 300, always on)   工作流 / skill 路由 / 素材 / 音频。
+ *     拆成两段是因为：关掉「额度红线」不该顺手删掉「怎么挑 skill、素材要不要核验授权」。
  *
  *  2. A skill provider over the plugin's bundled `skills/` plus an updatable
  *     cache dir, so the game-development skills ship with the plugin and the
  *     updater can add/refresh more each cycle.
  *
- *  3. Slash commands: `/taptap-setup` (install + init guidance), `/taptap-image`
- *     (custom image lane usage + config), `/taptap-skills` (list + update).
+ *  3. Slash commands: `/taptap-setup` (install + init guidance), `/game-image-relay`
+ *     (custom image lane usage + config), `/game-skills` (list + update).
  *
  *  4. A periodic skills-update check (best-effort, offline-safe no-op) that
  *     invalidates the skill registry when new/changed skills arrive.
@@ -32,9 +38,9 @@ import path from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { TaptapSkillProvider } from './src/skills-provider.js'
-import { runUpdate } from './src/taptap-skills-update.mjs'
+import { runUpdate } from './src/game-skills-update.mjs'
 import { ensureLibrary, searchAudio, newAssetUuid, installRemoteMatch } from './src/audio-library.mjs'
-import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/taptap-bgm-web.mjs'
+import { status as bgmStatus, generateWithRotation as bgmGenerateWithRotation, login as bgmLogin, logout as bgmLogout, credits as bgmCredits, detectSite as bgmDetectSite, saveSite as bgmSaveSite, profileDir, downloadDir, releaseProfile as bgmReleaseProfile } from './src/game-bgm-web.mjs'
 import { dataDir, defaultCacheDir, imageConfigPath, readJson, writeJson, maskSecret, resolveDshHome, skillsDisabledPath, readDisabledSkills, writeDisabledSkills, readPolicyBlock, writePolicyBlock, readImageConfigRaw, writeImageConfigPatch, buildBgmPrompt, suggestBgmForProject, readBgmConfig, writeBgmConfig, readMinimaxConfigRaw, readMinimaxConfigWithSource, writeMinimaxConfigPatch, discoverMinimaxKey, readVideoRelayConfigRaw, writeVideoRelayConfigPatch, readSubmitLedger, zaiduyuConfigPath, readZaiduyuConfigRaw, writeZaiduyuConfigPatch, clearZaiduyuCredentials, resolveZaiduyuCredentials } from './src/paths.js'
 import {
   composeJobSheet, createJob as createVideoJob, doctor as videoDoctor, extractJobFrames,
@@ -51,9 +57,14 @@ import {
 import { resolveAssetDir as resolveAssetDirForApi } from './src/assets.mjs'
 import { readZaiduyuPreferences, writeZaiduyuPreferences } from './src/zaiduyu-preferences.mjs'
 import { FREE_ASSET_SOURCES } from './src/free-asset-sources.mjs'
-import { guardUserSetting, guardrailLines, hasApproval, requireApproval } from './src/guards.mjs'
+import { guardUserSetting, hasApproval, requireApproval } from './src/guards.mjs'
+import { creditPolicyText, workflowPolicyText } from './src/policy.mjs'
 import { killProcessesContaining } from './src/win-proc.mjs'
 import { startBackgroundCheck, currentVersion, checkForUpdates, readCachedCheck, shouldCheck } from './src/version-checker.mjs'
+// Cocos 集成的重活都在 src/cocos/ 里；index.js 只负责挂命令、注入守则。
+import { cocosPolicyText } from './src/cocos/policy.mjs'
+import { runCocosCommand } from './src/cocos/command.mjs'
+import { cocosInstall, cocosSetRegistration, cocosStatus } from './src/cocos/api.mjs'
 
 // API 层的短别名：路由函数里反复写 readLanes/writeLanes 太长，且和已有的
 // read*FromApi 风格不一致。
@@ -62,7 +73,7 @@ const writeLanesForApi = writeLanes
 const lanesConfigPathForApi = lanesConfigPath
 const LANE_GROUPS_FOR_API = LANE_GROUPS
 const relayReadyForApi = relayReady
-/** 「生成通道」卡里 relayImage 逐条开关是否开着（/taptap-image 入口用）。 */
+/** 「生成通道」卡里 relayImage 逐条开关是否开着（/game-image-relay 入口用）。 */
 const relayImageLaneEnabled = (home) => {
   try { return isLaneEnabledFor(home, 'image', 'relayImage') } catch { return true }
 }
@@ -86,27 +97,27 @@ const zaiduyuUsableForApi = (home) => {
 
 /** 「开着但还没配」时给界面的一句话 —— 要具体，否则用户不知道该去哪儿填。 */
 const LANE_UNREADY_REASON = {
-  gptWeb: '需要先登录 ChatGPT 账号（/taptap-gpt login）',
+  gptWeb: '需要先登录 ChatGPT 账号（/game-image login）',
   relayImage: '需要在下面「中转站生图」填 baseURL / Key / 模型',
   zaiduyu: '需要在下面「章鱼生图（积分站）」填站点账号并点「登录并保存」（还需本机装有 Python 3）',
   relay: '需要在下面「视频中转站」填地址 / Key / 模型',
   minimax: '需要在下面「MiniMax」填 API Key',
   local: '',
-  bgmWeb: '需要先登录 MiniMax 账号（/taptap-bgm login）',
+  bgmWeb: '需要先登录 MiniMax 账号（/game-bgm login）',
 }
-import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/taptap-audio-convert.mjs'
-import { installFile as installAudioAsset } from './src/taptap-audio.mjs'
+import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/game-audio-convert.mjs'
+import { installFile as installAudioAsset } from './src/game-audio.mjs'
 import os from 'node:os'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile, parseSlashGenArgs } from './src/taptap-gpt.mjs'
-import { zaiduyuLaneUsable, generate as zaiduyuGenerate, models as zaiduyuModels, balance as zaiduyuBalance, zaiduyuQuotaHit, loginProbe, parseModelsText, extractGenArgs } from './src/taptap-zaiduyu.mjs'
-import { checkHardwareAsync as sfxCheckHardware, parseGenArgs as splitSfxGenArgs } from './src/taptap-sfx.mjs'
-// /taptap-image 命令层的参数解析用通用消费器（见 src/tokens.mjs）。
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile, parseSlashGenArgs } from './src/game-image-web.mjs'
+import { zaiduyuLaneUsable, generate as zaiduyuGenerate, models as zaiduyuModels, balance as zaiduyuBalance, zaiduyuQuotaHit, loginProbe, parseModelsText, extractGenArgs } from './src/game-zaiduyu.mjs'
+import { checkHardwareAsync as sfxCheckHardware, parseGenArgs as splitSfxGenArgs } from './src/game-sfx.mjs'
+// /game-image-relay 命令层的参数解析用通用消费器（见 src/tokens.mjs）。
 // 这里必须显式 import：node --check 不会发现「函数体内裸用了未导入的名字」，
 // 只会在真请求打到这条命令时才 ReferenceError —— 本轮已踩过三次同类坑。
-import { parseSlashArgs as parseImageSlashArgs } from './src/taptap-image.mjs'
+import { parseSlashArgs as parseImageSlashArgs } from './src/game-image-relay.mjs'
 import { readGptPool, writeGptPool, touchGptAccount as gptTouchAccount, pickGptAccount, readGptLaneEnabled, writeGptLaneEnabled, readGptDownloadDir, writeGptDownloadDir, readBgmPool, writeBgmPool, touchBgmAccount as bgmTouchAccount, readGptPending } from './src/paths.js'
 
-export const name = 'taptap-maker-dev'
+export const name = 'game-forge'
 
 /** Hard-require nothing; optional services are reached via ctx.inject below. */
 export const inject = []
@@ -143,7 +154,7 @@ try {
       autoEnsure: Schema.boolean().default(true)
         .description('首次用到音效/BGM 时自动下载 Kenney CC0 音频库（约 7MB）'),
       cacheDir: Schema.string().default('')
-        .description('音频库缓存目录，留空用 $DSH_HOME/taptap-maker-dev/skills-cache/audio'),
+        .description('音频库缓存目录，留空用 $DSH_HOME/game-forge/skills-cache/audio'),
     }).description('CC0 音效 / BGM（Kenney，可商用免署名）'),
     video: Schema.object({
       apiKey: Schema.string().role('secret').default('')
@@ -159,7 +170,11 @@ try {
       sources: Schema.array(Schema.string()).default([])
         .description("skill 源：'git:<repo>.git' / 'dir:<本地目录>' / 'https://.../SKILL.md'"),
     }).description('Skills（内置 + 可更新缓存）'),
-  }).description('TapTap Maker 本地开发插件')
+    cocos: Schema.object({
+      buildSlots: Schema.number().default(1)
+        .description('同时允许几个 Cocos 构建（默认 1 = 全机串行，避免多个项目构建互相拖垮）'),
+    }).description('Cocos Creator MCP 集成（多项目并行安全）'),
+  }).description('游戏工坊（Game Forge）· 通用游戏开发工作流插件')
 } catch {
   Config = undefined // host did not provide schemastery → no form, plugin still loads
 }
@@ -203,16 +218,7 @@ function spawnAsync(bin, args, { timeoutMs = 300000, cwd, env } = {}) {
   })
 }
 
-/** The exact Maker MCP tools that spend built-in generation quota. */
-const CREDIT_TOOLS = [
-  'generate_image', 'batch_generate_images', 'edit_image',
-  'create_video_task', 'query_video_task',
-  'text_to_music', 'text_to_sound_effect', 'batch_sound_effects',
-  'audition_voices_for_character', 'confirm_character_voice', 'text_to_dialogue',
-  'create_3d_asset',
-]
-
-/** Handle `/taptap-gpt pool …` subcommands and render them as human text. */
+/** Handle `/game-image pool …` subcommands and render them as human text. */
 async function gptPoolCommand(home, raw) {
   const parts = raw.split(/\s+/).filter(Boolean)
   const sub = (parts[1] ?? 'list').toLowerCase()
@@ -223,11 +229,11 @@ async function gptPoolCommand(home, raw) {
   if (sub === 'add' || sub === '加号' || sub === '新增') {
     const id = flag('id')
     if (typeof id !== 'string' || id.length === 0) {
-      return { ok: false, text: '用法：/taptap-gpt pool add --id <短名> [--label 备注]' }
+      return { ok: false, text: '用法：/game-image pool add --id <短名> [--label 备注]' }
     }
     const pool = readGptPool(home)
     if (pool.accounts.some((a) => a.id === id)) {
-      return { ok: false, text: `账号「${id}」已存在。加完记得登录：/taptap-gpt login --account ${id}` }
+      return { ok: false, text: `账号「${id}」已存在。加完记得登录：/game-image login --account ${id}` }
     }
     const label = flag('label') ?? id
     writeGptPool(home, { accounts: [...pool.accounts, { id, label, status: 'unknown', lastUsedAt: null, note: '' }] })
@@ -236,7 +242,7 @@ async function gptPoolCommand(home, raw) {
       text: [
         `已加账号「${id}」，现在共 ${readGptPool(home).accounts.length} 个。`,
         '',
-        `登录它：/taptap-gpt login --account ${id}`,
+        `登录它：/game-image login --account ${id}`,
         '',
         '⚠️ 多账号轮换会绕过单账号配额，违反 OpenAI 服务条款且有封号风险——风险由你承担。',
       ].join('\n'),
@@ -244,7 +250,7 @@ async function gptPoolCommand(home, raw) {
   }
   if (sub === 'remove' || sub === 'rm' || sub === '删除') {
     const id = flag('id')
-    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-gpt pool remove --id <名>' }
+    if (typeof id !== 'string') return { ok: false, text: '用法：/game-image pool remove --id <名>' }
     writeGptPool(home, { accounts: readGptPool(home).accounts.filter((a) => a.id !== id) })
     // 与设置页的删除路由一致：先释放锁再删浏览器登录态目录，否则同名重加会复用旧会话。
     try {
@@ -256,9 +262,9 @@ async function gptPoolCommand(home, raw) {
   }
   if (sub === 'ban' || sub === '封禁') {
     const id = flag('id')
-    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-gpt pool ban --id <名>' }
+    if (typeof id !== 'string') return { ok: false, text: '用法：/game-image pool ban --id <名>' }
     gptTouchAccount(home, id, { status: 'banned' })
-    return { ok: true, text: `已封禁「${id}」，轮换时不再自动选它。恢复：/taptap-gpt pool unban --id ${id}` }
+    return { ok: true, text: `已封禁「${id}」，轮换时不再自动选它。恢复：/game-image pool unban --id ${id}` }
   }
   if (sub === 'unban' || sub === '恢复') {
     const id = flag('id')
@@ -285,7 +291,7 @@ async function gptPoolCommand(home, raw) {
       text: [
         '账号池为空（当前用单账号模式）。',
         '',
-        '添加账号：/taptap-gpt pool add --id <名>  →  /taptap-gpt login --account <名>',
+        '添加账号：/game-image pool add --id <名>  →  /game-image login --account <名>',
         '⚠️ 多账号轮换会绕过单账号配额，违反 OpenAI 服务条款且有封号风险——风险由你承担。',
       ].join('\n'),
     }
@@ -304,7 +310,7 @@ async function gptPoolCommand(home, raw) {
   }
 }
 
-/** Handle `/taptap-bgm pool …` and render it as human text. */
+/** Handle `/game-bgm pool …` and render it as human text. */
 async function bgmPoolCommand(home, raw) {
   const parts = raw.split(/\s+/).filter(Boolean)
   const sub = (parts[1] ?? 'list').toLowerCase()
@@ -315,11 +321,11 @@ async function bgmPoolCommand(home, raw) {
   if (sub === 'add' || sub === '加号' || sub === '新增') {
     const id = flag('id')
     if (typeof id !== 'string' || id.length === 0) {
-      return { ok: false, text: '用法：/taptap-bgm pool add --id <短名> [--label 备注]' }
+      return { ok: false, text: '用法：/game-bgm pool add --id <短名> [--label 备注]' }
     }
     const pool = readBgmPool(home)
     if (pool.accounts.some((a) => a.id === id)) {
-      return { ok: false, text: `账号「${id}」已存在。登录它：/taptap-bgm login --account ${id}` }
+      return { ok: false, text: `账号「${id}」已存在。登录它：/game-bgm login --account ${id}` }
     }
     const label = flag('label') ?? id
     writeBgmPool(home, { accounts: [...pool.accounts, { id, label, status: 'unknown', lastUsedAt: null, note: '' }] })
@@ -328,22 +334,22 @@ async function bgmPoolCommand(home, raw) {
       text: [
         `已加账号「${id}」，现在共 ${readBgmPool(home).accounts.length} 个。`,
         '',
-        `登录它：/taptap-bgm login --account ${id}`,
+        `登录它：/game-bgm login --account ${id}`,
       ].join('\n'),
     }
   }
   if (sub === 'remove' || sub === 'rm' || sub === '删除') {
     const id = flag('id')
-    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-bgm pool remove --id <名>' }
+    if (typeof id !== 'string') return { ok: false, text: '用法：/game-bgm pool remove --id <名>' }
     writeBgmPool(home, { accounts: readBgmPool(home).accounts.filter((a) => a.id !== id) })
     try { fs.rmSync(profileDir(home, id), { recursive: true, force: true }) } catch { /* best effort */ }
     return { ok: true, text: `已移除账号「${id}」（其浏览器登录态也一并删除）。` }
   }
   if (sub === 'ban' || sub === '封禁') {
     const id = flag('id')
-    if (typeof id !== 'string') return { ok: false, text: '用法：/taptap-bgm pool ban --id <名>' }
+    if (typeof id !== 'string') return { ok: false, text: '用法：/game-bgm pool ban --id <名>' }
     bgmTouchAccount(home, id, { status: 'banned' })
-    return { ok: true, text: `已封禁「${id}」，轮换时不再自动选它。恢复：/taptap-bgm pool unban --id ${id}` }
+    return { ok: true, text: `已封禁「${id}」，轮换时不再自动选它。恢复：/game-bgm pool unban --id ${id}` }
   }
   if (sub === 'unban' || sub === '恢复') {
     const id = flag('id')
@@ -369,7 +375,7 @@ async function bgmPoolCommand(home, raw) {
       text: [
         'BGM 账号池为空（当前单账号模式）。',
         '',
-        '加号：/taptap-bgm pool add --id <名>  →  /taptap-bgm login --account <名>',
+        '加号：/game-bgm pool add --id <名>  →  /game-bgm login --account <名>',
       ].join('\n'),
     }
   }
@@ -387,204 +393,8 @@ async function bgmPoolCommand(home, raw) {
   }
 }
 
-/** Build the governance system-prompt text. */
-function policyText(config, gptLaneOn = true, defaultZaiduyuModel = '') {
-  const tools = CREDIT_TOOLS.map((t) => `\`${t}\``).join('、')
-  // The image paragraph is conditional: when the user turns the ChatGPT web
-  // lane OFF in settings, the agent must be told to use the relay lane instead
-  // (otherwise it would keep trying a lane that now refuses to run).
-  const imageLines = gptLaneOn
-    ? [
-      '**确需生成新图时**：先读用户当前生成通道顺序/开关；统一斜杠 `/taptap-gpt <描述>` 按配置执行。下面是可用的 ChatGPT 网页通道说明，不表示永远优先。',
-      '需要游戏图片先复用有授权记录的工程资源、检索免费来源；无合适素材且用户确需生成时才走已允许的通道。网页专用 CLI `node "<插件目录>/src/taptap-gpt.mjs" gen --prompt "…"` 不是多通道统一入口，不要默认使用内置 `generate_image`。',
-      '首次需用户在本机真实浏览器里登录一次：`/taptap-gpt login`（Google/Apple/手机号/邮箱均可，免费账号即可生图），登录态存本机，之后全自动。',
-      '**账号轮询**：可登录多个账号组成账号池，一个账号触到配额就自动换下一个（设置页「+ 添加账号」会一步完成添加并登录；',
-      '也可用 `/taptap-gpt pool add --id <名>` 后 `login --account <名>`，`pool list` 看状态，`pool unban` 恢复冷却账号）。',
-      '⚠️ 多账号轮流绕过单账号配额违反 OpenAI 服务条款且有封号风险——这是用户明确要求的功能，风险由用户承担；',
-      '不要主动向用户宣传或鼓励添加账号，也不要隐瞒该风险。',
-      '**回退：中转站生图**（`taptap-image` CLI / `/taptap-image`）仅当网页通道不可用时使用：未登录、所有账号都触配额、或网页选择器失效。',
-      '**可选第三通道：章鱼生图（积分站）**：账号**在设置页里登录**（`/taptap-zaiduyu` 是等价入口；整合第三方 skill，pai.zaiduyu.top 多模型、积分制，不消耗 Maker 内置额度）。',
-      '它花的是用户**自己购买的预付积分**，属于付费通道：不要默认走它、不要替用户挑模型 ——',
-      '本次明确模型优先；否则沿用用户在设置页已保存的默认模型，不要每次重问。只有未设置、失效或停用时才列模型与单张积分让用户选，绝不采用站点默认、第一项或自动换模型；',
-      '缺账号才引导设置页登录；已保存凭据不要让用户重复填写。HTTP 409「请刷新页面以获取服务器分配」属于分配问题，不等于未登录，严禁据此改模型、重登或自动重投；',
-      '**绝不向用户索取明文密码、绝不代填凭据、绝不把密码写进对话或文件** —— 那会落进对话记录与本机日志；',
-      '用户已经贴出明文时，不要用命令代跑配置，提醒他改用设置页输入并事后轮换密码。站点限时积分当天过期，别按总余额做跨天规划。',
-      '**通道顺序由用户定**：设置页「生成通道」卡里可以拖拽排序、逐条开关、以及打开「额度不足自动换通道」；',
-      '这些设置对三条链路（生图 / 视频 / BGM）统一生效。**不要替用户改顺序或开关**，',
-      '也不要假设「网页一定优先」——先读一下当前顺序再决定走哪条。',
-      '**额度用完时的两层行为（如实告知用户，不要含糊）**：',
-      '  1) 同一通道内的账号轮换（如 ChatGPT 多账号池）默认开启，触配额自动换下一个账号；',
-      '  2) **跨通道切换默认是关的**——网页提示「今日免费额度已用完」之类配额横幅时，',
-      '     若用户没在设置页打开「额度不足自动换通道」，插件会**停下来**列出各通道失败原因，',
-      '     而不是自作主张切到中转站等付费通道。想自动切换需用户自己打开那个开关。',
-      '**🚫 绝对禁止私自更换视频模型（视频按秒计费 = 替用户决定花多少钱）**：',
-      '用户在设置页「MiniMax」里选了哪个模型，`/taptap-video` 就必须用哪个，一个字都不能改。',
-      '即使你觉得「H3-Hailuo-02 更适合首尾帧」「这个模型不支持尾帧」「换成 Max 更便宜」，',
-      '也**只能停下来把情况和可选方案讲清楚，然后问用户**，由用户自己下指令换。',
-      '严禁：不问就换、把「推荐模型」当成「已获授权」、因为提交报错就自动重试另一个模型、',
-      '或在没告知的情况下改作业的 model 字段。插件层面也已加硬约束：模型缺失或不兼容会**直接报错**，不会替你选。',
-      '**🚫 提交报「结果未知 / fetch failed / 超时」时，绝不可以自动重跑**：',
-      '这类错误说明请求**已经发出**、但没收到服务端回应 —— 服务端很可能已经收下并在生成、',
-      '额度也可能已经扣了。再跑一次就是**多花一份钱**（这正是「白烧额度」最常见的来源）。',
-      '正确做法：先 `/taptap-video status` 看提交台账、`/taptap-video poll` 继续查；',
-      '确认服务端确实没有该任务之后，才用 `--yes` 重新提交。插件会拦：不带 `--yes` 不放行。',
-      '同理，`poll` 查询失败**不是**任务失败，不要因此重新提交。',
-      '**诚实限制**：chatgpt.com 有 Cloudflare 防护（无头浏览器会被挡、裸请求 403），且 OpenAI 界面改动频繁，',
-      '网页生图脚本可能失效；失效时如实报告卡在哪一步（steps 里会写明失败阶段），不要假装成功；确认失效后再回退到中转站。',
-      '**超时不要重新生成（很关键，会白烧额度）**：网页出图常要 1~3 分钟，我们等不到时会返回 `pendingUrl`（那个对话的链接）。',
-      '这时**先等 1~2 分钟再 `taptap-gpt grab`**（或 `/taptap-gpt grab`）把已经生成好的图抓回来——不要立刻再跑一次 `gen`，',
-      '`gen` 自己也会先尝试续抓上一轮未完成的图。只有 grab 明确说"没有图"时才考虑重新生成。',
-      '**图片落点（默认跟随项目）**：在工作目录（Maker 项目根）执行 `gen` 时，图片默认存到 `<项目>/sucai/images/`，',
-      '不再丢到 C 盘；该目录自带 `.gitignore` 防止被 Maker 自动提交。用户可在设置页「ChatGPT 网页生图」卡里自定义',
-      '（支持 `{project}` / `{home}` 占位符），也可用 `/taptap-gpt dir --set <路径>`；命令行加 `--dir <目录>` 可单次覆盖。',
-      '告诉用户图片存到了哪里（结果里的 `saved` 就是真实路径）。中间产物留在该目录或 `assets/` 之外，',
-      '裁好后再搬进 `assets/`，并补同名 `.meta`。',
-    ]
-    : [
-      '**图片资源：ChatGPT 网页生图已被用户在设置里关闭**（总开关 OFF）——',
-      '**不要**调用网页专用 CLI 或尝试网页生图；先复用有授权记录的工程资源、检索免费来源，再按用户允许的其他通道顺序执行，不擅自启用付费通道。',
-      '中转站或章鱼只有用户允许时才使用；统一斜杠 `/taptap-gpt <描述>` 仍遵守现有其他通道配置，不要默认使用内置 `generate_image`。',
-      '若用户想重新启用网页生图，引导他去设置页「ChatGPT 网页生图」卡打开开关（或 `/taptap-gpt` 里说明），不要自己去改状态。',
-      '需要章鱼生图时先尊重用户的通道配置；本次指定模型 > 已保存默认模型，已有默认不要重问，未设置或失效才 `/taptap-zaiduyu models` 让用户选择。账号已保存不重登，409 分配问题不是未登录；仍禁止代填密码或自改付费通道。',
-      '中转站保存位置可用 `--out` 或 `/taptap-gpt dir` 控制的目录约定；中间产物仍放在 `assets/` 之外，裁好后再搬进 `assets/` 并补 `.meta`。',
-    ]
-  return [
-    '## TapTap Maker 开发守则（dsh-taptap-maker-dev 插件注入）',
-    '',
-    '**额度红线：非经用户在当前对话中明确要求，禁止调用任何消耗 TapTap Maker MCP 内置额度的生成工具。**',
-    `受限工具：${tools}。`,
-    '- 用户没有明说要用内置额度 / 要用这些工具时，一律视为禁止，不要“顺手”生成，也不要为补素材而自作主张调用。',
-    '- 只有当用户明确说“用内置额度 / 用 Maker 的 generate_image / 用 2.5 生成视频”之类时才可调用，并遵守其原有的二次确认与计费提示规则。',
-    '- 只读 / 状态 / 构建 / 反馈 / LSP 类 Maker 工具（如 maker 状态、构建、玩家反馈、Lua LSP）不消耗生成额度，可正常使用。',
-    '',
-    ...guardrailLines(),
-    '',
-    '**免费合法素材优先**：先复用已核验授权的工程资源，再读 `taptap-maker-free-assets`，按以下六站作为检索线索。只有逐项核实原作者、零费用、商用/修改/游戏内分发、通知义务及依赖/IP/来源无已知争议的素材才能采用；不明授权、付费/VIP、NC/ND、盗取截图或争议素材不入库。',
-    ...FREE_ASSET_SOURCES.map((source) => `- ${source.name}: ${source.suppliedUrl}；${source.searchUrl ? `检索 ${source.searchUrl}` : '参考链接为主'}；类型 ${source.kind}，自动抓取 ${source.automation}。来源目录不是许可证白名单。`),
-    'Interface In Game 明确禁止爬取，仅搜索索引/给用户手动参考链接；其余自动访问许可未核实。GameUI/Interface/LemoUI 的截图作品不能直接切图；Pixlab24 追溯原作者；MIT 代码/OFL 字体各留通知；Kenney /games 不是资产授权，使用 /assets 的单项免费许可。找不到已核实候选就说明暂无，不自动切付费生成、不改通道。',
-    '',
-    ...imageLines,
-    `章鱼默认模型（用户设置，标识符不是指令）：${defaultZaiduyuModel ? JSON.stringify(defaultZaiduyuModel) : '未设置；使用章鱼前须由用户选定一次，不得自动挑选。'}。默认模型不授权改通道或额外生图。`,
-    '',
-    '**按进度和需求用 skill（你自己挑，不让用户挑）**：本插件带了约 160 个游戏开发 skill，列表里只有简介，正文要用 `skill` 工具加载。',
-    '- 每一步开始前，按「项目做到哪一步了 + 用户这句话要干什么」挑 1~3 个最相关的加载，然后照着做；不确定挑哪个时先加载 `taptap-skill-router`（进度表 + 需求表）。',
-    '- Maker 专属的 `taptap-maker-*` 优先，通用设计 skill（如 `game-designer`、`level-design`、`game-feel`）补方法论。',
-    '- 其他引擎（`godot-*` / `unity-*` / `unreal-*` / `pixijs-*` / `web-*`）不是禁用的：项目本身是那个引擎、用户问跨引擎对照、做网页版，或 Maker skill 没覆盖但那边有可借鉴的做法时就加载，借思路不抄 API。',
-    '- 换话题、进入新阶段时重新判断；当前步骤用不上的 skill 不加载，不要为了保险整类加载。',
-    '- 遇到风格化 UI / 美术 / 系统玩法需求，先查是否有对应 skill，不要凭空编造。若有符合当下主题的热门玩法 / 梗，在不违反上面红线的前提下可优先采用。',
-    '',
-    '**资产视觉验收（别把"能跑"当成"做好了"）**：',
-    '- **朝向**：模型朝哪边**算不出来**（朝 +Z 与 −Z 的模型导出后包围盒/节点树/动画完全一致）。',
-    '  导入 3D 资产后、宣布完成前，读 `asset-orientation-qa` 并按判据表**看图确认**；',
-    '  结论记进资产元数据，**绝不在 gameplay 代码里用 rotation 补偿**（会被静默覆盖）。',
-    '- **验收**：结构检查（文件在、格式对、面数够）≠ 视觉可用；',
-    '  **编译通过 / 能启动 / 日志无错 ≠ 验证完成**。交付前按 `asset-visual-qa` 真的玩一遍、',
-    '  录一小段回看（朝向/附着/穿模/尺度/风格/光照/VFX/操作），详见其 `references/acceptance-gate.md`。',
-    '- 看不清就说看不清：**一条错误的朝向记录比没有记录更糟**（会让下次检查直接跳过）。',
-    '',
-    '**自然语言即可触发初始化**：当用户用任意中文说法表达“安装 / 初始化 / 配置 / 搭建 TapTap Maker（制造）”',
-    '或“帮我建一个 Maker 游戏项目”时，不要求用户去记 `/taptap-setup` 斜杠命令——直接给出并（在确认后）执行下面两步：',
-    '  1) 安装 Maker MCP：`npx -y @taptap/maker install --ide codex,cursor,claude`（部分 Agent 装后需重启）；',
-    '  2) 在空白本地目录初始化项目：`npx -y @taptap/maker init`。',
-    '斜杠命令只是等价快捷方式；识别到自然语言意图就应主动响应。涉及联网/安装属中风险，先说明再执行。',
-    '',
-    '**生图尺寸按需、不固定**：游戏资源有大有小，按目标用途传 `--size`（如 1024x1024 做大图、1536x1024 做横幅）；',
-    '`--size` 只在**中转站**通道生效。网页通道（ChatGPT）尺寸由它自己定、`--size` 会被忽略（返回里会写明），',
-    '需要特定比例就在提示词里写明，或用 `--downscale` 事后裁切。做图标 / 小 UI 这类小资源：先出一张干净的大图',
-    '（构图留白、主体居中），再用 `--downscale <宽>x<高>`（如 128x128 / 64x64）高质量缩小，切忌直接让模型出极小尺寸（细节糊）。',
-    '',
-    '**图生图 / 参考图（两条通道都支持，用法不同）**：',
-    '- 网页通道（`taptap-gpt gen`）：`--ref <图>`（可重复 / 逗号分隔）。本质是把本地图上传进 ChatGPT 输入框的附件；',
-    '  网页通道**不能指定尺寸**，尺寸由 ChatGPT 决定。',
-    '- 中转站（`taptap-image edit`）：`--in <图>`（可重复 / 逗号分隔）走 `/images/edits`。',
-    '  **多图参考不是所有模型都支持**：已知单图模型（如 dall-e-3、多数 SD 系）传多图会**直接拒绝且不发请求**；',
-    '  确认模型支持多图可加 `--multi-ref`，确定只吃一张可加 `--single-ref`（只用第一张，并在结果里说明忽略了其余）。',
-    '  不要为了让多图「通过」而悄悄丢图 —— 宁可报错让用户决定。',
-    '',
-    '**Skill 开关（只在用户主动要求时）**：用户想隐藏/删除某些用不上的 skill 时，用 `/taptap-skills disable <名字>`（可空格或逗号分隔多个），',
-    '`/taptap-skills enable <名字>` 恢复，`/taptap-skills list` 查看全部及禁用状态；禁用项不会再进入 skill 候选。',
-    '',
-    '**音效 / 背景音乐必须优先走 CC0 本地库（自动触发 · 不要只给命令让用户自己跑）**：',
-    '只要用户用大白话表达“加个音效 / 来个背景音乐 / 配个 BGM / 加个点击音 / 金币声 / 胜利音效”等需求，',
-    '**你必须自己动手完成，不要停在「你可以运行这条命令」**——用户要的是装好的素材，不是命令说明。',
-    '任何时候都**不要调用 `text_to_sound_effect` / `text_to_music` / `batch_sound_effects`**（消耗 Maker 内置额度）。',
-    '执行顺序（用 pwsh 真正跑命令，不要只打印）：',
-    '  ① 音效资源库（首选，零成本）：',
-    '     - 搜索：用 pwsh 执行 `node "<插件目录>/src/taptap-audio.mjs" search "<中文描述>"`；',
-    '     - 安装：用 pwsh 执行 `node "<插件目录>/src/taptap-audio.mjs" add "<中文描述>" --project <Maker项目目录> [--out 名字.wav]`',
-    '       —— 自动写入 `assets/audio/{sfx|bgm}/` 并生成同名 `.meta`（uuid）；',
-    '     - 安装完要**告诉用户装到了哪个文件**，并继续该做的事（如接入代码），不要把命令甩给用户。',
-    '     - `<插件目录>` 在本机的实际路径见下方「插件目录」一行；`<Maker项目目录>` 用当前工作目录。',
-    '     - 查看来源：`node "<插件目录>/src/taptap-audio.mjs" sources`。',
-    '     本地库 Kenney（CC0，可商用/可修改/无需署名，约 706 个）优先命中；本地没有时自动回落到',
-    '     Mixkit（Mixkit Free License，可商用免署名）、小森平（中文页明写商业利用可）、',
-    '     効果音ラボ（FAQ 明写商用免费、无需署名/报告，可嵌入游戏有偿销售）——这些只在用户真正安装时',
-    '     单文件按需下载，绝不整站抓取。',
-    '     **未接入**：Freesound（需用户自己的 API Key，裸请求实测 401）、OpenGameArt（授权混杂，含禁商用的 CC-BY-NC）。',
-    '  ①-b **本地音效生成（CC0 库没有合适素材时的兜底，零额度，但需用户先自行装模型）**：',
-    '     - 命令：`/taptap-sfx`（CLI `node "<插件目录>/src/taptap-sfx.mjs" <子命令>`），跑 Stable Audio Open 1.0。',
-    '     - 🛡️ **绝不自动下载模型**（权重约 5.3GB + 依赖约 3GB，怕用户硬件不够）：',
-    '       先 `check` 体检；硬件不达标就**停下**，如实转告并回退到 CC0 库，不要劝用户装。',
-    '       硬件够且用户明确同意部署，才把 `guide`（逐条手动下载命令）交给用户自己跑，',
-    '       下载完 `verify` 校验、`deps --yes` 装依赖、`doctor` 体检。',
-    '     - 生成：`/taptap-sfx gen "<英文描述>" --project <Maker项目目录>`（提示词用英文，模型只用英文数据训练）；',
-    '       带 `--project` 时自动写入 `assets/audio/sfx/` 并补 `.meta`。',
-    '     - 环境没就绪时它会返回 `model_missing` / `venv_missing` / `hardware_insufficient`：',
-    '       按返回的指引如实转达，**不要反复重试、不要替用户下载**。',
-    '  ② 完整 BGM——**用户说「要背景音乐/BGM」时走这条**（全程在对话里完成，不要指路设置页）：',
-    '     - **需要账号**：生成 BGM 要用用户的 MiniMax 账号登录网页来生成。',
-    '       用户说「要 BGM」而尚未登录时，**你直接用 pwsh 执行** `/taptap-bgm login` 对应的',
-    '       `node "<插件目录>/src/taptap-bgm-web.mjs" login`（会弹出浏览器让用户登录一次），',
-    '       或用 `/taptap-bgm login` 命令；登录态存本机，之后自动。**不要让用户自己去设置页点**。',
-    '     - **换号 / 退登录**：用户说「换个号」「退出登录」「登出」时，执行 `/taptap-bgm logout`',
-    '       （清掉本机登录态），然后再 login 即可用另一个账号。账号管理入口也在设置页「BGM 账号」卡。',
-    '     - **账号池 / 自动轮换**：可登录多个 MiniMax 账号，一个额度用完自动换下一个。',
-    '       加号：`/taptap-bgm pool add --id <名>` → `login --account <名>`（设置页「+ 添加账号」会一步完成）；',
-    '       `pool list` 看状态、`pool ban/unban` 封禁/恢复、`pool rotate` 开关轮换。',
-    '       生成时不要手动挑账号，`/taptap-bgm <描述>` 会自动轮询；报告结果时说明用了哪个账号。',
-    '     - **查额度**：用户问「还有多少额度」「是不是没额度了」时，执行 `/taptap-bgm credits`',
-    '       （可加 `--account <名>` 查某个账号）。额度为 0 或不足时如实告知：可等恢复、加更多账号，',
-    '       不要反复重试生成。',
-    '     - **站点自动判断**：按当前网络可达性自动选国内版（minimax.cn）或国际版（minimax.io），',
-    '       国际版多为 Google 登录，国内网络下选国内版。选好的站点会记住。',
-    '     - **生成**：`/taptap-bgm <风格情绪描述>` —— 自动出提示词并用已登录浏览器完成生成与下载。',
-    '       **提示词必须用中文**（站点是国内版、用户看中文）；用户给英文时先翻译成中文再生成，',
-    '       并优先套用内置的中文场景模板（战斗/BOSS/胜利/失败/主菜单/探索/紧张/悲伤/商店/升级）。',
-    '       也可先读项目里的文档（GAME_RULES.md 等）推断需要哪些场景 BGM，再据此生成提示词。',
-    '     - **纯音乐（无歌词）默认开启**：游戏 BGM 大多不需要人声，插件会默认打开该开关。',
-    '       **决定有没有人声的是站点上那个「纯音乐」开关，不是提示词** —— 靠写「纯音乐/无人声」是没用的。',
-    '       插件会在点「创作」前自动把开关设到期望状态并校验；设不上会直接中止并报 `instrumental_unset`（不花额度）。',
-    '       用户明确要带人声/歌词时才加 `--lyrics` 关掉它；开关与生成数量可在设置页「BGM 账号」调整。',
-    '     - **导入项目**：`node "<插件目录>/src/taptap-audio.mjs" import --in <下载目录> '
-      + '--project <Maker项目目录> --kind bgm --to wav --latest`，自动转格式 + 写 `.meta`。',
-    '     - 装完要**告诉用户装到了哪个文件**。' + '不要向用户长篇解释原理，只说清「需要登录账号，之后用它生成」。',
-    '     - **生成成功后**：告诉用户可点「右下角的 🎵 BGM 按钮」试听、拖波形裁剪、一键导入项目',
-    '       （新生成的 BGM 会让挂件亮红点）。用户说「听听 / 裁一下 BGM」时，引导其点挂件操作，',
-    '       挂件是纯本地零额度的；不要替用户假设他们已导入。',
-    '     - 若网页结构变了拿不到文件，如实报告，提示手动下载后 import。',
-    '  ③ 音频转格式 / 压缩（本地 ffmpeg，零成本、不联网）：',
-    '     用户说「转成 wav / 压缩一下 / 统一音量 / 去掉静音 / 拼成循环 / 看看时长」时用：',
-    '     `node "<插件目录>/src/taptap-audio-convert.mjs" --in <文件或目录> --out <目标> '
-      + '[--to wav|mp3|ogg|opus|m4a|flac] [--mono] [--rate 44100] [--normalize] [--trim] '
-      + '[--fade-in 0.1] [--fade-out 0.2] [--bitrate 64k] [--loop 8]`，',
-    '     或对话里直接说需求（`/taptap-audio-convert` 同义）。需要 ffmpeg，缺失时如实提示安装。',
-    '**诚实限制（必须如实告知）**：',
-    '  - Kenney 音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM；',
-    '  - 完整 BGM 需要用户的 MiniMax 账号登录网页生成（登录一次即可，之后自动）；',
-    '    MiniMax 官方公告：自 2026-08-20 起音乐生成 API 不再对新用户开放（返回 410），免费音乐接口已停服，',
-    '    只有历史付费用户还能调 API；网页版 MiniMax Audio 仍可用，所以插件走网页。不要反复重试 API，也不要说成接口故障；',
-    '    网页版以后也可能调整，生成失败时如实报告卡在哪一步；',
-    '  - 自部署开源 MiniMax-Music3 需 24GB+ 显存，普通机器跑不动，不要推荐；',
-    '  - 若用户在网页也拿不到满意 BGM，如实报告并给选项（用短 jingle 凑 / 找 CC0 曲目 /',
-    '    由用户决定是否动用 Maker 内置额度），绝不擅自调用消耗额度的生成工具。',
-    '',
-    `**插件目录**：\`${PKG_DIR}\`——上面所有 \`<插件目录>\` 都指这个真实路径，`,
-    '调 CLI 时直接把它拼进命令（PowerShell 里路径加引号），不要让用户自己去猜路径。',
-  ].join('\n')
-}
-
 /**
- * Seed $DSH_HOME/taptap-maker-dev/image.json from the config FORM (config.image.*).
+ * Seed $DSH_HOME/game-forge/image.json from the config FORM (config.image.*).
  *
  * ⚠️ 仅首次（文件不存在）时 seed：表单值只作为初始值落一次盘。此后一切以
  * 文件为准 —— 旧逻辑「表单非空就覆盖文件」会让设置页/手改的值在每次重启时
@@ -664,7 +474,7 @@ function migrateLegacyConfigs(home, { logger } = {}) {
   if (Object.keys(patch).length === 0) return
   writeMinimaxConfigPatch(home, patch)
   try { fs.renameSync(legacy, `${legacy}.migrated-${Date.now().toString(36)}`) } catch { /* 留档失败不影响迁移结果 */ }
-  logger?.info?.('taptap-maker-dev: migrated music.json → minimax.json')
+  logger?.info?.('game-forge: migrated music.json → minimax.json')
 }
 
 /**
@@ -714,7 +524,7 @@ export function apply(ctx, config = {}) {
   const imageFile = seedImageConfig(config, home)
   // 表单里填的 MiniMax Key/站点/模型 seed 进 minimax.json（不覆盖设置页保存过的值）。
   seedMinimaxConfig(config, home)
-  ctx.logger?.info?.(`taptap-maker-dev: data=${dataDir(home)} skills-cache=${cacheDir} image-config=${imageFile}`)
+  ctx.logger?.info?.(`game-forge: data=${dataDir(home)} skills-cache=${cacheDir} image-config=${imageFile}`)
 
   // --- 1b. CC0 audio library (lazy: fetched on first audio request) -------
   // Nothing is downloaded at startup — the first `search`/`add` triggers it, so
@@ -735,61 +545,96 @@ export function apply(ctx, config = {}) {
       const result = await ensureLibrary(audioCacheDir)
       audioReady = true
       if (result.errors.length > 0) {
-        ctx.logger?.warn?.(`taptap-maker-dev audio: ${result.errors.length} pack error(s)`)
+        ctx.logger?.warn?.(`game-forge audio: ${result.errors.length} pack error(s)`)
       }
       return result
     })()
     return audioEnsuring
   }
 
-  // --- 1. Governance system-prompt section (live-toggleable) -------------
-  // The section is added/removed through the disposer that systemPrompt.section
-  // returns, so the settings-page switch engages/disengages the red-line
-  // without a restart. policy.json persists the choice across restarts.
-  // The image-lane master switch (imageLane.json) also lives in this text, so
-  // flipping it rebuilds the section instead of waiting for a restart.
+  // --- 1. Injected prompt sections (live-toggleable) ---------------------
+  // 两段分开注入，语义不同：
+  //  - `game-forge:workflow`（常驻）：工作流本身 —— 挑 skill、素材授权、生图/音频
+  //    链路、视觉验收、诚实限制。跟花不花钱无关，任何情况下都该在。
+  //  - `game-forge:credit`（可开关）：额度红线 + 防呆红线。只有在用户主动关掉
+  //    「额度红线」时才消失。
+  // 以前是一整块，关掉额度开关会把工作流守则一起删掉 —— 标签写着 A，实际管着 B。
+  // 每个 section 都通过 systemPrompt.section() 返回的 disposer 增删，所以设置页
+  // 的开关不用重启就生效；policy.json / imageLane.json 负责跨重启持久化。
   let policyEnabled = readPolicyBlock(home, config.maker?.blockCreditTools)
   let gptLaneOn = readGptLaneEnabled(home)
-  let policyDispose = null
+  /** @type {Array<() => void>} */
+  let policyDisposers = []
   let systemPromptService = null
-  const applyPolicySection = () => {
+  /** 随插件分发的 skill 数量（用来在守则里说真话，不硬编码）。 */
+  const bundledSkillCount = () => {
+    try {
+      return fs.readdirSync(BUNDLED_SKILL_DIR, { withFileTypes: true })
+        .filter((e) => e.isDirectory()
+          && ['SKILL.md', 'skill.md'].some((f) => fs.existsSync(path.join(BUNDLED_SKILL_DIR, e.name, f))))
+        .length
+    } catch { return 0 }
+  }
+  const applyPolicySections = () => {
     if (systemPromptService === null) return
     // Rebuild whenever the text may have changed: dispose then re-add.
-    if (policyDispose !== null) {
-      try { policyDispose() } catch { /* already gone */ }
-      policyDispose = null
+    for (const dispose of policyDisposers) {
+      try { dispose() } catch { /* already gone */ }
     }
+    policyDisposers = []
+    const service = systemPromptService
+    // 红线排在工作流之前（290 < 300）：先讲不能花钱，再讲怎么做。
     if (policyEnabled) {
-      policyDispose = systemPromptService.section({
-        name: 'taptap-maker-dev:policy',
-        order: 300,
-        text: policyText(config, gptLaneOn, readZaiduyuPreferences(home).defaultModel),
-      })
+      policyDisposers.push(service.section({
+        name: 'game-forge:credit',
+        order: 290,
+        text: creditPolicyText(),
+      }))
+    }
+    policyDisposers.push(service.section({
+      name: 'game-forge:workflow',
+      order: 300,
+      text: workflowPolicyText({
+        gptLaneOn,
+        defaultZaiduyuModel: readZaiduyuPreferences(home).defaultModel,
+        skillCount: bundledSkillCount(),
+        pluginDir: PKG_DIR,
+      }),
+    }))
+    // 只有真的登记了 `cocos` MCP 服务才注入这段：没登记时 agent 手里没有
+    // cocos_* 工具，多讲一遍「多项目要显式传 project」纯属噪声（还占 token）。
+    const cocosText = cocosPolicyText(home)
+    if (cocosText !== '') {
+      policyDisposers.push(service.section({ name: 'game-forge:cocos', order: 305, text: cocosText }))
     }
   }
   const setPolicyEnabled = (enabled) => {
     policyEnabled = enabled !== false
     writePolicyBlock(home, policyEnabled)
-    applyPolicySection()
+    applyPolicySections()
     return policyEnabled
   }
   // Master switch for the ChatGPT web image lane. When OFF the injected policy
-  // tells the agent to use the relay lane instead, and /taptap-gpt gen refuses.
+  // tells the agent to use the relay lane instead, and /game-image gen refuses.
   const setGptLane = (enabled) => {
     gptLaneOn = writeGptLaneEnabled(home, enabled)
-    applyPolicySection()
+    applyPolicySections()
     return gptLaneOn
   }
   ctx.inject(['systemPrompt'], (scoped) => {
     systemPromptService = scoped.systemPrompt
-    policyDispose = null // fresh service scope; any prior disposer is already gone
-    applyPolicySection()
+    policyDisposers = [] // fresh service scope; any prior disposers are already gone
+    applyPolicySections()
   })
 
   // --- 1c. 版本检查（GitHub raw 上的 package.json 对比本地版本）----------
   // 缓存在 version-check.json，设置页「关于」卡直接读缓存展示；
   // 后台 6 小时一次，网络失败静默 —— 绝不影响插件主流程。
-  startBackgroundCheck(home, { logger: ctx.logger })
+  // ⚠️ 必须挂在 ctx.effect 上：以前裸调，插件卸载后定时器还在联网，热重载会叠加。
+  ctx.effect(() => {
+    const stop = startBackgroundCheck(home, { logger: ctx.logger })
+    return () => { try { stop() } catch { /* 已经停了 */ } }
+  }, 'game-forge: version check loop')
 
   // --- 2. Skill provider (bundled + updatable cache) ---------------------
   let invalidateSkills = () => {}
@@ -797,10 +642,10 @@ export function apply(ctx, config = {}) {
   ctx.inject(['skills'], (scoped) => {
     scoped.skills.registerProvider((control) => {
       invalidateSkills = control.invalidate
-      skillProvider = new TaptapSkillProvider('taptap-maker-dev', [
+      skillProvider = new TaptapSkillProvider('game-forge', [
         { dir: cacheDir, rank: skillsCfg.rankCache ?? 350 },
         { dir: BUNDLED_SKILL_DIR, rank: skillsCfg.rankBundled ?? 360 },
-      ], { disabledFile })
+      ], { disabledFile, pinnedRoot: BUNDLED_SKILL_DIR, logger: ctx.logger })
       return skillProvider
     })
   })
@@ -818,16 +663,16 @@ export function apply(ctx, config = {}) {
       })
       if (summary.added.length > 0 || summary.updated.length > 0) {
         ctx.logger?.info?.(
-          `taptap-maker-dev skills updated: +${summary.added.length} new, ~${summary.updated.length} changed`,
+          `game-forge skills updated: +${summary.added.length} new, ~${summary.updated.length} changed`,
         )
         skillProvider?.reset()
         invalidateSkills()
       }
       if (summary.errors.length > 0) {
-        ctx.logger?.warn?.(`taptap-maker-dev skills-update: ${summary.errors.length} source error(s)`)
+        ctx.logger?.warn?.(`game-forge skills-update: ${summary.errors.length} source error(s)`)
       }
     } catch (error) {
-      ctx.logger?.warn?.(`taptap-maker-dev skills-update failed: ${error?.message ?? error}`)
+      ctx.logger?.warn?.(`game-forge skills-update failed: ${error?.message ?? error}`)
     }
   }
 
@@ -840,14 +685,14 @@ export function apply(ctx, config = {}) {
     if (typeof loop.unref === 'function') loop.unref()
     ctx.effect(function* () {
       yield () => { clearTimeout(first); clearInterval(loop) }
-    }, 'taptap-maker-dev skills-update loop')
+    }, 'game-forge skills-update loop')
   }
 
   // --- Shared skill helpers (used by the web API route and slash commands) --
-  const buildSkillProvider = () => new TaptapSkillProvider('taptap-maker-dev', [
-    { dir: cacheDir, rank: 350 },
-    { dir: BUNDLED_SKILL_DIR, rank: 360 },
-  ], { disabledFile })
+  const buildSkillProvider = () => new TaptapSkillProvider('game-forge', [
+    { dir: cacheDir, rank: skillsCfg.rankCache ?? 350 },
+    { dir: BUNDLED_SKILL_DIR, rank: skillsCfg.rankBundled ?? 360 },
+  ], { disabledFile, pinnedRoot: BUNDLED_SKILL_DIR, logger: ctx.logger })
   const refreshSkills = () => { skillProvider?.reset(); invalidateSkills() }
 
   // --- 2b. Settings-page web API (so the UI manages skills without commands) --
@@ -940,7 +785,7 @@ export function apply(ctx, config = {}) {
           return
         }
         const url = new URL(req.url, 'http://localhost')
-        const sub = url.pathname.replace(/^\/api\/taptap-maker-dev\/?/, '').replace(/\/+$/, '')
+        const sub = url.pathname.replace(/^\/api\/game-forge\/?/, '').replace(/\/+$/, '')
         if (req.method === 'GET' && (sub === 'skills' || sub === '')) {
           const skills = buildSkillProvider().listAll()
           return sendJson(res, 200, { ok: true, skills, disabled: readDisabledSkills(home) })
@@ -964,6 +809,61 @@ export function apply(ctx, config = {}) {
           const value = setPolicyEnabled(parsed?.blockCreditTools !== false)
           return sendJson(res, 200, { ok: true, blockCreditTools: value })
         }
+        // --- Cocos 集成（设置页卡片）-------------------------------------
+        // 只读状态、登记/撤销、给某个工程装扩展。三个动作都很窄：
+        // 登记写的是 profile patch（有备份、有格式校验），装扩展走官方 release 校验。
+        //
+        // 后两个是写操作（改用户配置 / 往磁盘写文件），所以额外要求同源：
+        // 本地 web 服务没有 CSRF token，一个恶意网页完全可以 POST 到 localhost。
+        // 同源判断挡住跨站来源，非浏览器调用（不带 Origin）照旧放行。
+        const sameOrigin = (() => {
+          const origin = req.headers.origin
+          if (typeof origin !== 'string' || origin === '') return true
+          try {
+            return new URL(origin).host === req.headers.host
+          } catch {
+            return false
+          }
+        })()
+        if (req.method === 'GET' && sub === 'cocos') {
+          const data = await cocosStatus({ dshHome: home, buildSlots: config.cocos?.buildSlots })
+          return sendJson(res, 200, { ok: true, ...data })
+        }
+        if (req.method === 'POST' && sub === 'cocos/register') {
+          if (!sameOrigin) return sendJson(res, 403, { ok: false, error: '跨站请求被拒绝' })
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          try {
+            const result = cocosSetRegistration({
+              dshHome: home,
+              enabled: parsed?.enabled !== false,
+              buildSlots: config.cocos?.buildSlots,
+            })
+            // 登记状态变了 → 系统提示里的 Cocos 守则要跟着重建。
+            applyPolicySections()
+            return sendJson(res, 200, { ok: true, ...result })
+          } catch (error) {
+            return sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
+        if (req.method === 'POST' && sub === 'cocos/install') {
+          if (!sameOrigin) return sendJson(res, 403, { ok: false, error: '跨站请求被拒绝' })
+          const body = await readBody(req)
+          let parsed
+          try { parsed = JSON.parse(body || '{}') } catch { return sendJson(res, 400, { ok: false, error: 'invalid JSON body' }) }
+          try {
+            const result = await cocosInstall({
+              dshHome: home,
+              projectPath: parsed?.project,
+              global: parsed?.global === true,
+              force: parsed?.force === true,
+            })
+            return sendJson(res, 200, { ok: true, ...result })
+          } catch (error) {
+            return sendJson(res, error?.statusCode ?? 500, { ok: false, error: error?.message ?? String(error) })
+          }
+        }
         if (req.method === 'GET' && sub === 'asset-dirs') {
           // 素材落点：三类统一收在 <项目>/sucai/<类型>/，不在项目里才退回 $DSH_HOME。
           // 设置页用它如实显示「东西到底存哪了」—— 猜目录是用户最常问的问题之一。
@@ -971,7 +871,8 @@ export function apply(ctx, config = {}) {
           const configured = { image: readGptDownloadDir(home), video: '', bgm: '' }
           const dirs = {}
           for (const [kind, fallback] of Object.entries(kinds)) {
-            const r = resolveAssetDirForApi(home, kind, { configured: configured[kind], fallback })
+            // dryRun：这是 GET，只回答「会落在哪」，不许在磁盘上建目录。
+            const r = resolveAssetDirForApi(home, kind, { configured: configured[kind], fallback, dryRun: true })
             dirs[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
           }
           return sendJson(res, 200, { ok: true, dirs, file: lanesConfigPathForApi(home) })
@@ -1061,7 +962,7 @@ export function apply(ctx, config = {}) {
           }
           try {
             const saved = writeZaiduyuPreferences(home, { defaultModel: parsed.defaultModel })
-            applyPolicySection()
+            applyPolicySections()
             return sendJson(res, 200, { ok: true, defaultModel: saved.defaultModel })
           } catch (error) {
             return sendJson(res, error?.code === 'invalid_model' ? 400 : 500, { ok: false, error: String(error?.message ?? error), code: error?.code ?? 'settings_write_failed' })
@@ -1300,7 +1201,8 @@ export function apply(ctx, config = {}) {
           const dirConfigured = { image: readGptDownloadDir(home), video: '', bgm: '' }
           const dirs = {}
           for (const [kind, fallback] of Object.entries(dirFallbacks)) {
-            const r = resolveAssetDirForApi(home, kind, { configured: dirConfigured[kind], fallback })
+            // 同上：GET /lanes 也是只读路由，dryRun 禁止建目录。
+            const r = resolveAssetDirForApi(home, kind, { configured: dirConfigured[kind], fallback, dryRun: true })
             dirs[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
           }
           const readiness = {
@@ -1472,7 +1374,7 @@ export function apply(ctx, config = {}) {
           const body = await readBody(req)
           let account
           try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
-          const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
+          const cli = path.join(PKG_DIR, 'src', 'game-bgm-web.mjs')
           try {
             const site = (bgmStatus(home).site) ?? (await bgmDetectSite())
             bgmSaveSite(home, site)
@@ -1541,7 +1443,7 @@ export function apply(ctx, config = {}) {
           const body = await readBody(req)
           let account
           try { account = JSON.parse(body || '{}')?.account } catch { account = undefined }
-          const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
+          const cli = path.join(PKG_DIR, 'src', 'game-image-web.mjs')
           try {
             const argv = [cli, 'login', '--waitMs', '300000']
             if (typeof account === 'string' && account.length > 0) argv.push('--account', account)
@@ -1613,7 +1515,7 @@ export function apply(ctx, config = {}) {
               // 这里直接把它启动起来（失败不影响账号已建好，warn 里如实说明）。
               if (parsed.login !== false) {
                 try {
-                  const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
+                  const cli = path.join(PKG_DIR, 'src', 'game-image-web.mjs')
                   const argv = [cli, 'login', '--waitMs', '300000', '--account', id]
                   const child = spawn(process.execPath, argv, { detached: true, stdio: 'ignore' })
                   child.unref()
@@ -1883,8 +1785,8 @@ export function apply(ctx, config = {}) {
         return sendJson(res, 500, { ok: false, error: error?.message ?? String(error) })
       }
     }
-    scoped.effect(() => server.register({ kind: 'prefix', path: '/api/taptap-maker-dev', handler }),
-      'taptap-maker-dev: settings API routes')
+    scoped.effect(() => server.register({ kind: 'prefix', path: '/api/game-forge', handler }),
+      'game-forge: settings API routes')
   })
 
   // --- 3. Slash commands --------------------------------------------------
@@ -1904,18 +1806,34 @@ export function apply(ctx, config = {}) {
           '  npx -y @taptap/maker init',
           '',
           '提示：本插件已注入“非用户主动不消耗 Maker MCP 额度”的守则，',
-          '需要图片素材优先用 /taptap-image 的自定义生图通道。',
+          '需要图片素材优先用 /game-image-relay 的自定义生图通道。',
         ].join('\n'),
       }),
     })
 
     scoped.commands.register({
-      name: 'taptap-audio',
+      name: 'game-cocos',
+      description: 'Cocos Creator MCP 集成：装扩展、登记服务、查看多项目状态、命令行构建（多项目并行不会串工程）',
+      input: { hint: 'list；install <目录> --yes；register --yes；doctor <目录>；build <项目> --platform web-mobile' },
+      handler: async (invocation) => {
+        const result = await runCocosCommand(invocation?.rawInput ?? '', {
+          home,
+          config,
+          sessionId: String(invocation?.sessionId ?? ''),
+        })
+        // 登记/注销改变了「agent 手里有没有 cocos_* 工具」，守则段落要跟着变。
+        if (result?.refresh === true) applyPolicySections()
+        return result
+      },
+    })
+
+    scoped.commands.register({
+      name: 'game-audio',
       description: 'CC0 音效 / BGM：搜索、安装、导入本地音频到项目（不消耗 Maker 额度）',
       input: { hint: 'search/add "<描述>"；import --in <文件/目录> --project <dir>；sync 更新库' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
-        const cli = path.join(PKG_DIR, 'src', 'taptap-audio.mjs')
+        const cli = path.join(PKG_DIR, 'src', 'game-audio.mjs')
         if (raw === '' || raw === 'help') {
           return {
             kind: 'success',
@@ -1930,7 +1848,7 @@ export function apply(ctx, config = {}) {
               `音频库缓存：${audioCacheDir}`,
               '首次使用会自动下载（约 7MB，九个包、七百多个音频），之后走本地缓存。',
               '注意：音乐包只有 1~3 秒短 jingle，没有可无缝循环的完整 BGM。',
-              '完整 BGM：MiniMax 自 2026-08-20 起音乐 API 不对新用户开放，用 /taptap-bgm 走网页生成，或从 MiniMax Audio 网页下载后用 import 导入。',
+              '完整 BGM：MiniMax 自 2026-08-20 起音乐 API 不对新用户开放，用 /game-bgm 走网页生成，或从 MiniMax Audio 网页下载后用 import 导入。',
             ].join('\n'),
           }
         }
@@ -1942,7 +1860,7 @@ export function apply(ctx, config = {}) {
           const pm = /--project\s+("[^"]+"|\S+)/.exec(rest)
           const inm = /--in\s+("[^"]+"|\S+)/.exec(rest)
           if (pm === null || inm === null) {
-            return { kind: 'error', text: '用法：/taptap-audio import --in <文件或目录> --project <Maker项目目录> [--kind bgm|sfx] [--to wav] [--latest]' }
+            return { kind: 'error', text: '用法：/game-audio import --in <文件或目录> --project <Maker项目目录> [--kind bgm|sfx] [--to wav] [--latest]' }
           }
           const project = path.resolve(pm[1].replace(/^["']|["']$/g, ''))
           const inPath = path.resolve(inm[1].replace(/^["']|["']$/g, ''))
@@ -2003,7 +1921,7 @@ export function apply(ctx, config = {}) {
             .replace(/--out\s+("[^"]+"|'[^']+'|\S+)/, '')
             .trim()
           if (pm === null) {
-            return { kind: 'error', text: '用法：/taptap-audio add "<描述>" --project <Maker项目目录> [--out 名字.wav]' }
+            return { kind: 'error', text: '用法：/game-audio add "<描述>" --project <Maker项目目录> [--out 名字.wav]' }
           }
           const project = path.resolve(pm[1].replace(/^["']|["']$/g, ''))
           if (!fs.existsSync(path.join(project, 'assets'))) {
@@ -2017,7 +1935,7 @@ export function apply(ctx, config = {}) {
           }
           const result = await searchAudio(audioCacheDir, desc, { limit: 5 })
           if (result.matches.length === 0) {
-            return { kind: 'error', text: `CC0 库里没找到匹配「${desc}」的音效。可用 /taptap-audio search "<描述>" 换关键词试试。` }
+            return { kind: 'error', text: `CC0 库里没找到匹配「${desc}」的音效。可用 /game-audio search "<描述>" 换关键词试试。` }
           }
           const chosen = result.matches[0]
           const kind = chosen.kind === 'bgm' ? 'bgm' : 'sfx'
@@ -2081,7 +1999,7 @@ export function apply(ctx, config = {}) {
             `「${desc}」CC0 匹配（库共 ${result.total} 个音频）：`,
             ...result.matches.map((x, i) => `  ${i + 1}. ${x.pack}/${x.file}  (${x.kb}KB)`),
             '',
-            `安装：/taptap-audio add "${desc}" --project <项目目录> [--out 名字.wav]`,
+            `安装：/game-audio add "${desc}" --project <项目目录> [--out 名字.wav]`,
             result.note ? `注意：${result.note}` : '',
             '授权：CC0（Kenney）—— 可商用、免署名。不消耗 Maker 内置额度。',
           ].filter(Boolean).join('\n'),
@@ -2090,11 +2008,11 @@ export function apply(ctx, config = {}) {
     })
 
     scoped.commands.register({
-      name: 'taptap-audio-convert',
+      name: 'game-audio-convert',
       description: '用 ffmpeg 批量转换/压缩/响度归一游戏音频（本地离线，不耗额度）',
       input: { hint: '--in <文件或目录> --out <目标> [--to wav|mp3|ogg] [--start 12.5 --end 48] [--mono] [--rate 44100] [--normalize] [--trim] [--fade-in 0.3] [--fade-out 0.5] [--loop N] | --probe <文件>' },
       handler: async (invocation) => {
-        const cli = path.join(PKG_DIR, 'src', 'taptap-audio-convert.mjs')
+        const cli = path.join(PKG_DIR, 'src', 'game-audio-convert.mjs')
         const raw = (invocation?.rawInput ?? '').trim()
         const fm = /--in\s+("[^"]+"|\S+)/.exec(raw)
         const to = /--to\s+(\w+)/.exec(raw)
@@ -2102,17 +2020,17 @@ export function apply(ctx, config = {}) {
           '音频转换（ffmpeg，本地离线，不消耗任何额度）：',
           '',
           '  · CC0 下载来的 ogg/mp3 转成 Maker 项目习惯的 wav：',
-          `    /taptap-audio-convert --in D:\\tmp\\sfx --out <项目>\\assets\\audio\\sfx --to wav --mono --rate 44100`,
+          `    /game-audio-convert --in D:\\tmp\\sfx --out <项目>\\assets\\audio\\sfx --to wav --mono --rate 44100`,
           '  · 压缩体积（适合小游戏）：',
-          `    /taptap-audio-convert --in big.wav --out small.mp3 --to mp3 --bitrate 64k --mono`,
+          `    /game-audio-convert --in big.wav --out small.mp3 --to mp3 --bitrate 64k --mono`,
           '  · 统一响度 + 去首尾静音 + 淡出：',
-          `    /taptap-audio-convert --in sfx --out out --to wav --normalize --trim --fade-out 0.05`,
+          `    /game-audio-convert --in sfx --out out --to wav --normalize --trim --fade-out 0.05`,
           '  · 精确截一段（秒；裁完自动带淡入淡出，不会在切点爆音）：',
-          `    /taptap-audio-convert --in bgm.mp3 --out bgm_16s.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5`,
+          `    /game-audio-convert --in bgm.mp3 --out bgm_16s.wav --start 12.5 --end 48 --fade-in 0.3 --fade-out 0.5`,
           '  · 短音拼成一段可循环 BGM：',
-          `    /taptap-audio-convert --in one_shot.ogg --out bgm_loop.mp3 --loop 8`,
+          `    /game-audio-convert --in one_shot.ogg --out bgm_loop.mp3 --loop 8`,
           '  · 查看时长：',
-          `    /taptap-audio-convert --probe some.ogg`,
+          `    /game-audio-convert --probe some.ogg`,
           '',
           '支持格式：wav / mp3 / ogg / opus / m4a / flac。需要 ffmpeg（winget install Gyan.FFmpeg）。',
         ].join('\n')
@@ -2143,7 +2061,7 @@ export function apply(ctx, config = {}) {
               `  时长：${secs === null ? '读不到（ffprobe 缺失或文件损坏）' : `${secs.toFixed(2)}s`}`,
               `  体积：${Math.round((info.bytes ?? 0) / 1024)}KB`,
               '',
-              '要截取片段：/taptap-audio-convert --in <文件> --out <输出> --start <秒> --end <秒>',
+              '要截取片段：/game-audio-convert --in <文件> --out <输出> --start <秒> --end <秒>',
             ].join('\n'),
           }
         }
@@ -2224,20 +2142,20 @@ export function apply(ctx, config = {}) {
     })
 
     scoped.commands.register({
-      name: 'taptap-gpt',
+      name: 'game-image',
       description: 'ChatGPT 网页生图：<描述> 生成 / lane on|off 总开关 / login 登录 / pool 账号池 / status',
       input: { hint: '<图片描述> | lane on|off | login [--account <名>] | pool list | logout | status' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const low = raw.toLowerCase()
-        const cli = path.join(PKG_DIR, 'src', 'taptap-gpt.mjs')
+        const cli = path.join(PKG_DIR, 'src', 'game-image-web.mjs')
 
         // login [--account <id>]
         if (low === 'login' || low.startsWith('login ') || raw === '登录') {
           const acct = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
           const res = await gptLogin(home, { waitMs: 300000, accountId: acct })
-          const poolHint = acct ? `账号「${acct}」已登录。加更多账号：/taptap-gpt pool add --id <名> 再 login --account <名>。`
-            : '登录态保存在本机，只需登录一次。加第二个账号：/taptap-gpt pool add --id <名>，然后 login --account <名>。'
+          const poolHint = acct ? `账号「${acct}」已登录。加更多账号：/game-image pool add --id <名> 再 login --account <名>。`
+            : '登录态保存在本机，只需登录一次。加第二个账号：/game-image pool add --id <名>，然后 login --account <名>。'
           return {
             kind: res?.logged === true ? 'success' : 'error',
             text: res?.logged === true
@@ -2251,11 +2169,11 @@ export function apply(ctx, config = {}) {
           return {
             kind: r.ok ? 'success' : 'error',
             text: r.ok
-              ? `已退出${acct ? `账号「${acct}」` : ''}登录态。可用另一个账号 /taptap-gpt login。`
+              ? `已退出${acct ? `账号「${acct}」` : ''}登录态。可用另一个账号 /game-image login。`
               : `退出失败：可能有浏览器正在占用，请先关闭再试。（${r.profile ?? ''}）`,
           }
         }
-        // Download dir: /taptap-gpt dir | dir --set <路径> | dir --reset
+        // Download dir: /game-image dir | dir --set <路径> | dir --reset
         if (low === 'dir' || low.startsWith('dir ') || raw === '目录') {          const setArg = (/--set\s+("[^"]+"|'[^']+'|\S+)/.exec(raw) ?? [])[1]
           if (/--reset/.test(raw)) {
             writeGptDownloadDir(home, '')
@@ -2271,7 +2189,7 @@ export function apply(ctx, config = {}) {
                 `图片下载目录已设为：${value}`,
                 `当前生效：${st.downloadDir}`,
                 '',
-                '支持占位符 {project}（当前项目目录）、{home}（$DSH_HOME）。恢复默认：/taptap-gpt dir --reset',
+                '支持占位符 {project}（当前项目目录）、{home}（$DSH_HOME）。恢复默认：/game-image dir --reset',
               ].join('\n'),
             }
           }
@@ -2283,14 +2201,14 @@ export function apply(ctx, config = {}) {
               `来源：${st.downloadDirSource === 'project' ? '跟随当前项目（默认）' : st.downloadDirSource === 'config' ? '自定义' : '默认（$DSH_HOME）'}`,
               st.downloadDirConfigured ? `自定义值：${st.downloadDirConfigured}` : '自定义值：未设置（跟随项目）',
               '',
-              '设置：/taptap-gpt dir --set "D:\\my-images" 或 --set "{project}/imgs"',
-              '恢复默认：/taptap-gpt dir --reset',
+              '设置：/game-image dir --set "D:\\my-images" 或 --set "{project}/imgs"',
+              '恢复默认：/game-image dir --reset',
             ].join('\n'),
           }
         }
         // 抓图：把「已经生成但没下到」的图取回来，不重新生成（省额度）。
-        //   /taptap-gpt grab                  抓 pending 记录里的那个对话
-        //   /taptap-gpt grab <对话url>         抓指定对话
+        //   /game-image grab                  抓 pending 记录里的那个对话
+        //   /game-image grab <对话url>         抓指定对话
         if (low === 'grab' || low.startsWith('grab ') || raw === '抓图' || low === 'pending') {
           const urlArg = (/https?:\/\/\S+/.exec(raw) ?? [])[0]
           if (low === 'pending') {
@@ -2299,7 +2217,7 @@ export function apply(ctx, config = {}) {
               kind: 'success',
               text: p
                 ? [`待抓取对话：${p.url}`, `提示词：${p.prompt || '(未知)'}`, `提交于：${new Date(p.at).toLocaleString('zh-CN')}`,
-                  '', '抓取：/taptap-gpt grab'].join('\n')
+                  '', '抓取：/game-image grab'].join('\n')
                 : '没有待抓取的图（上次生成要么已下载，要么还没开始过）。',
             }
           }
@@ -2317,7 +2235,7 @@ export function apply(ctx, config = {}) {
           }
           return { kind: 'success', text: [`已抓取：${r.saved}`, '', '这是中间产物，裁好后再搬进 assets/ 并补同名 .meta。'].join('\n') }
         }
-        // Master switch: /taptap-gpt lane on|off|status
+        // Master switch: /game-image lane on|off|status
         if (low === 'lane' || low.startsWith('lane ') || raw === '开关') {
           const wantsOn = /(?:^|\s)(on|开|true)$/i.test(raw)
           const wantsOff = /(?:^|\s)(off|关|false)$/i.test(raw)
@@ -2327,8 +2245,8 @@ export function apply(ctx, config = {}) {
               text: [
                 `网页生图总开关：${readGptLaneEnabled(home) ? '开' : '关'}`,
                 '',
-                '打开：/taptap-gpt lane on',
-                '关闭：/taptap-gpt lane off（关闭后模型改走中转站）',
+                '打开：/game-image lane on',
+                '关闭：/game-image lane off（关闭后模型改走中转站）',
               ].join('\n'),
             }
           }
@@ -2337,7 +2255,7 @@ export function apply(ctx, config = {}) {
             kind: 'success',
             text: on
               ? '已打开网页生图：模型会默认走 ChatGPT 网页通道。'
-              : '已关闭网页生图：模型不会尝试网页通道，图片改走中转站 /taptap-image。随时可以 /taptap-gpt lane on 打开。',
+              : '已关闭网页生图：模型不会尝试网页通道，图片改走中转站 /game-image-relay。随时可以 /game-image lane on 打开。',
           }
         }
         // 账号池：list / add / remove / ban / unban / rotate
@@ -2370,10 +2288,10 @@ export function apply(ctx, config = {}) {
             ...poolLines,
             '',
             st.laneEnabled === false
-              ? '总开关已关闭：不会走网页生图（/taptap-gpt lane on 可打开）。'
+              ? '总开关已关闭：不会走网页生图（/game-image lane on 可打开）。'
               : (st.loggedIn || p.loggedIn > 0
                 ? '可以直接说「生成一个蓝色盾牌图标」，默认走这条网页通道。'
-                : '先登录：/taptap-gpt login（只需一次）'),
+                : '先登录：/game-image login（只需一次）'),
           ]
           return { kind: 'success', text: lines.join('\n') }
         }
@@ -2385,10 +2303,10 @@ export function apply(ctx, config = {}) {
           return {
             kind: 'success',
             text: [
-              'ChatGPT 网页生图是首选通道。直接说：/taptap-gpt 一只橙色小猫，扁平矢量风格',
+              'ChatGPT 网页生图是首选通道。直接说：/game-image 一只橙色小猫，扁平矢量风格',
               '',
               `当前：${st.loggedIn || st.pool.loggedIn > 0 ? '已登录，可直接生成' : '未登录'}`,
-              st.loggedIn || st.pool.loggedIn > 0 ? '' : '先登录：/taptap-gpt login（只需一次）',
+              st.loggedIn || st.pool.loggedIn > 0 ? '' : '先登录：/game-image login（只需一次）',
               '',
               '账号池：pool list 看状态 / pool add --id <名> 添加账号 / pool unban --id <名> 恢复冷却账号',
             ].filter(Boolean).join('\n'),
@@ -2397,10 +2315,10 @@ export function apply(ctx, config = {}) {
 
         // Account checks belong to the selected web executor. A configured
         // relay/Zaiduyu lane must not require an unrelated ChatGPT login.
-        // 参数一律走共享解析器（与 /taptap-zaiduyu、/taptap-sfx 同一套语义）。
+        // 参数一律走共享解析器（与 /game-zaiduyu、/game-sfx 同一套语义）。
         // ⚠️ 旧写法是三条正则：`--ref` 后面漏写值时会把**下一个 flag 名**当成
         // 参考图吞掉，而那个 flag 的值则漏进提示词 —— 实测
-        // `/taptap-gpt --ref --account a2 画一只猫`：refs=["--account"]
+        // `/game-image --ref --account a2 画一只猫`：refs=["--account"]
         // （网页通道真会去上传这个不存在的路径），提示词变成「a2 画一只猫」
         // （账号 id 混进了发给 ChatGPT 的描述）。现在漏值直接拒绝提交。
         const genArgs = parseSlashGenArgs(desc)
@@ -2409,7 +2327,7 @@ export function apply(ctx, config = {}) {
             kind: 'error',
             text: [
               `参数「${genArgs.missing.join('、')}」后面没有值，已停止（不会跑网页生图、不消耗额度）。`,
-              '例：/taptap-gpt 改成水彩风 --ref 角色.png；值带空格时请加引号，或写成 --ref=角色.png。',
+              '例：/game-image 改成水彩风 --ref 角色.png；值带空格时请加引号，或写成 --ref=角色.png。',
             ].join('\n'),
           }
         }
@@ -2420,7 +2338,7 @@ export function apply(ctx, config = {}) {
         if (prompt.length === 0) {
           return {
             kind: 'error',
-            text: '请给一句图片描述。图生图：/taptap-gpt 把这个角色改成水彩风 --ref 角色.png',
+            text: '请给一句图片描述。图生图：/game-image 把这个角色改成水彩风 --ref 角色.png',
           }
         }
         // 走统一入口 generateImage：它按「生成通道」卡的顺序/开关/autoFallback
@@ -2467,11 +2385,11 @@ export function apply(ctx, config = {}) {
                 ? '这是 **Cloudflare 人机验证**（页面显示「请验证您是真人」），不是选择器失效。'
                   + '再跑一次时，在弹出的浏览器窗口里手动勾选那个验证框，勾完它会自动继续。'
                 : isQuota
-                  ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/taptap-gpt pool list、pool unban），或回退到中转站 /taptap-image。'
+                  ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/game-image pool list、pool unban），或回退到中转站 /game-image-relay。'
                     + '（若想以后额度用完时自动切到中转站：设置页「生成通道」→ 打开「额度不足时自动换下一条通道」，默认是关的。）'
                   : r.pendingUrl
-                    ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /taptap-gpt grab 抓同一个对话即可：${r.pendingUrl}`
-                    : (r.hint ?? '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/taptap-image。'),
+                    ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /game-image grab 抓同一个对话即可：${r.pendingUrl}`
+                    : (r.hint ?? '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/game-image-relay。'),
             ].filter(Boolean).join('\n'),
           }
         }
@@ -2491,14 +2409,14 @@ export function apply(ctx, config = {}) {
       },
     })
 
-    // /taptap-gpt 作为首选后，/taptap-image 变成显式回退入口。
+    // /game-image 作为首选后，/game-image-relay 变成显式回退入口。
     scoped.commands.register({
-      name: 'taptap-image',
+      name: 'game-image-relay',
       description: '中转站生图（回退通道）：文生图 / 图生图（--ref）/ --config 查看配置',
       input: { hint: '<图片描述> [--ref <参考图>]（可重复）/ --config' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
-        const cli = path.join(PKG_DIR, 'src', 'taptap-image.mjs')
+        const cli = path.join(PKG_DIR, 'src', 'game-image-relay.mjs')
         const low = raw.toLowerCase()
 
         if (low === '--config' || low === '-c' || raw === '配置') {
@@ -2522,7 +2440,7 @@ export function apply(ctx, config = {}) {
             text: [
               '「中转站生图」通道已在设置页「生成通道」卡里关闭，不会走这条通道。',
               '',
-              '要用图片就打开它，或走网页通道 /taptap-gpt <描述>。',
+              '要用图片就打开它，或走网页通道 /game-image <描述>。',
             ].join('\n'),
           }
         }
@@ -2537,14 +2455,14 @@ export function apply(ctx, config = {}) {
               '',
               `配置文件：${imageFile}（或设置页「中转站生图」卡）`,
               '',
-              '网页通道：/taptap-gpt login 登录一次即可用（默认走这条）。',
+              '网页通道：/game-image login 登录一次即可用（默认走这条）。',
               '确实要用中转站：填好 baseURL / apiKey / model 再回来。',
             ].join('\n'),
           }
         }
 
         const descRaw = raw.replace(/^(图片|生图|生成图片|画一张|生成一张)\s*/i, '').trim()
-        // 参数一律走 taptap-image 自己的解析器（flag 表只有一份，见 parseSlashArgs）。
+        // 参数一律走 game-image-relay 自己的解析器（flag 表只有一份，见 parseSlashArgs）。
         // ⚠️ 旧写法有四个实测到的真实后果：
         //   1. `--transparent` **既不剥掉也不转发** —— 用户写「盾牌图标 --transparent」，
         //      字面 `--transparent` 被当成描述发给模型，而且**不会要透明底**；
@@ -2558,7 +2476,7 @@ export function apply(ctx, config = {}) {
             kind: 'error',
             text: [
               `参数「${relayParsed.missing.join('、')}」后面没有值，已停止（不会提交生图请求）。`,
-              '例：/taptap-image 改成赛博朋克风 --ref 角色.png；值带空格请加引号，或写成 --ref=角色.png。',
+              '例：/game-image-relay 改成赛博朋克风 --ref 角色.png；值带空格请加引号，或写成 --ref=角色.png。',
             ].join('\n'),
           }
         }
@@ -2581,7 +2499,7 @@ export function apply(ctx, config = {}) {
           return {
             kind: 'success',
             text: [
-              '中转站生图（回退通道，首选是 /taptap-gpt）：',
+              '中转站生图（回退通道，首选是 /game-image）：',
               '',
               `  node "${cli}" --prompt "<描述>" --out D:\\tmp\\out.png --size 1024x1024`,
               `  node "${cli}" --prompt "蓝色盾牌图标，扁平，居中留白" --out D:\\tmp\\icon.png --transparent --downscale 128x128`,
@@ -2598,7 +2516,7 @@ export function apply(ctx, config = {}) {
         if (desc.length === 0) {
           return {
             kind: 'error',
-            text: '图生图需要一句「怎么改」的描述。例：/taptap-image 改成赛博朋克风 --ref 角色.png',
+            text: '图生图需要一句「怎么改」的描述。例：/game-image-relay 改成赛博朋克风 --ref 角色.png',
           }
         }
 
@@ -2658,11 +2576,11 @@ export function apply(ctx, config = {}) {
       },
     })
 
-    // /taptap-zaiduyu —— 章鱼生图（pai.zaiduyu.top 积分站）独立入口。
+    // /game-zaiduyu —— 章鱼生图（pai.zaiduyu.top 积分站）独立入口。
     // 守则要求：先 --models 让用户看清单价再选模型；积分是预付的钱，
     // 不能由 agent 默认走这条、更不能替用户挑高价模型。
     scoped.commands.register({
-      name: 'taptap-zaiduyu',
+      name: 'game-zaiduyu',
       description: '章鱼生图（积分站 pai.zaiduyu.top）：models 看模型价 / balance 查积分 / gen "<描述>" [--model ID] [--ratio 16:9] [--n 2]（预付积分，先看清再花）',
       input: { hint: 'models | balance | status | gen "<描述>" [--model <id>] [--ratio …] [--resolution 2K] [--n 1] [--ref 图]' },
       handler: async (invocation) => {
@@ -2687,9 +2605,9 @@ export function apply(ctx, config = {}) {
                 '',
               ].join('\n'),
               '用法：',
-              '  /taptap-zaiduyu models              模型清单 + 单张积分 + 当前余额（生图前必看）',
-              '  /taptap-zaiduyu gen "小猫赏月" --model gpt-image-2 --ratio 16:9',
-              '  /taptap-zaiduyu balance             查积分（限时积分当天过期，别跨天规划）',
+              '  /game-zaiduyu models              模型清单 + 单张积分 + 当前余额（生图前必看）',
+              '  /game-zaiduyu gen "小猫赏月" --model gpt-image-2 --ratio 16:9',
+              '  /game-zaiduyu balance             查积分（限时积分当天过期，别跨天规划）',
               '也可作为统一生图链路的一条通道（设置页「生成通道」可排序/开关）。',
             ].join('\n'),
           }
@@ -2705,7 +2623,7 @@ export function apply(ctx, config = {}) {
         const genM = /^(gen|generate|生图|画)\s+(.+)$/.exec(raw)
         const desc = genM ? genM[2].trim() : raw
         if (desc.length === 0) {
-          return { kind: 'error', text: '用法：/taptap-zaiduyu gen "<描述>" [--model <id>] [--ratio 16:9] [--resolution 2K] [--n 2] [--ref 图]' }
+          return { kind: 'error', text: '用法：/game-zaiduyu gen "<描述>" [--model <id>] [--ratio 16:9] [--resolution 2K] [--n 2] [--ref 图]' }
         }
         // 参数一律交给模块自己的解析器（分词 + 完整 flag 表）：
         // 以前这里是手写的正则剥除清单，漏了 --size / --quality / --description
@@ -2724,7 +2642,7 @@ export function apply(ctx, config = {}) {
             text: [
               `参数「${gen.missing.join('、')}」后面没有值，未提交（不会扣积分）。`,
               '值本身带空格时要加引号：--model "某个模型"；或直接写成 --model=值。',
-              '也可以先 /taptap-zaiduyu models 看模型清单，再挑一个。',
+              '也可以先 /game-zaiduyu models 看模型清单，再挑一个。',
             ].join('\n'),
           }
         }
@@ -2781,39 +2699,39 @@ export function apply(ctx, config = {}) {
                 ? '请到设置页「生成通道」→「章鱼生图（积分站）」卡填账号密码并点「登录并保存」（即时生效）。不要让用户把密码贴进对话。'
                 : '',
               ...(err?.notes ?? []),
-              err?.phase !== 'preflight' && err?.kind !== 'input' && zaiduyuQuotaHit(err?.message ?? '') ? '这是积分不足：等积分恢复、去站点充值，或换其它生图通道（/taptap-gpt、/taptap-image）。' : '',
+              err?.phase !== 'preflight' && err?.kind !== 'input' && zaiduyuQuotaHit(err?.message ?? '') ? '这是积分不足：等积分恢复、去站点充值，或换其它生图通道（/game-image、/game-image-relay）。' : '',
             ].filter(Boolean).join('\n'),
           }
         }
       },
     })
 
-    // /taptap-sfx —— 本地 Stable Audio Open 音效。
+    // /game-sfx —— 本地 Stable Audio Open 音效。
     // 🛡️ 模型权重（约 5.3GB）**永远不自动下载**：先 check 硬件，够格才让用户
     // 按 guide 手动下载；gen 在模型/venv/硬件任一不满足时直接拒绝并指路。
     scoped.commands.register({
-      name: 'taptap-sfx',
+      name: 'game-sfx',
       description: '本地音效生成（Stable Audio Open，零额度）：check 硬件体检 / guide 手动下载指引 / deps 装依赖 / gen "<英文描述>"',
       input: { hint: 'check | guide | verify [--fast] | deps [--yes] | doctor | gen "<英文描述>" [--project <dir>] [-s 秒] [-n 条数]' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const low = raw.toLowerCase()
-        const cli = path.join(PKG_DIR, 'src', 'taptap-sfx.mjs')
+        const cli = path.join(PKG_DIR, 'src', 'game-sfx.mjs')
         if (low === '' || low === 'help' || low === 'status') {
           return {
             kind: 'success',
             text: [
               '本地音效（Stable Audio Open 1.0）：在自己机器上跑，不消耗任何 Maker 额度、不联网付费。',
               '',
-              '优先级提醒：先用 CC0 音效库（/taptap-audio），库里没有合适的再走本地生成 ——',
+              '优先级提醒：先用 CC0 音效库（/game-audio），库里没有合适的再走本地生成 ——',
               '首次部署要**手动**下载约 5.3GB 模型 + 约 3GB 依赖（本插件不会自动下载，怕你硬件不够）。',
               '',
-              '  /taptap-sfx check    硬件体检（NVIDIA 显卡 + 建议 8GB 显存）',
-              '  /taptap-sfx guide    逐条打印模型手动下载命令（断点续传，可反复跑）',
-              '  /taptap-sfx verify   下载后校验 SHA256',
-              '  /taptap-sfx deps     打印依赖安装命令；加 --yes 才真正安装（约 3GB）',
-              '  /taptap-sfx doctor   装好后体检',
-              '  /taptap-sfx gen "coin pickup, bright arcade blip" --project <项目>   生成并进 assets/audio/sfx（补 .meta）',
+              '  /game-sfx check    硬件体检（NVIDIA 显卡 + 建议 8GB 显存）',
+              '  /game-sfx guide    逐条打印模型手动下载命令（断点续传，可反复跑）',
+              '  /game-sfx verify   下载后校验 SHA256',
+              '  /game-sfx deps     打印依赖安装命令；加 --yes 才真正安装（约 3GB）',
+              '  /game-sfx doctor   装好后体检',
+              '  /game-sfx gen "coin pickup, bright arcade blip" --project <项目>   生成并进 assets/audio/sfx（补 .meta）',
               '',
               `CLI 等价：node "${cli}" <子命令>`,
             ].join('\n'),
@@ -2839,7 +2757,7 @@ export function apply(ctx, config = {}) {
           // —— 因为那条 --project 正则带着贪婪的 `.*`。
           const genArgs = splitSfxGenArgs(rest)
           if (genArgs.prompt.length === 0) {
-            return { kind: 'error', text: '用法：/taptap-sfx gen "<英文音效描述>" [--project <Maker项目目录>] [-s 秒数] [-n 条数]。提示词用英文效果最好。' }
+            return { kind: 'error', text: '用法：/game-sfx gen "<英文音效描述>" [--project <Maker项目目录>] [-s 秒数] [-n 条数]。提示词用英文效果最好。' }
           }
           // 漏值（`--seed` 后面没数字）必须拒绝：否则会静默用默认值跑一条
           // 几分钟到几十分钟的 torch 生成，用户还以为自己指定的参数生效了。
@@ -2862,8 +2780,8 @@ export function apply(ctx, config = {}) {
                 '本机硬件体检没能执行完成，已停止（不下载、不长跑）。',
                 (hw.text || '').split(/\r?\n/).filter(Boolean).slice(-3).join('\n'),
                 '',
-                '先跑 /taptap-sfx check 看完整输出（多数是本机没有可用的 Python 3）。',
-                '替代：CC0 音效库 /taptap-audio add "<中文描述>" --project <项目>（零成本、装完即用）。',
+                '先跑 /game-sfx check 看完整输出（多数是本机没有可用的 Python 3）。',
+                '替代：CC0 音效库 /game-audio add "<中文描述>" --project <项目>（零成本、装完即用）。',
               ].filter(Boolean).join('\n'),
             }
           }
@@ -2875,8 +2793,8 @@ export function apply(ctx, config = {}) {
                 hw.gpu ? `显卡：${hw.gpu}` : '显卡：未检测到 NVIDIA GPU',
                 hw.verdict ? `结论：${hw.verdict}` : '',
                 '',
-                '替代：CC0 音效库 /taptap-audio add "<中文描述>" --project <项目>（零成本、装完即用）；',
-                '或 /taptap-sfx check 看完整体检（也许只是还没装依赖）。',
+                '替代：CC0 音效库 /game-audio add "<中文描述>" --project <项目>（零成本、装完即用）；',
+                '或 /game-sfx check 看完整体检（也许只是还没装依赖）。',
               ].join('\n'),
             }
           }
@@ -2905,7 +2823,7 @@ export function apply(ctx, config = {}) {
                   `已本地生成 ${result.generated} 条音效（零额度）：`,
                   ...result.files.map((f) => `  ${f.file}${f.uuid ? `  uuid=${f.uuid}` : ''}  ${f.kb}KB`),
                   '',
-                  genArgs.project ? '已写入 assets/audio/sfx/ 并补同名 .meta，Maker 可直接引用。' : '不在项目里跑时落在临时目录，进项目请用 --project 或用 /taptap-audio import。',
+                  genArgs.project ? '已写入 assets/audio/sfx/ 并补同名 .meta，Maker 可直接引用。' : '不在项目里跑时落在临时目录，进项目请用 --project 或用 /game-audio import。',
                 ].join('\n'),
               }
             }
@@ -2916,25 +2834,25 @@ export function apply(ctx, config = {}) {
               kind: 'error',
               text: [
                 `本地生成未完成：${why}`,
-                result && result.code === 'model_missing' ? '模型还没下载：先 /taptap-sfx guide 手动下载（本插件不自动下载），下完 verify。' : '',
-                result && result.code === 'venv_missing' ? '依赖还没装：/taptap-sfx deps 先看，确认后 deps --yes 安装（约 3GB）。' : '',
+                result && result.code === 'model_missing' ? '模型还没下载：先 /game-sfx guide 手动下载（本插件不自动下载），下完 verify。' : '',
+                result && result.code === 'venv_missing' ? '依赖还没装：/game-sfx deps 先看，确认后 deps --yes 安装（约 3GB）。' : '',
               ].filter(Boolean).join('\n'),
             }
           } catch (error) {
             return { kind: 'error', text: `调用失败：${error?.message ?? error}` }
           }
         }
-        return { kind: 'error', text: `未知子命令「${sub}」。跑 /taptap-sfx 看用法。` }
+        return { kind: 'error', text: `未知子命令「${sub}」。跑 /game-sfx 看用法。` }
       },
     })
 
     scoped.commands.register({
-      name: 'taptap-bgm',
+      name: 'game-bgm',
       description: 'BGM 账号池：login 登录 / pool 账号池 / logout 换号 / credits 查额度 / "<描述>" 生成（自动轮询）',
       input: { hint: 'login [--account <名>] | pool list|add|remove|ban|unban|rotate | logout | credits | status | <风格描述>' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
-        const cli = path.join(PKG_DIR, 'src', 'taptap-bgm-web.mjs')
+        const cli = path.join(PKG_DIR, 'src', 'game-bgm-web.mjs')
         const low = raw.toLowerCase()
         const accountArg = (/(?:--account|-a)\s+(\S+)/.exec(raw) ?? [])[1]
 
@@ -2948,7 +2866,7 @@ export function apply(ctx, config = {}) {
               ? [
                 `已登录${accountArg ? `账号「${accountArg}」` : ''}，之后生成 BGM 都用它。`,
                 `使用：${site.label}`,
-                accountArg ? '' : '加更多账号：设置页「BGM 账号」点「+ 添加账号」，或 /taptap-bgm pool add --id <名>',
+                accountArg ? '' : '加更多账号：设置页「BGM 账号」点「+ 添加账号」，或 /game-bgm pool add --id <名>',
               ].filter(Boolean).join('\n')
               : [
                 '未完成登录（或登录超时）。',
@@ -2972,7 +2890,7 @@ export function apply(ctx, config = {}) {
           return {
             kind: r.ok ? 'success' : 'error',
             text: r.ok
-              ? `已退出${accountArg ? `账号「${accountArg}」` : ''}登录。下次可换一个账号登录（/taptap-bgm login）。`
+              ? `已退出${accountArg ? `账号「${accountArg}」` : ''}登录。下次可换一个账号登录（/game-bgm login）。`
               : `退出失败：可能有浏览器正在使用登录态，请先关闭再试。（${r.profile ?? ''}）`,
           }
         }
@@ -2980,7 +2898,7 @@ export function apply(ctx, config = {}) {
           const r = await bgmCredits(home, { accountId: accountArg })
           if (!r.ok) return { kind: 'error', text: `查额度失败：${r.error ?? '未知'}` }
           const exp = r.expiresAt ? `，到期 ${new Date(r.expiresAt).toLocaleDateString('zh-CN')}` : ''
-          return { kind: 'success', text: `剩余额度：${r.totalCredit}${exp}。额度用完可换号：/taptap-bgm logout 再 login，或多加几个账号自动轮询。` }
+          return { kind: 'success', text: `剩余额度：${r.totalCredit}${exp}。额度用完可换号：/game-bgm logout 再 login，或多加几个账号自动轮询。` }
         }
         if (low === 'status' || raw === '状态') {
           const st = bgmStatus(home)
@@ -2988,7 +2906,7 @@ export function apply(ctx, config = {}) {
           if (!st.site) bgmSaveSite(home, site)
           const p = st.pool
           const poolLines = p.total === 0
-            ? ['账号池：未启用（单账号模式）。加账号：/taptap-bgm pool add --id <名>']
+            ? ['账号池：未启用（单账号模式）。加账号：/game-bgm pool add --id <名>']
             : [
               `账号池：附加账号 ${p.total} 个（已登录 ${p.loggedIn}，冷却 ${p.cooling}，封禁 ${p.banned}），轮换 ${p.autoRotate ? '开' : '关'}`,
               ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} ${a.hasCookies ? '已登录' : '未登录'}`
@@ -3002,7 +2920,7 @@ export function apply(ctx, config = {}) {
               '',
               ...poolLines,
               '',
-              st.hasCookies || p.loggedIn > 0 ? '可以直接生成 BGM（会自动选可用账号）。' : '请先登录（/taptap-bgm login）。',
+              st.hasCookies || p.loggedIn > 0 ? '可以直接生成 BGM（会自动选可用账号）。' : '请先登录（/game-bgm login）。',
             ].join('\n'),
           }
         }
@@ -3021,8 +2939,8 @@ export function apply(ctx, config = {}) {
               st.site ? `将使用：${st.site.label}` : '',
               '',
               st.hasCookies
-                ? '直接说「来个战斗 BGM」或 /taptap-bgm 战斗'
-                : '先登录：/taptap-bgm login',
+                ? '直接说「来个战斗 BGM」或 /game-bgm 战斗'
+                : '先登录：/game-bgm login',
               '',
               picks.length > 0
                 ? `按你的项目内容，推荐这些场景：${picks.map((p) => p.scene).join('、')}`
@@ -3038,7 +2956,7 @@ export function apply(ctx, config = {}) {
             text: [
               '需要登录 MiniMax 账号才能生成 BGM（用你的账号在网页生成音乐）。',
               '',
-              '登录：/taptap-bgm login',
+              '登录：/game-bgm login',
             ].join('\n'),
           }
         }
@@ -3106,13 +3024,13 @@ export function apply(ctx, config = {}) {
               triedList,
               '',
               isCredit
-                ? '所有可用账号额度都不足了。可以加更多账号（/taptap-bgm pool add --id <名> 再 login --account <名>），或等额度恢复（/taptap-bgm pool unban）。'
+                ? '所有可用账号额度都不足了。可以加更多账号（/game-bgm pool add --id <名> 再 login --account <名>），或等额度恢复（/game-bgm pool unban）。'
                 : r.error === 'instrumental_unset'
                   // Deliberate stop: never spend credits on a vocal track that
                   // was not asked for.
                   ? '「纯音乐」开关没能设成期望状态，已中止（没花额度）。'
                     + '这个开关决定有没有人声，写提示词是没用的；重试时会自动再设一次。'
-                    + '如果你确实要带人声/歌词：/taptap-bgm <描述> --lyrics；如果你要的是纯音乐却反复失败，'
+                    + '如果你确实要带人声/歌词：/game-bgm <描述> --lyrics；如果你要的是纯音乐却反复失败，'
                     + '可加 --ignore-instrumental 强行按当前状态生成（会带人声）。'
                   : '若是网页结构变化导致选择器失效，会如实报告卡在哪一步；可稍后重试。',
             ].filter(Boolean).join('\n'),
@@ -3125,7 +3043,7 @@ export function apply(ctx, config = {}) {
             text: [
               '没能拿到下载文件。',
               '',
-              `可手动下载后导入：/taptap-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
+              `可手动下载后导入：/game-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
             ].join('\n'),
           }
         }
@@ -3138,21 +3056,21 @@ export function apply(ctx, config = {}) {
             '试听 / 裁剪：点右下角的 🎵 BGM 按钮（会亮红点），可试听、拖波形选区间、裁剪后一键导入项目。',
             '',
             '或直接命令行导入：',
-            `  /taptap-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
+            `  /game-audio import --in ${downloadDir(home)} --project <项目目录> --kind bgm --to wav --latest`,
           ].join('\n'),
         }
       },
     })
 
     scoped.commands.register({
-      name: 'taptap-video',
+      name: 'game-video',
       description: '视频生成动作帧：首尾帧视频 → 抽帧 → 抠图 → 序列帧素材导入 Maker（本地抠像不花额度）',
       input: { hint: 'new / first <图> / last <图> / prompt <文字> / run / poll / frames / key / sheet / import <工程目录> / doctor / status' },
       handler: async (invocation) => videoCommand(home, invocation?.rawInput ?? ''),
     })
 
     scoped.commands.register({
-      name: 'taptap-skills',
+      name: 'game-skills',
       description: '管理游戏开发 skills：list / disable <名> / enable <名> / restore / reset / update',
       input: { hint: '留空=列表+更新检测；disable <名>…；enable <名>…；restore（恢复误清空的禁用表）；reset（清空，需 --yes）；update' },
       handler: async (invocation) => {
@@ -3165,12 +3083,18 @@ export function apply(ctx, config = {}) {
 
         // disable / 隐藏 / 删除
         if (sub === 'disable' || sub === '隐藏' || sub === '删除' || sub === 'remove') {
-          if (argNames.length === 0) return { kind: 'error', text: '用法：/taptap-skills disable <skill名> [更多名…]' }
+          if (argNames.length === 0) return { kind: 'error', text: '用法：/game-skills disable <skill名> [更多名…]' }
           // 禁用表是用户维护的清单：AI 觉得「这个 skill 没用了」就把用户的选择改掉，
           // 是越权。要禁用得他明说（带 --yes 或自己点名）。
           // ⚠️ 这里曾误传 { rawInput }（handler 里的变量叫 raw）→ undefined →
           // 守卫永远不放行，连 disable --yes 都被拦死（防呆变成堵死）。
-          const gate = guardUserSetting('lanes.enabled', { rawInput: raw, from: '当前禁用表', to: `额外禁用 ${argNames.join('、')}` })
+          // ⚠️ 还曾误用 'lanes.enabled' 这个 key：拦是拦住了，但提示语变成了
+          // 「通道开关是你自己在设置里定好的」，和实际动作（改 skill 禁用表）对不上。
+          const gate = guardUserSetting('skills.disabled', {
+            rawInput: raw,
+            from: `当前禁用 ${readDisabledSkills(home).length} 个`,
+            to: `额外禁用 ${argNames.join('、')}`,
+          })
           if (!gate.ok) {
             return { kind: 'error', text: `${gate.text}\n\n（如果确实要禁用这些，请加 --yes 或自己点名要求。）` }
           }
@@ -3183,14 +3107,14 @@ export function apply(ctx, config = {}) {
             text: [
               `已禁用：${argNames.join('、')}`,
               unknown.length ? `（注意：这些名字当前目录里没找到，但已记入禁用表：${unknown.join('、')}）` : '',
-              `当前禁用共 ${next.length} 个。用 /taptap-skills enable <名> 可恢复。`,
+              `当前禁用共 ${next.length} 个。用 /game-skills enable <名> 可恢复。`,
             ].filter(Boolean).join('\n'),
           }
         }
 
         // enable / 启用 / 恢复
         if (sub === 'enable' || sub === '启用' || sub === '恢复') {
-          if (argNames.length === 0) return { kind: 'error', text: '用法：/taptap-skills enable <skill名> [更多名…]' }
+          if (argNames.length === 0) return { kind: 'error', text: '用法：/game-skills enable <skill名> [更多名…]' }
           const remove = new Set(argNames)
           const next = writeDisabledSkills(home, readDisabledSkills(home).filter((n) => !remove.has(n)))
           refresh()
@@ -3215,7 +3139,7 @@ export function apply(ctx, config = {}) {
             rawInput: raw, // 同上：handler 里变量叫 raw，误传 rawInput 会令 --yes 永远失效
             action: '清空 skill 禁用表',
             consequence: `当前禁用 ${current.length} 个：${current.join('、')}。清空后它们会全部重新出现在 skill 列表里。`,
-            undo: `/taptap-skills restore（本次已备份到 ${backupName}）`,
+            undo: `/game-skills restore（本次已备份到 ${backupName}）`,
           })
           if (!gate.ok) {
             return {
@@ -3232,7 +3156,7 @@ export function apply(ctx, config = {}) {
           refresh()
           return {
             kind: 'success',
-            text: `已清空禁用表（${current.length} 个 skill 恢复可用）。备份：${backupName}，可用 /taptap-skills restore 恢复。`,
+            text: `已清空禁用表（${current.length} 个 skill 恢复可用）。备份：${backupName}，可用 /game-skills restore 恢复。`,
           }
         }
 
@@ -3279,7 +3203,7 @@ export function apply(ctx, config = {}) {
             `skills 共 ${all.length} 个（启用 ${active.length}，禁用 ${disabled.length}）：`,
             ...all.map(fmt),
             '',
-            '管理：/taptap-skills disable <名>（隐藏）、enable <名>（恢复）、reset（全部恢复）、update（强制更新）。',
+            '管理：/game-skills disable <名>（隐藏）、enable <名>（恢复）、reset（全部恢复）、update（强制更新）。',
             `更新检测：源 ${summary.sourceCount} 个，新增 ${summary.added.length}，变更 ${summary.updated.length}，错误 ${summary.errors.length}。`,
             skillsCfg.sources?.length ? '' : '（当前未配置更新源，检测为安全空操作；在插件 config.skills.sources 里填 git/目录/URL 即可。）',
           ].filter(Boolean).join('\n'),
@@ -3290,7 +3214,7 @@ export function apply(ctx, config = {}) {
 }
 
 /* ------------------------------------------------------------------------- *
- * /taptap-video —— 视频动作帧管线
+ * /game-video —— 视频动作帧管线
  *
  * 一条链路上每一步都得能单独重跑：视频很贵（按秒计费），但抽帧 / 抠像 /
  * 合成全是本地的，调参数不用重新出片。所以命令按阶段拆开，而 `run` 只是
@@ -3311,21 +3235,21 @@ function parseVideoFlags(raw) {
 const VIDEO_HELP = [
   '视频动作帧（视频模型以首尾帧生成序列帧 → 抽帧 → 抠图 → 导入 Maker）：',
   '',
-  '  /taptap-video doctor            自检：ffmpeg / Key / 站点 / 套餐有没有视频额度',
-  '  /taptap-video new [名字]        新建作业',
-  '  /taptap-video first <图片路径>  设首帧（必填；建议绿幕/纯色背景的全身图）',
-  '  /taptap-video last <图片路径>   设尾帧（可选；只有 H3 系列和 Hailuo-02 支持）',
-  '  /taptap-video prompt <提示词>   写「角色在做什么」',
-  '  /taptap-video run               一次跑完：提交视频 → 等 → 抽帧 → 抠像 → 合成',
-  '  /taptap-video poll              只查视频进度（可反复调；重启后也能接着查）',
-  '  /taptap-video frames [--count 12] [--arrange uniform|first-last|loop]',
-  '  /taptap-video key [--chroma auto|green|blue|magenta] [--tol 40]',
-  '  /taptap-video sheet [--cell 256] [--layout auto|row|grid]',
-  '  /taptap-video import <Maker工程目录> [--name 文件名] [--fps 12]',
-  '  /taptap-video status           看当前作业进度与逐帧抠像报告',
-  '  /taptap-video models           列出视频模型、是否支持尾帧、大致单价',
-  '  /taptap-video lanes            查看/调整视频通道顺序与开关',
-  '    /taptap-video lanes --order minimax,relay --off local --fallback on',
+  '  /game-video doctor            自检：ffmpeg / Key / 站点 / 套餐有没有视频额度',
+  '  /game-video new [名字]        新建作业',
+  '  /game-video first <图片路径>  设首帧（必填；建议绿幕/纯色背景的全身图）',
+  '  /game-video last <图片路径>   设尾帧（可选；只有 H3 系列和 Hailuo-02 支持）',
+  '  /game-video prompt <提示词>   写「角色在做什么」',
+  '  /game-video run               一次跑完：提交视频 → 等 → 抽帧 → 抠像 → 合成',
+  '  /game-video poll              只查视频进度（可反复调；重启后也能接着查）',
+  '  /game-video frames [--count 12] [--arrange uniform|first-last|loop]',
+  '  /game-video key [--chroma auto|green|blue|magenta] [--tol 40]',
+  '  /game-video sheet [--cell 256] [--layout auto|row|grid]',
+  '  /game-video import <Maker工程目录> [--name 文件名] [--fps 12]',
+  '  /game-video status           看当前作业进度与逐帧抠像报告',
+  '  /game-video models           列出视频模型、是否支持尾帧、大致单价',
+  '  /game-video lanes            查看/调整视频通道顺序与开关',
+  '    /game-video lanes --order minimax,relay --off local --fallback on',
   '',
   '计费：只有 `run` / 提交视频那一步花钱（H3 768P 约 ¥0.5/秒，4 秒 ≈ ¥2）。',
   '抽帧 / 抠像 / 合成 / 导入全是本地计算，反复调参数不产生费用。',
@@ -3357,7 +3281,7 @@ function renderVideoJob(job, home) {
     lines.push(`    时间 ${when}${ledger.taskId ? ` · task ${ledger.taskId}` : ''}`)
     if (ledger.error) lines.push(`    错误 ${ledger.error}`)
     if (ledger.state === 'inflight') {
-      lines.push('    → 先 /taptap-video poll 查进度；确认服务端确实没有该任务后，再用 --yes 重提。')
+      lines.push('    → 先 /game-video poll 查进度；确认服务端确实没有该任务后，再用 --yes 重提。')
     }
   }
   if (job.frames?.status === 'ready') {
@@ -3452,11 +3376,11 @@ async function videoCommand(home, rawInput) {
         const cost = estimateCostCny({ model: m.id, duration: m.protocol === 'v2' ? 4 : 6, resolution: m.resolutions[0] })
         lines.push(`  ${m.supportsLastFrame ? '★' : ' '} ${m.id.padEnd(24)} ${m.note}${cost ? ` · 约 ¥${cost}/${m.protocol === 'v2' ? '4秒' : '条'}` : ''}`)
       }
-      lines.push('', '中转站：/taptap-video models --relay（列出你中转站的模型）')
-      lines.push('自选本地视频：/taptap-video use <mp4 路径>（零额度）')
+      lines.push('', '中转站：/game-video models --relay（列出你中转站的模型）')
+      lines.push('自选本地视频：/game-video use <mp4 路径>（零额度）')
       lines.push('')
       lines.push('🚫 换模型必须由用户决定：视频按秒计费，插件不会自动替换模型。')
-      lines.push('   要换请让用户明确说，再用：/taptap-video set --model <模型名>')
+      lines.push('   要换请让用户明确说，再用：/game-video set --model <模型名>')
       return { kind: 'success', text: lines.join('\n') }
     }
 
@@ -3472,7 +3396,7 @@ async function videoCommand(home, rawInput) {
           lines.push(`  ${on ? '✓' : '·'} ${labelOf[id] ?? id}${on ? '' : '（已关闭）'}`)
         }
         lines.push(`  额度不足自动换通道：${cfg.autoFallback ? '开' : '关'}`)
-        lines.push('', '改法：/taptap-video lanes --order minimax,relay --on local --off relay --fallback on')
+        lines.push('', '改法：/game-video lanes --order minimax,relay --on local --off relay --fallback on')
         return { kind: 'success', text: lines.join('\n') }
       }
       const patch = { groups: { video: {} } }
@@ -3546,7 +3470,7 @@ async function videoCommand(home, rawInput) {
         for (const note of d.probe.notes ?? []) lines.push(`    · ${note}`)
         if (d.probe.hint) lines.push('', `  ⚠ ${d.probe.hint}`)
       }
-      if (d.backends.relay) lines.push('', `  想验证中转站：/taptap-video models --relay`)
+      if (d.backends.relay) lines.push('', `  想验证中转站：/game-video models --relay`)
       if (!d.hasKey) {
         const found = discoverMinimaxKey(home)
         if (found.found) {
@@ -3567,16 +3491,16 @@ async function videoCommand(home, rawInput) {
           `已建作业 ${job.id}（${job.name}）`,
           '',
           '接下来：',
-          `  /taptap-video first <首帧图片路径>`,
-          `  /taptap-video prompt <角色在做什么>`,
-          `  /taptap-video run`,
+          `  /game-video first <首帧图片路径>`,
+          `  /game-video prompt <角色在做什么>`,
+          `  /game-video run`,
         ].join('\n'),
       }
     }
 
     if (sub === 'first' || sub === 'last' || sub === '首帧' || sub === '尾帧') {
       const kind = (sub === 'last' || sub === '尾帧') ? 'lastFrame' : 'firstFrame'
-      if (rest === '') return { kind: 'error', text: `用法：/taptap-video ${sub} <图片路径>` }
+      if (rest === '') return { kind: 'error', text: `用法：/game-video ${sub} <图片路径>` }
       let job = pickVideoJob(home, raw)
       // 自动建作业必须继承设置页模型（createJob 的红线注释：不传就退回内置
       // 默认 H3，等于替用户换了计费模型）。
@@ -3589,29 +3513,29 @@ async function videoCommand(home, rawInput) {
     }
 
     if (sub === 'prompt' || sub === '提示词') {
-      if (rest === '') return { kind: 'error', text: '用法：/taptap-video prompt <提示词>' }
+      if (rest === '') return { kind: 'error', text: '用法：/game-video prompt <提示词>' }
       let job = pickVideoJob(home, raw)
       // 同上：自动建作业继承设置页模型，不退回内置默认（视频按秒计费）。
       if (!job) job = createVideoJob(home, undefined, { model: config.model })
       const updated = saveVideoJob(home, job.id, { prompt: rest })
-      return { kind: 'success', text: `已写提示词 → 作业 ${updated.id}:\n  ${rest}\n\n下一步：/taptap-video run` }
+      return { kind: 'success', text: `已写提示词 → 作业 ${updated.id}:\n  ${rest}\n\n下一步：/game-video run` }
     }
 
     if (sub === 'status' || sub === '状态') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'success', text: `还没有作业。开始：/taptap-video new\n\n${VIDEO_HELP}` }
+      if (!job) return { kind: 'success', text: `还没有作业。开始：/game-video new\n\n${VIDEO_HELP}` }
       return { kind: 'success', text: renderVideoJob(job, home) }
     }
 
     if (sub === 'poll' || sub === '查') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const updated = await pollJobVideo(home, job.id, config)
       return { kind: 'success', text: renderVideoJob(updated, home) }
     }
 
     if (sub === 'use' || sub === '用') {
-      if (rest === '') return { kind: 'error', text: '用法：/taptap-video use <mp4 路径>（挂本地视频，零额度）' }
+      if (rest === '') return { kind: 'error', text: '用法：/game-video use <mp4 路径>（挂本地视频，零额度）' }
       let job = pickVideoJob(home, raw)
       if (!job) job = createVideoJob(home, undefined, { model: config.model })
       const forced = hasApproval(raw)
@@ -3628,25 +3552,25 @@ async function videoCommand(home, rawInput) {
             : `已挂上本地视频 → 作业 ${updated.id}（${updated.video.width}×${updated.video.height}，${(updated.video.duration ?? 0).toFixed(2)}s）`,
           '',
           '这一步不花钱。接下来：',
-          '  /taptap-video frames → /taptap-video key → /taptap-video sheet',
+          '  /game-video frames → /game-video key → /game-video sheet',
         ].join('\n'),
       }
     }
 
     if (sub === 'backend' || sub === '后端') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const which = (rest.split(/\s+/)[0] ?? '').trim()
       if (!['auto', 'minimax', 'relay', 'local'].includes(which)) {
         return {
           kind: 'error',
           text: [
-            '用法：/taptap-video backend auto|minimax|relay|local',
+            '用法：/game-video backend auto|minimax|relay|local',
             '',
             '  auto     按可用性自动挑（配了中转站优先，其次 MiniMax Key）',
             '  minimax  MiniMax 官方（订阅 Key 或按量 Key）',
             '  relay    视频中转站（OpenAI 兼容 / 自定义端点）',
-            '  local    自选本地视频（配合 /taptap-video use <mp4>）',
+            '  local    自选本地视频（配合 /game-video use <mp4>）',
           ].join('\n'),
         }
       }
@@ -3656,7 +3580,7 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'frames' || sub === '抽帧') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const flags = parseVideoFlags(raw)
       const overrides = {}
       if (flags.count) overrides.frameCount = Number(flags.count)
@@ -3668,7 +3592,7 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'key' || sub === '抠图') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const flags = parseVideoFlags(raw)
       const overrides = {}
       if (flags.chroma) overrides.chroma = flags.chroma
@@ -3682,7 +3606,7 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'sheet' || sub === '合成') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const flags = parseVideoFlags(raw)
       const overrides = {}
       if (flags.cell) {
@@ -3697,10 +3621,10 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'import' || sub === '导入') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const flags = parseVideoFlags(raw)
       const target = flags.project ?? rest.replace(/--\S+\s+\S+/g, '').trim()
-      if (!target) return { kind: 'error', text: '用法：/taptap-video import <Maker工程目录> [--name 文件名] [--fps 12]' }
+      if (!target) return { kind: 'error', text: '用法：/game-video import <Maker工程目录> [--name 文件名] [--fps 12]' }
       const result = await importToMaker(home, job.id, {
         projectDir: target,
         assetName: flags.name,
@@ -3725,7 +3649,7 @@ async function videoCommand(home, rawInput) {
 
     if (sub === 'set' || sub === '设置') {
       const job = pickVideoJob(home, raw)
-      if (!job) return { kind: 'error', text: '没有作业。先 /taptap-video new' }
+      if (!job) return { kind: 'error', text: '没有作业。先 /game-video new' }
       const flags = parseVideoFlags(raw)
       const settings = {}
       if (flags.model) settings.model = flags.model
@@ -3765,7 +3689,7 @@ async function videoCommand(home, rawInput) {
             '没有可用的视频提交通道：MiniMax 无 Key，中转站也未配置。',
             found.found ? `发现 ${found.source} 的登录态（${found.keyPrefix}），但插件配置里是空的 —— 在设置页「视频生成」点保存采用，或设环境变量 MINIMAX_API_KEY。` : '',
             '配好任意一条即可：设置页「视频中转站」或「MiniMax」。',
-            '先跑 /taptap-video doctor 看看还缺什么。',
+            '先跑 /game-video doctor 看看还缺什么。',
           ].filter(Boolean).join('\n'),
         }
       }
@@ -3786,8 +3710,8 @@ async function videoCommand(home, rawInput) {
           ...(usedBackend === '中转站' ? ['（中转站按它自己的计费口径结算，官方单价表不适用）'] : []),
           '',
           '生成通常要 1~6 分钟。接下来：',
-          '  /taptap-video poll    查进度（可以反复调，进程重启也能接着查）',
-          '  出片后：/taptap-video frames → /taptap-video key → /taptap-video sheet',
+          '  /game-video poll    查进度（可以反复调，进程重启也能接着查）',
+          '  出片后：/game-video frames → /game-video key → /game-video sheet',
         ].join('\n'),
       }
     }

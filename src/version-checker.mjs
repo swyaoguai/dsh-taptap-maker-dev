@@ -18,7 +18,14 @@ import { fileURLToPath } from 'node:url'
 import { dataDir, writeJson } from './paths.js'
 
 const PKG_PATH = fileURLToPath(new URL('../package.json', import.meta.url))
-const REPO_RAW = 'https://raw.githubusercontent.com/swyaoguai/dsh-taptap-maker-dev/main/package.json'
+/**
+ * 版本源候选：新仓库名优先，旧仓库名兜底。
+ * ⚠️ 仓库改名期间两边都可能短暂 404 —— 所以永远保持「至少一个可用」。
+ */
+const REPO_RAW_CANDIDATES = [
+  'https://raw.githubusercontent.com/swyaoguai/dsh-game-forge/main/package.json',
+  'https://raw.githubusercontent.com/swyaoguai/dsh-taptap-maker-dev/main/package.json',
+]
 export const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000 // 6 小时
 
 /** 本机 package.json 里的版本号。 */
@@ -107,13 +114,31 @@ function writeCachedCheck(dshHome, record) {
 /**
  * 抓远程最新版本号。
  *
+ * 依次尝试「新仓库名 → 旧仓库名」：插件从 `dsh-taptap-maker-dev` 改名成
+ * `dsh-game-forge`，但 GitHub 上的仓库不一定同一时间改。只写新名字的话，
+ * 仓库没跟着改的这段时间「检查更新」会一直 HTTP 404（用户看到的是"插件坏了"）；
+ * 只写旧名字则改名后又失效。两个都试，任一命中即可。
+ *
  * @param {{fetchImpl?: typeof fetch, timeoutMs?: number}} [opts]
  *   fetchImpl 供测试注入，避免真实联网。
  * @returns {Promise<string>} latest 版本号
  */
 export async function fetchLatestVersion({ fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
-  const res = await fetchImpl(REPO_RAW, {
-    headers: { Accept: 'application/json', 'User-Agent': 'dsh-taptap-maker-dev' },
+  const errors = []
+  for (const url of REPO_RAW_CANDIDATES) {
+    try {
+      return await fetchVersionFrom(url, { fetchImpl, timeoutMs })
+    } catch (error) {
+      errors.push(`${url.includes('game-forge') ? '新' : '旧'}仓库：${error?.message ?? error}`)
+    }
+  }
+  throw new Error(errors.join('；') || '没有可用的版本源')
+}
+
+/** 从**一个** URL 抓版本号（失败即抛，由 fetchLatestVersion 汇总）。 */
+async function fetchVersionFrom(url, { fetchImpl = fetch, timeoutMs = 10_000 } = {}) {
+  const res = await fetchImpl(url, {
+    headers: { Accept: 'application/json', 'User-Agent': 'dsh-game-forge' },
     signal: AbortSignal.timeout(timeoutMs),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -161,30 +186,49 @@ export function shouldCheck(dshHome) {
 
 /* ── 后台定时检查 ────────────────────────────────────────────────────── */
 
+/** Unref 一个 timer，别让它拖住进程退出。 */
+function unref(timer) {
+  try { timer.unref?.() } catch { /* Node < 18.14 无 unref */ }
+}
+
 let intervalId = null
+let firstCheckId = null
 
 /**
- * 启动后台检查：先按冷却判断要不要立即查一次，之后每 6 小时一次。
+ * 启动后台检查：先延迟一小段再按冷却判断要不要查一次，之后每 6 小时一次。
  * 全部 fire-and-forget，任何失败都不影响插件加载。
+ *
+ * ⚠️ 返回 disposer，**调用方必须交给 ctx.effect**：
+ *  - 以前不给 disposer，`intervalId` 又是模块级单例 —— 插件卸载后定时器继续
+ *    联网；热重载时因为是新的模块实例，`intervalId !== null` 判断失效，会再起
+ *    一个 → 多个定时器叠加，同一个 6 小时任务跑 N 份。
+ * @returns {() => void} 停止函数（幂等）
  */
-export function startBackgroundCheck(dshHome, { logger } = {}) {
-  if (intervalId !== null) return
+export function startBackgroundCheck(dshHome, { logger, startDelayMs = 30000 } = {}) {
+  if (intervalId !== null) return stopBackgroundCheck
   const run = () => {
     if (!shouldCheck(dshHome)) return
     checkForUpdates(dshHome)
       .then((r) => {
-        if (r.error) logger?.warn?.(`taptap-maker-dev 版本检查失败：${r.error}`)
-        else if (r.isOutdated) logger?.info?.(`taptap-maker-dev 有新版本：${r.current} → ${r.latest}`)
+        if (r.error) logger?.warn?.(`game-forge 版本检查失败：${r.error}`)
+        else if (r.isOutdated) logger?.info?.(`game-forge 有新版本：${r.current} → ${r.latest}`)
       })
       .catch(() => { /* 上面已经兜过，这里防御 */ })
   }
-  run()
+  // 别在插件加载的那一瞬间就去抢网络/启动时间（设置页首屏比版本号重要）。
+  firstCheckId = setTimeout(run, Math.max(0, Number(startDelayMs) || 0))
+  unref(firstCheckId)
   intervalId = setInterval(run, CHECK_INTERVAL_MS)
-  // 不让定时器阻止进程退出。
-  try { intervalId.unref?.() } catch { /* Node < 18.14 无 unref */ }
+  unref(intervalId)
+  return stopBackgroundCheck
 }
 
+/** 停掉后台检查（幂等；插件卸载时由 ctx.effect 调用）。 */
 export function stopBackgroundCheck() {
+  if (firstCheckId !== null) {
+    clearTimeout(firstCheckId)
+    firstCheckId = null
+  }
   if (intervalId !== null) {
     clearInterval(intervalId)
     intervalId = null

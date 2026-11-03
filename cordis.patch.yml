@@ -1,10 +1,10 @@
-# dsh-taptap-maker-dev bundle patch.
+# dsh-game-forge bundle patch.
 #
 # 一行 insert 即把插件挂到 Host 侧。name 必须是裸包名（携带插件半身）。
 # config 可留空，用户也可在此覆盖 image / skills / maker 配置（见 README）。
 - insert:
-    - id: taptap-maker-dev
-      name: 'dsh-taptap-maker-dev'
+    - id: game-forge
+      name: 'dsh-game-forge'
       config:
         maker:
           blockCreditTools: true
@@ -20,3 +20,6 @@
           sources:
             - "git:https://github.com/pixijs/pixijs-skills.git"
             - "git:https://github.com/MRCalderon3D/everything-game-dev-code.git"
+        cocos:
+          # 同时允许几个 Cocos 构建。默认 1 = 全机串行，避免多个项目构建互相拖垮。
+          buildSlots: 1

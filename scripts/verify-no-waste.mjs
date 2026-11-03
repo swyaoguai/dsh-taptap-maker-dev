@@ -117,7 +117,7 @@ console.log('\n[5] 轮询限流：只提示退避，不改状态、不额外扣�
 
 console.log('\n[6] 生图链路同样不许在「结果未知」时重试')
 {
-  const img = fs.readFileSync(new URL('../src/taptap-image.mjs', import.meta.url), 'utf8')
+  const img = fs.readFileSync(new URL('../src/game-image-relay.mjs', import.meta.url), 'utf8')
   const catchBody = /} catch \(error\) \{[\s\S]{0,600}?\n {4}\}/.exec(img)?.[0] ?? ''
   ok(catchBody.length > 0, '能找到生图的 fetch catch 分支')
   ok(/重试有重复扣费的风险|重复扣费/.test(catchBody), '生图也写明了「重试可能重复扣费」')
@@ -134,7 +134,7 @@ console.log('\n[7] 「已生成但下载/写盘失败」不许换账号重生成
 {
   // 生图：图已经生成、只是本地保存失败（write_failed）。换账号重跑 = 再花
   // 一份配额去生成一张已经存在的图。write_failed 曾漏在提前退出名单外。
-  const gpt = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
+  const gpt = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
   const breakLine = /if \(last\?\.error === 'no_image'[\s\S]{0,200}?break/.exec(gpt)?.[0] ?? ''
   ok(breakLine.length > 0, '能找到生图轮换的提前退出判断')
   ok(breakLine.includes('write_failed'), '生图：write_failed（图已生成、仅本地写盘失败）也会停止轮换')
@@ -142,7 +142,7 @@ console.log('\n[7] 「已生成但下载/写盘失败」不许换账号重生成
 
   // BGM：曲已经生成、只是下载失败。片段里只写 steps.download_error、error 为空，
   // 旧判定会当成普通失败走轮换 → 换账号再生成一首 = 白烧一份额度。
-  const bgm = fs.readFileSync(new URL('../src/taptap-bgm-web.mjs', import.meta.url), 'utf8')
+  const bgm = fs.readFileSync(new URL('../src/game-bgm-web.mjs', import.meta.url), 'utf8')
   const structural = /const structural = [\s\S]{0,500}?if \(structural\) break/.exec(bgm)?.[0] ?? ''
   ok(structural.length > 0, '能找到 BGM 的结构性失败判断')
   ok(/steps\?\.download_error/.test(structural), 'BGM：download_error（曲已生成、仅下载失败）视为结构性失败并停止轮换')
@@ -157,7 +157,7 @@ console.log('\n[8] 视频 running 悬空状态有出口（不会把用户锁死�
   ok(/downloadError/.test(block), '已生成仅下载失败时，提示去 poll 重试下载（而不是重投）')
   ok(/requireApproval/.test(block), '无 task_id 的悬空状态需要显式授权（--yes）才重投')
   ok(/没有拿到 task_id/.test(block), '文案说清了「停在提交中」这一悬空状态')
-  ok(/taptap-video status/.test(block) || /readSubmitLedger/.test(block), '给出确认手段（看台账/status）')
+  ok(/game-video status/.test(block) || /readSubmitLedger/.test(block), '给出确认手段（看台账/status）')
 }
 
 fs.rmSync(scratch, { recursive: true, force: true })

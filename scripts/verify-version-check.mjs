@@ -117,7 +117,10 @@ console.log('\n[5] index.js / client.js 接线')
   ok(idx.includes("sub === 'version/check'"), '有 POST /version/check 路由')
   ok(/function AboutCard\(/.test(cli), '设置页有 AboutCard 组件')
   ok(cli.includes('API_BASE}/version/check'), '「检查更新」按钮调用 POST /version/check')
-  ok(cli.includes("id: 'about'"), '新增「关于」标签页')
+  // 设置页后来重排成「开始 / 图片 / 视频 / 音频 / 其他」五个标签页，关于卡并进「其他」，
+  // 不再有独立的 id: 'about'。这里断言的是「关于卡真的被渲染出来」而不是旧标签名。
+  ok(/h\(AboutCard\)/.test(cli), '关于卡被渲染进设置页（重排后归入「其他」标签）')
+  ok(cli.includes("id: 'more'"), '设置页仍有承载关于卡的分组')
   ok(cli.includes('个账号已登录') === false || true, '（占位）')
   // 后台检查必须不阻塞插件加载：startBackgroundCheck 是同步调用 + 内部 fire-and-forget
   const vc = fs.readFileSync(new URL('../src/version-checker.mjs', import.meta.url), 'utf8')

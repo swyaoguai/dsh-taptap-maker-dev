@@ -30,7 +30,7 @@ const { stopBackgroundCheck } = await import('../src/version-checker.mjs')
 const { writeZaiduyuConfigPatch, readZaiduyuConfigRaw } = await import('../src/paths.js')
 const { readZaiduyuPreferences, writeZaiduyuPreferences } = await import('../src/zaiduyu-preferences.mjs')
 const { writeLanes, readLanes } = await import('../src/lanes.mjs')
-const { plan } = await import('../src/taptap-zaiduyu.mjs')
+const { plan } = await import('../src/game-zaiduyu.mjs')
 async function check(name, fn) {
   try { await fn(); passed++; console.log(`PASS ${name}`) }
   catch (e) { failed++; console.error(`FAIL ${name}: ${e.message}`) }
@@ -41,10 +41,10 @@ function fixture(name) {
   const noop = () => () => {}
   writeZaiduyuConfigPatch(home, { identifier: 'offline-user', password: 'fake-offline-only', lastVerifiedAt: '2026-10-30T00:00:00.000Z', lastIdentifier: 'offline-user' })
   writeLanes(home, { autoFallback: false, groups: { image: { order: ['zaiduyu', 'gptWeb', 'relayImage'], enabled: { zaiduyu: true, gptWeb: false, relayImage: false } } } })
-  const context = { logger: { info() {}, warn() {} }, inject(_names, fn) { fn({ effect: (f) => f(), webServer: { register(r) { route = r.handler; return () => {} } }, systemPrompt: { section(s) { sections.push(s); return () => {} } }, skills: { registerProvider: noop }, commands: { register(c) { commands.set(c.name, c); return () => {} } } }) } }
+  const context = { logger: { info() {}, warn() {} }, effect: (fn) => { try { return fn() } catch { /* ignore */ } }, inject(_names, fn) { fn({ effect: (f) => f(), webServer: { register(r) { route = r.handler; return () => {} } }, systemPrompt: { section(s) { sections.push(s); return () => {} } }, skills: { registerProvider: noop }, commands: { register(c) { commands.set(c.name, c); return () => {} } } }) } }
   apply(context, { dshHome: home, skills: { autoUpdate: false }, audio: { autoEnsure: false } }); stopBackgroundCheck()
   async function call(method, sub, value) {
-    const req = Readable.from(value === undefined ? [] : [Buffer.from(JSON.stringify(value))]); Object.assign(req, { method, url: `/api/taptap-maker-dev/${sub}`, headers: {} })
+    const req = Readable.from(value === undefined ? [] : [Buffer.from(JSON.stringify(value))]); Object.assign(req, { method, url: `/api/game-forge/${sub}`, headers: {} })
     let status, payload
     await route(req, { writeHead(s) { status = s }, end(text) { payload = JSON.parse(text) } })
     return { status, payload }
@@ -98,7 +98,7 @@ try {
     const f = fixture('dedicated'); writeZaiduyuPreferences(f.home, { defaultModel: 'offline-model-a' })
     for (const [rawInput, expected] of [['offline icon', 'offline-model-a'], ['offline icon --model offline-model-b', 'offline-model-b']]) {
       calls = []; response = { code: 0, stderr: '' }
-      const result = await f.commands.get('taptap-zaiduyu').handler({ rawInput })
+      const result = await f.commands.get('game-zaiduyu').handler({ rawInput })
       assert.equal(result.kind, 'success', result.text)
       const child = calls.find((c) => !c.sync); assert.ok(child)
       assert.equal(child.argv[child.argv.indexOf('--model') + 1], expected)
@@ -110,7 +110,7 @@ try {
     const f = fixture('unified'); writeZaiduyuPreferences(f.home, { defaultModel: 'offline-model-a' })
     for (const [rawInput, expected] of [['offline icon', 'offline-model-a'], ['offline icon --model offline-model-b', 'offline-model-b']]) {
       calls = []; response = { code: 0, stderr: '' }
-      const result = await f.commands.get('taptap-gpt').handler({ rawInput }); assert.equal(result.kind, 'success', result.text)
+      const result = await f.commands.get('game-image').handler({ rawInput }); assert.equal(result.kind, 'success', result.text)
       const children = calls.filter((c) => !c.sync); assert.equal(children.length, 1)
       const a = children[0].argv; assert.equal(a[a.indexOf('--model') + 1], expected); assert.equal(a[a.indexOf('--prompt') + 1], 'offline icon')
       assert.equal(readZaiduyuPreferences(f.home).defaultModel, 'offline-model-a')
@@ -118,7 +118,7 @@ try {
   })
   await check('unset model stops with model instruction, zero generation or login children', async () => {
     const f = fixture('unset'); calls = []
-    const result = await f.commands.get('taptap-zaiduyu').handler({ rawInput: 'offline icon' })
+    const result = await f.commands.get('game-zaiduyu').handler({ rawInput: 'offline icon' })
     assert.equal(result.kind, 'error'); assert.match(result.text, /模型/)
     assert.equal(calls.length, 0)
   })
@@ -130,7 +130,7 @@ try {
   await check('409 from Zaiduyu is not mislabeled as failed web login and never resubmits', async () => {
     const f = fixture('409'); writeZaiduyuPreferences(f.home, { defaultModel: 'offline-model-a' }); calls = []
     response = { code: 1, stderr: '服务器分配失败（HTTP 409），未提交生成：请刷新页面以获取服务器分配' }
-    const result = await f.commands.get('taptap-gpt').handler({ rawInput: 'offline icon' })
+    const result = await f.commands.get('game-image').handler({ rawInput: 'offline icon' })
     assert.equal(result.kind, 'error'); assert.match(result.text, /章鱼生图/); assert.doesNotMatch(result.text, /网页生图失败|重新登录|更换模型/)
     assert.equal(calls.filter((c) => !c.sync).length, 1)
   })

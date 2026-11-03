@@ -51,6 +51,11 @@ const renderCard = (fnName, info) => {
   const ctx = {
     h, S, API_BASE: '/api', console,
     useEffect: noop, useCallback: (fn) => fn,
+    // client.js 的工厂里解构了 useRef（BGM 波形 canvas 要用），stub 少了它
+    // 会让整个测试在渲染第一张卡时就 ReferenceError —— 那是测试环境缺件，
+    // 不是产品回归。这里补齐，并让 ref 返回一个稳定的 {current:null} 壳。
+    useRef: (init) => ({ current: init ?? null }),
+    useMemo: (fn) => fn(),
     setInterval: () => 0, clearInterval: noop, setTimeout: noop, clearTimeout: noop,
     StatusChip: (p) => ({ tag: '#Chip', props: p, kids: [] }),
     Toggle: (p) => ({ tag: '#Toggle', props: p, kids: [] }),

@@ -130,7 +130,7 @@ def cmd_check(_args) -> int:
     else:
         print("GPU         : 未检测到 NVIDIA GPU（nvidia-smi 不可用）")
         print("结论        : 本方案需要 NVIDIA 显卡（建议 8GB 显存）；当前机器不建议部署，"
-              "用 CC0 音效库（taptap-audio）或在线通道更合适")
+              "用 CC0 音效库（game-audio）或在线通道更合适")
     free_gb = None
     drive = os.path.splitdrive(home)[0] or "C:"
     try:

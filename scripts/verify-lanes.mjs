@@ -57,7 +57,7 @@ console.log('\n[3] 脏数据归一化')
 {
   // 模拟磁盘上被手改坏的 lanes.json
   const { writeFileSync } = await import('node:fs')
-  writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'), JSON.stringify({
+  writeFileSync(path.join(home, 'game-forge', 'lanes.json'), JSON.stringify({
     autoFallback: 'yes',
     groups: {
       video: { order: ['relay', 'relay', '不存在的通道', 42], enabled: { relay: false, minimax: false, local: false, 幽灵: true } },
@@ -72,7 +72,7 @@ console.log('\n[3] 脏数据归一化')
   ok(cfg.groups.video.order.some((id) => cfg.groups.video.enabled[id]), '脏数据里全 false 也仍保留一条可用')
   ok(cfg.groups.image.order.length === 3, 'groups.image 为 null 时回落到默认', cfg.groups.image.order.join('>'))
 
-  writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'), '{ 这不是 JSON', 'utf8')
+  writeFileSync(path.join(home, 'game-forge', 'lanes.json'), '{ 这不是 JSON', 'utf8')
   ok(readLanes(home).groups.video.order.length === 3, '文件损坏时不抛异常，退回默认')
 }
 
@@ -149,24 +149,31 @@ console.log('\n[6] 候选序列 = 开关 + 顺序 + 就绪判断')
 console.log('\n[7] 逐条开关被命令层尊重 + 统一入口已接线（源码契约）')
 {
   // [Bug 2026-10-24] 两套开关曾脱节：设置页「生成通道」卡关掉 gptWeb 后，
-  // /taptap-gpt 只读 imageLane.json 总开关照样弹浏览器。锁死三个契约：
+  // /game-image 只读 imageLane.json 总开关照样弹浏览器。锁死三个契约：
   //   1. generateWithRotation 同时检查 lanes 逐条开关；
-  //   2. /taptap-image 入口检查 relayImage 逐条开关；
-  //   3. /taptap-gpt 生图路径走统一入口 generateImage（autoFallback 才有入口）。
+  //   2. /game-image-relay 入口检查 relayImage 逐条开关；
+  //   3. /game-image 生图路径走统一入口 generateImage（autoFallback 才有入口）。
   // 相对 cwd 的路径在别的工作目录跑会 ENOENT —— 用脚本自身位置定位仓库文件。
   const here = path.dirname(fileURLToPath(import.meta.url))
-  const gpt = readFileSync(path.join(here, '..', 'src', 'taptap-gpt.mjs'), 'utf8')
-  const rot = /export async function generateWithRotation[\s\S]*?\n\}/.exec(gpt)?.[0] ?? ''
+  const gpt = readFileSync(path.join(here, '..', 'src', 'game-image-web.mjs'), 'utf8')
+  // ⚠️ 以前用 /export async function generateWithRotation[\s\S]*?\n\}/ 截函数体，
+  // 而它的签名是多行解构（`... {\n  accountId, ...\n} = {}) {`），非贪婪匹配会在
+  // 参数列表末尾的 `}` 就收尾 —— 断言于是永远失败，而这个"保护"其实一直没生效。
+  // 直接对全文断言：这个调用点在文件里只出现一次，且解析出的函数确实包含它。
+  const rotStart = gpt.indexOf('export async function generateWithRotation')
+  const rotEnd = gpt.indexOf('export async function generateImage', rotStart)
+  const rot = rotStart >= 0 && rotEnd > rotStart ? gpt.slice(rotStart, rotEnd) : ''
+  ok(rot.length > 0, '解析出 generateWithRotation 源码（用下一个 export 作边界）')
   ok(rot.includes("isLaneEnabled(dshHome, 'image', 'gptWeb')"), 'generateWithRotation 检查 image/gptWeb 逐条开关')
   const idx = readFileSync(path.join(here, '..', 'index.js'), 'utf8')
-  ok(/relayImageLaneEnabled\(home\)/.test(idx), '/taptap-image 入口检查 relayImage 逐条开关')
-  ok(/gptGenerateImage\(home, prompt/.test(idx), '/taptap-gpt 生图走统一入口 generateImage（含 autoFallback 回退）')
+  ok(/relayImageLaneEnabled\(home\)/.test(idx), '/game-image-relay 入口检查 relayImage 逐条开关')
+  ok(/gptGenerateImage\(home, prompt/.test(idx), '/game-image 生图走统一入口 generateImage（含 autoFallback 回退）')
 
   // 章鱼生图（积分站）接入统一入口：ready 判断 + 命令层开关都要算数，
   // 否则就是「设置页能排它、实际永远走不到」（历史上 relay 回退踩过同样的坑）。
   ok(/zaiduyu: \(\) =>/.test(gpt), 'generateImage 的 ready 表里有 zaiduyu')
   ok(/laneId === 'zaiduyu'/.test(gpt), 'generateImage 的分派里有 zaiduyu 分支')
-  ok(/zaiduyuReady/.test(idx) && /zaiduyuLaneEnabled\(home\)/.test(idx), '/taptap-gpt 入口传了 zaiduyu 就绪判断与逐条开关')
+  ok(/zaiduyuReady/.test(idx) && /zaiduyuLaneEnabled\(home\)/.test(idx), '/game-image 入口传了 zaiduyu 就绪判断与逐条开关')
   ok(/zaiduyu: '需要在下面「章鱼生图/.test(idx), '未配置时给界面一句「去哪儿填账号」')
 }
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * taptap-bgm-web — drive the MiniMax Audio web page with a PERSISTENT browser
+ * game-bgm — drive the MiniMax Audio web page with a PERSISTENT browser
  * profile, so the user logs in ONCE and later runs are automatic.
  *
  * Why this exists: the MiniMax music API returns HTTP 410 to new-user accounts
@@ -11,7 +11,7 @@
  * We do NOT scrape tokens out of an iframe. `www.minimax.io/audio` sends no
  * X-Frame-Options / CSP frame-ancestors, but lifting a session token from a
  * third-party page would be both fragile and improper. Instead we keep a
- * dedicated Chromium profile directory (`~/.dsh/taptap-maker-dev/browser-profile`);
+ * dedicated Chromium profile directory (`~/.dsh/game-forge/browser-profile`);
  * cookies persist there, so after one manual login the session survives.
  *
  * Commands:
@@ -24,7 +24,7 @@
  * DOM selectors are best-effort and configurable; when the page changes, the
  * script reports exactly what it could and could not find instead of lying.
  *
- * @module src/taptap-bgm-web.mjs
+ * @module src/game-bgm-web.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -87,7 +87,7 @@ export function profileDir(dshHome, accountId) {
  * BGM 下载目录。
  *
  * 在 Maker 项目里跑 → `<项目>/sucai/bgm/`；否则退回
- * `$DSH_HOME/taptap-maker-dev/bgm-downloads/`。与图片 / 视频同一套解析规则
+ * `$DSH_HOME/game-forge/bgm-downloads/`。与图片 / 视频同一套解析规则
  * （见 src/assets.mjs），三类素材因此收在同一处。
  */
 export function downloadDir(dshHome, { projectDir } = {}) {
@@ -1011,7 +1011,7 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
       rotated: false,
       tried: [],
       failures: [],
-      hint: 'BGM 通道已在设置页关闭；打开它，或改用本地 CC0 曲库（/taptap-audio）。',
+      hint: 'BGM 通道已在设置页关闭；打开它，或改用本地 CC0 曲库（/game-audio）。',
     }
   }
   const pool = readBgmPool(dshHome)
@@ -1085,7 +1085,7 @@ export async function generateWithRotation(dshHome, prompt, { out, waitMs = 3000
     rotated: tried.length > 1,
     tried,
     failures,
-    hint: '账号池：/taptap-bgm pool list 查看，login --account <名> 登录，pool unban 恢复冷却账号',
+    hint: '账号池：/game-bgm pool list 查看，login --account <名> 登录，pool unban 恢复冷却账号',
   }
 }
 
@@ -1123,7 +1123,7 @@ async function main() {
     if (sub === 'add') {
       const id = args.id
       if (typeof id !== 'string' || id.length === 0) {
-        process.stderr.write('usage: taptap-bgm-web pool add --id <短名> [--label 备注]\n')
+        process.stderr.write('usage: game-bgm pool add --id <短名> [--label 备注]\n')
         process.exitCode = 2
         return
       }
@@ -1147,7 +1147,7 @@ async function main() {
       // deleted the main MiniMax login. Require the id.
       const id = args.id
       if (typeof id !== 'string' || id.length === 0) {
-        process.stderr.write('usage: taptap-bgm pool remove --id <短名>（不能省略，否则会误删主账号登录态）\n')
+        process.stderr.write('usage: game-bgm pool remove --id <短名>（不能省略，否则会误删主账号登录态）\n')
         process.exitCode = 2
         return
       }
@@ -1166,7 +1166,7 @@ async function main() {
     if (sub === 'ban') {
       const id = args.id ?? (typeof argv[2] === 'string' && !argv[2].startsWith('--') ? argv[2] : undefined)
       if (typeof id !== 'string' || id.length === 0) {
-        process.stderr.write('usage: taptap-bgm pool ban --id <短名>\n')
+        process.stderr.write('usage: game-bgm pool ban --id <短名>\n')
         process.exitCode = 2
         return
       }
@@ -1211,7 +1211,7 @@ async function main() {
     // args._[0] 是子命令本身（gen），位置参数提示词在其后。
     const prompt = args.prompt ?? args._[1]
     if (typeof prompt !== 'string' || prompt.length === 0) {
-      process.stderr.write('usage: taptap-bgm-web gen --prompt "<提示词>" [--account <名>] [--instrumental|--lyrics]\n')
+      process.stderr.write('usage: game-bgm gen --prompt "<提示词>" [--account <名>] [--instrumental|--lyrics]\n')
       process.exitCode = 2
       return
     }

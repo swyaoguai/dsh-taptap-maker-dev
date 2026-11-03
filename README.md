@@ -1,10 +1,19 @@
-# dsh-taptap-maker-dev
+# dsh-game-forge（游戏工坊）
 
 [English](#english) | 中文
 
-为 **TapTap 制造（Maker）** 本地开发而生的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件：
-守住「不花冤枉钱」的额度红线，接入可更新的游戏开发 skills，并提供**自建的图片 / 音效 / BGM 素材通道**——
-全部走你自己的 Key 或 CC0 素材库，不消耗任何 Maker MCP 内置额度。
+**游戏开发工作流**插件（DeepSeek Harness）：按「立项 → 原型 → 内容 → 美术音频 → 手感 → 测试 → 上线」
+的进度挑 skill、出素材、守红线。
+
+- **引擎无关**：TapTap Maker（UrhoX + Lua）只是支持的一条链路，Godot / Unity / Unreal / 网页（PixiJS、Canvas）项目一样用；
+  插件会先看工程特征判断引擎，再决定加载 `taptap-maker-*` 还是 `godot-*` / `unity-*` / `web-*` 这套 skill。
+- **不花冤枉钱**：只有 TapTap Maker 的 MCP 生成工具会消耗**内置额度**，默认一律拦住（除你在对话里明确要求）；
+  插件自己的图片 / 音效 / BGM 通道走你的账号或 CC0 素材库。
+- **素材不靠猜**：图片、音效、BGM、动作帧都有确定的本地链路和落点（`<项目>/sucai/…` 或 `$DSH_HOME/game-forge/`）。
+
+> 改名说明：本插件原名 `dsh-taptap-maker-dev`（TapTap Maker 专用），0.6.0 起改为通用游戏开发工作流插件。
+> 斜杠命令统一为 `/game-*`（Maker 安装引导仍是 `/taptap-setup`）；数据目录从 `$DSH_HOME/taptap-maker-dev/`
+> **自动迁移**到 `$DSH_HOME/game-forge/`（同盘直接 rename，瞬间完成，不会复制浏览器 profile）。
 
 ## 章鱼默认模型与免费素材优先
 
@@ -14,13 +23,15 @@ HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录*
 
 找素材先查六个优先来源，但**优先来源不是免费/版权白名单**：[GameUI](https://gameui.net/)、[Interface In Game](https://interfaceingame.com/)、[enotsixlm UI Kits](https://enotsixlm.github.io/game-ui-kits/)、[LemoUI](https://lemooui.com/)、[Pixlab24](https://pixlab24.com/)、[Kenney](https://kenney.nl/assets)。Kenney 的用户输入 `/games` 是游戏目录，免费资产应查 `/assets`；参考站截图不能直接切图，MIT 代码与字体另查许可。只用逐项已核实零成本、原作者授权、商用/修改/游戏分发和通知/依赖条件的素材；不明、付费、NC/ND、盗取或有已知争议的素材停用。
 
-详细规则与证据见[免费素材 skill](<skills/taptap-maker-free-assets/SKILL.md>)，只读目录见 `GET /api/taptap-maker-dev/asset-sources`。不会自动爬站、登录、下载、生成或改用户配置。如果运行实例仍是旧版，请重载插件或重启 DSH 后使用新界面；已保存的章鱼凭据独立保留，无需重填。
+详细规则与证据见[免费素材 skill](<skills/taptap-maker-free-assets/SKILL.md>)，只读目录见 `GET /api/game-forge/asset-sources`。不会自动爬站、登录、下载、生成或改用户配置。如果运行实例仍是旧版，请重载插件或重启 DSH 后使用新界面；已保存的章鱼凭据独立保留，无需重填。
 
 ## 你会得到什么
 
 | 能力 | 说明 |
 |---|---|
-| **额度红线** | 注入系统守则：非你在对话中明确要求，禁止调用 12 个消耗 Maker 额度的生成工具。设置页有开关，关闭需二次确认，**即时生效无需重启** |
+| **游戏开发工作流** | 内置 160 个 skill 覆盖立项到上线：`game-designer`（核心循环）、`level-design`、`combat-design`、`economy-balancing`、`art-bible`、`game-feel`、`bug-triage`、`release-readiness`… 由 AI 按进度与你的需求自己挑 1~3 个，不确定时先读 `taptap-skill-router` |
+| **多引擎** | TapTap Maker / Godot / Unity / Unreal / 网页各有一套 skill；先判断引擎再动手，跨引擎对照时借思路不抄 API |
+| **额度红线** | 注入系统守则：非你在对话中明确要求，禁止调用消耗 Maker 额度的生成工具。设置页有开关，关闭需二次确认，**即时生效无需重启**；关掉它不会连带删掉工作流守则（两者是分开的两段） |
 | **ChatGPT 网页生图（首选）** | 走你自己的 ChatGPT 账号在网页里出图（免费账号即可）。登录一次，之后全自动；支持**多账号轮询**，一个触配额自动换下一个 |
 | **中转站生图（回退）** | OpenAI 兼容 `/images/generations`。填 Base URL / Key / Model，支持「获取模型」自动列出可用模型。尺寸按需传，支持高质量缩小做图标 |
 | **章鱼生图（可选第三通道）** | 整合第三方 skill：`pai.zaiduyu.top` 多模型积分站（gpt-image-2 / Z-image / Banana 等，价格实时读取）。**花的是你自己买的积分**，所以默认排在最后、需要你自己在设置页排序或显式调用；凭据由你在设置页输入并验证后存于本机；环境变量仅作兼容兜底，插件不在对话中代填或回显密码 |
@@ -32,32 +43,33 @@ HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录*
 | **视频动作帧** | 视频模型按**首尾帧**出一段动作 → 精确时间点**抽帧** → **本地抠像**（绿/蓝/品红幕，带逐帧自检）→ 对齐合成透明序列帧 → 一键导入 Maker（`.meta` + `seq.json` + Lua 切图）。只有出视频那一步花钱，抽帧/抠像/合成可无限重调 |
 | **视频三后端** | MiniMax 官方（订阅 Key / 按量 Key 自动识别）/ **视频中转站**（OpenAI 兼容 / MiniMax 协议 / 自定义路径映射）/ **自选本地视频**（零额度）。`auto` 按可用性挑，也可按作业指定 |
 | **分组式设置页** | 十几张卡按「开始 / 图片 / 视频 / 音频 / 其他」五组收拢：「开始」页第一张就是大白话的「怎么用」，下面是额度红线和通道优先级；图片和视频各自独立一页，不再混在一起 |
-| **可更新 skills** | 内置 160 个游戏开发 skill + 周期更新检测。**由 AI 按项目进度和你当前的需求自己挑**（1~3 个），不确定时先读 `taptap-skill-router` 目录；其他引擎的 skill 也不禁用，做网页版或跨引擎对照时照样能用。设置页的勾选只用来彻底屏蔽你确定用不到的 |
-| **初始化引导** | 直接用中文说「帮我初始化 taptap maker」即可触发，不必记斜杠命令 |
+| **可更新 skills** | 内置 160 个游戏开发 skill + 周期更新检测。**由 AI 按项目进度和你当前的需求自己挑**（1~3 个），不确定时先读 `taptap-skill-router` 目录；其他引擎的 skill 也不禁用。设置页的勾选只用来彻底屏蔽你确定用不到的。治理类 skill（`taptap-maker-core` / `assets` / `free-assets` / `skill-router`）标了 `pinned`，**不会被外部 skill 源同名覆盖** |
+| **TapTap Maker 初始化** | 直接用中文说「帮我初始化 taptap maker」即可触发，不必记斜杠命令（等价 `/taptap-setup`） |
+| **Cocos Creator MCP 集成** | 接编辑器内嵌的 MCP 服务（MIT 版 funplay-cocos-mcp），agent 能改场景/节点/预制体、查资源、跑构建与预览。**同时开 2~3 个项目也不会写错工程**：单一 `cocos` 命名空间 + `project` 参数路由、握手验项目身份、每项目写锁、构建全机串行。详见 [docs/cocos-mcp.md](docs/cocos-mcp.md) |
 
 ## 视频动作帧（视频 → 序列帧素材）
 
 手里只有一张静帧、想让角色**动起来**，这条链路就是干这个的：
 
 ```sh
-/taptap-video doctor                            # 自检 ffmpeg / Key / 站点 / 有没有视频额度
-/taptap-video new 剑士行走
-/taptap-video first ./refs/swordsman.png        # 首帧（绿幕全身图最理想）
-/taptap-video last  ./refs/swordsman_end.png    # 尾帧可选（H3 / Hailuo-02 才支持）
-/taptap-video prompt 角色原地走三步，全身入镜，相机固定，绿幕背景
-/taptap-video run                               # 唯一花钱的一步：提交视频
-/taptap-video poll                              # 1~6 分钟，可反复调；重启后也能接着查
-/taptap-video frames --count 12 --arrange loop  # 抽帧（本地）
-/taptap-video key --chroma auto --tol 40        # 抠像（本地，带逐帧自检报告）
-/taptap-video sheet --cell 256                  # 对齐合成整图（本地）
-/taptap-video import ../my-game --fps 12        # 导入 Maker
+/game-video doctor                            # 自检 ffmpeg / Key / 站点 / 有没有视频额度
+/game-video new 剑士行走
+/game-video first ./refs/swordsman.png        # 首帧（绿幕全身图最理想）
+/game-video last  ./refs/swordsman_end.png    # 尾帧可选（H3 / Hailuo-02 才支持）
+/game-video prompt 角色原地走三步，全身入镜，相机固定，绿幕背景
+/game-video run                               # 唯一花钱的一步：提交视频
+/game-video poll                              # 1~6 分钟，可反复调；重启后也能接着查
+/game-video frames --count 12 --arrange loop  # 抽帧（本地）
+/game-video key --chroma auto --tol 40        # 抠像（本地，带逐帧自检报告）
+/game-video sheet --cell 256                  # 对齐合成整图（本地）
+/game-video import ../my-game --fps 12        # 导入 Maker
 ```
 
 零额度路径（没有视频额度时）：
 
 ```sh
-/taptap-video use ./downloaded.mp4              # 挂本地视频（MiniMax Code 签到积分出的片也行）
-/taptap-video frames && /taptap-video key && /taptap-video sheet
+/game-video use ./downloaded.mp4              # 挂本地视频（MiniMax Code 签到积分出的片也行）
+/game-video frames && /game-video key && /game-video sheet
 ```
 
 设计上的几个取舍：
@@ -80,23 +92,23 @@ HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录*
 |---|---|---|---|
 | **MiniMax 官方** | 设置页填 Key（订阅 `sk-cp-…` 或按量 `sk-api-…`），或直接复用本机 `mmx` 登录态 | 套餐额度 / 账户余额 | 有 Explore+ 档或愿意按量付费 |
 | **视频中转站** | 设置页填 Base URL / Key / 模型；三种协议（OpenAI 兼容 / MiniMax 协议 / 自定义路径映射） | 你的中转站 | 官方额度用完、或中转站更便宜 |
-| **自选本地视频** | `/taptap-video use <mp4>` | **零额度** | MiniMax Code 签到积分生成的、录屏、别人的素材 |
+| **自选本地视频** | `/game-video use <mp4>` | **零额度** | MiniMax Code 签到积分生成的、录屏、别人的素材 |
 
 `auto` 按**设置页里排的顺序**选第一条「开着 + 配好了 + 不是本地文件」的通道（默认顺序即上表顺序）。
 你可以在设置页「生成通道优先级」里拖拽调序、逐条开关，并决定**额度不足时要不要自动换下一条**
 （默认关；打开后可能在你不知情的情况下动用付费通道）。也可以按作业显式指定：
-`/taptap-video backend relay|minimax|local`（显式指定时不回退）。命令行改顺序：
-`/taptap-video lanes --order minimax,relay --off local --fallback on`。
+`/game-video backend relay|minimax|local`（显式指定时不回退）。命令行改顺序：
+`/game-video lanes --order minimax,relay --off local --fallback on`。
 
 ### 🚫 模型不会被自动替换（视频按秒计费）
 
-**你在设置页「MiniMax」里选了哪个模型，`/taptap-video` 就用哪个，一个字都不会改。**
+**你在设置页「MiniMax」里选了哪个模型，`/game-video` 就用哪个，一个字都不会改。**
 这条是硬约束，不是建议：
 
 - 新建作业**继承**你设置的模型（以前会悄悄退回内置的 `MiniMax-H3`）；
 - 模型与首尾帧不兼容、或模型为空时，**直接报错并停下**，绝不「顺手挑一个能用的」；
-- 报错会给出你自己换的命令（`/taptap-video set --model <模型名>`）和替代方案
-  （如 `/taptap-video last --clear` 清掉尾帧），但**换不换由你决定**。
+- 报错会给出你自己换的命令（`/game-video set --model <模型名>`）和替代方案
+  （如 `/game-video last --clear` 清掉尾帧），但**换不换由你决定**。
 
 给 AI 助手的同一条规定：即使它认为「换个模型更合适」，也只能停下来把情况讲清楚并
 询问你，不能替你改 —— 视频按秒计费，替你选模型就是替你决定花多少钱。
@@ -109,11 +121,11 @@ HTTP 409「请刷新页面以获取服务器分配」**不等于账号未登录*
 
 | 动作 | 以前 | 现在 |
 |---|---|---|
-| `/taptap-skills reset` | 一句清空全部禁用表，**无确认无备份** | 先备份 → 停下询问；新增 `/taptap-skills restore` 一行恢复 |
-| `/taptap-skills disable` | AI 觉得没用就禁用 | 属于你的清单，要你点头 |
-| `/taptap-video use <mp4>` | 静默覆盖已生成的视频 | 已有付费视频时停下询问，并告诉你原文件在哪 |
-| `/taptap-video set --model` | 换模型 = 换价 | 停下询问，讲清「现在 → 想改成」 |
-| `/taptap-video lanes --order/--on/--off/--fallback` | AI 可能拨乱你排好的顺序 | 停下询问（换通道可能走到另一条要花钱的通道） |
+| `/game-skills reset` | 一句清空全部禁用表，**无确认无备份** | 先备份 → 停下询问；新增 `/game-skills restore` 一行恢复 |
+| `/game-skills disable` | AI 觉得没用就禁用 | 属于你的清单，要你点头 |
+| `/game-video use <mp4>` | 静默覆盖已生成的视频 | 已有付费视频时停下询问，并告诉你原文件在哪 |
+| `/game-video set --model` | 换模型 = 换价 | 停下询问，讲清「现在 → 想改成」 |
+| `/game-video lanes --order/--on/--off/--fallback` | AI 可能拨乱你排好的顺序 | 停下询问（换通道可能走到另一条要花钱的通道） |
 
 设计上刻意**不**把插件变成「什么都问」：抽帧张数、抠像阈值这类纯技术参数
 不受限制，随便调。护栏只拦「不可逆」和「属于你的决定」两类。
@@ -141,7 +153,7 @@ AI）看到的是「提交失败」—— 于是很自然地再跑一次，**两
 关键设计：`uncertain` 用**独立状态**而不是 `error`。因为 `error` 会诱导「失败了就再来
 一次」，而 `uncertain` 的文案会直接劝阻重投，并指向 `status` / `poll` 去把片子找回来。
 
-`/taptap-video status` 会显示台账（提交号、时间、task、是否可能已扣费），
+`/game-video status` 会显示台账（提交号、时间、task、是否可能已扣费），
 所以「上次到底提交了没有」永远有一处可查，而不是靠猜。
 
 生图链路同样处理：网络异常**不再自动重试**（以前会重试 7 次，很可能重复扣费），
@@ -267,18 +279,18 @@ PowerShell 的往返一致性断言（含 `O'Brien`、`x'; Write-Output 'INJECTE
 >
 > 现在 JWT 会解出 payload 看 `TokenType` 判定；解不出来就说「不确定」并引导跑自检，
 > **不会**再断言「你不是订阅」（猜错的代价是让用户白充值一次）。
-> 最终以 `/taptap-video doctor` 的实测为准 —— 它打的是 `token_plan/remains`，
+> 最终以 `/game-video doctor` 的实测为准 —— 它打的是 `token_plan/remains`，
 > 返回 `status_code: 0` 就是有套餐额度，并会报出「本周剩 85% · 本周期剩 94%」这类数字。
 
 ⚠️ **MiniMax Code 每日签到积分 ≠ 开放平台积分包**：签到积分只用于 MiniMax Code 应用内
 的多模态创作（30 天有效），不能拿来让本插件通过 API 出片。想白嫖就在 MiniMax Code 里
-用签到积分生成视频、下载 mp4，再 `/taptap-video use` 挂进来 —— 抽帧/抠像/合成照样全本地。
+用签到积分生成视频、下载 mp4，再 `/game-video use` 挂进来 —— 抽帧/抠像/合成照样全本地。
 
 ## BGM 试听 / 裁剪挂件（主界面）
 
 BGM 生成是「用法」不是「配置」，所以它不在设置页，而是主界面**右下角的 🎵 BGM 按钮**：
 
-- `/taptap-bgm` 生成完成后，挂件亮红点并弹出提示条，一键打开试听
+- `/game-bgm` 生成完成后，挂件亮红点并弹出提示条，一键打开试听
 - 每条 BGM 可播放（流式加载，可拖进度），选中后看波形、**拖两个手柄选区间**、
   「只听选中段」循环试听、可选**淡入淡出**（0.3s/0.5s，防裁剪点爆音）
 - 「✂ 裁剪并导入项目」：ffmpeg 按 `-ss/-t` 精确裁剪 → 转 wav → 写 `.meta` →
@@ -290,13 +302,36 @@ BGM 生成是「用法」不是「配置」，所以它不在设置页，而是�
 ## 安装
 
 ```sh
-dsh plugin --profile <profile> add dsh-taptap-maker-dev
+dsh plugin --profile <profile> add dsh-game-forge
 ```
 
 或手动：把仓库克隆到插件目录，在 profile 的 `package.json` 加上依赖，重启 DSH。
 
-> ⚠️ 本插件必须装在 **Maker 工作区之外**。所有持久化（含 API Key）写在 `$DSH_HOME/taptap-maker-dev/` 下。
+> ⚠️ 本插件必须装在 **Maker 工作区之外**。所有持久化（含 API Key）写在 `$DSH_HOME/game-forge/` 下。
 > 原因：TapTap Maker 运行时会**自动把整个工作区提交并推送**，明文 Key 一旦落进工作区就会泄露。
+
+## Cocos Creator 集成（多项目并行不串工程）
+
+三步装好，之后 agent 手里会多出 `cocos_*` 工具：
+
+```sh
+/game-cocos install "D:\wxzj-cocos" --yes     # 装编辑器扩展（MIT 版，校验 SHA256；装进工程的 extensions/）
+/game-cocos register --yes                    # 把 cocos MCP 服务登记给 DSH（写 profile patch；桌面端通常需重启一次）
+/game-cocos                                   # 看现状：哪些项目在跑、端口、构建槽位
+```
+
+命令行等价：`node src/cocos/cli.mjs install/register/doctor/list/build`。
+
+**同时开 2~3 个项目为什么不会冲突**（细节见 [docs/cocos-mcp.md](docs/cocos-mcp.md)）：
+
+| 冲突点 | 处理 |
+|---|---|
+| 编辑器端口互抢 | 扩展配置写 `portMode: "project"`，端口跟着项目走；预览端口本来就自动递增 |
+| 端口 ≠ 身份（重启/回退后指错） | 每次连接都用 `initialize` 返回的 `project_path` 复核，对不上直接 `PROJECT_MISMATCH` 中止 |
+| 多个项目 → 工具数量与 token 爆炸 | 只登记**一个** `cocos` 服务，项目是参数；工具数不随项目数增长 |
+| 两个会话同改一个场景 | 每项目一把写锁，写操作串行；撞锁时报出持有者，而不是覆盖别人的改动 |
+| 多项目同时构建 | 全局构建槽位（默认 1），排队而不是一起把机器拖死 |
+| 「同一项目」开了交互 + 无头构建两个实例 | 发现阶段区分 `--build` 实例，操作只打交互实例 |
 
 ## 素材存到哪里（`sucai/`）
 
@@ -317,7 +352,7 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 - **目录实时可见**：设置页「生成通道优先级」卡顶部会如实显示三类素材此刻的真实路径。
 - **视频作业目录带作业名**（如 `奔跑-v7k2p`），资源管理器里一眼认得出。改名**不会**
   搬目录 —— 已生成的帧和视频都靠相对路径关联，搬了会全部失联。
-- **换项目 / 换目录也找得到**：作业位置记在 `$DSH_HOME/taptap-maker-dev/video-index.json`，
+- **换项目 / 换目录也找得到**：作业位置记在 `$DSH_HOME/game-forge/video-index.json`，
   不依赖当前工作目录。
 - **老作业自动搬迁**：改造前建在 `$DSH_HOME/…/video-jobs/<id>/` 的作业，在首次
   访问时自动搬到项目下的 `sucai/video/`，已生成的视频和帧不会失联。
@@ -335,7 +370,7 @@ dsh plugin --profile <profile> add dsh-taptap-maker-dev
 - 这些是**本地优化目标，不是服务商承诺的 HTTP 限额**。多图会共同分配总量预算；默认最多 16 张。不符合预算则停止，不偷偷少传参考图。
 - 保留比例、不放大，处理 EXIF 朝向并验证实际透明度。默认单张最多 3200 万像素，防止小体积压缩图在解码/旋转时占用过多内存；这不是操作系统级内存上限。损坏文件、动画参考图及超出安全像素限制的图片会在提交前拒绝；动画请自行导出所需静态帧。
 - 已满足要求的静态图不重新编码；文件扩展名按真实格式规范化。上传使用已校验字节的独立快照，**不再重新读取可能已改变的原图**。
-- 缓存在 `$DSH_HOME/taptap-maker-dev/reference-images/ref-upload-v2/`，不进入游戏 `assets/`。按内容与处理策略寻址，完整写入后才发布；不覆盖/删除原图或旧缓存。损坏缓存会报错并保留现场。完成标记与临时文件保留，不自动清理；跨进程竞争失败的临时文件可能是独立副本，因此缓存会占用额外磁盘空间，清理需用户另行同意。
+- 缓存在 `$DSH_HOME/game-forge/reference-images/ref-upload-v2/`，不进入游戏 `assets/`。按内容与处理策略寻址，完整写入后才发布；不覆盖/删除原图或旧缓存。损坏缓存会报错并保留现场。完成标记与临时文件保留，不自动清理；跨进程竞争失败的临时文件可能是独立副本，因此缓存会占用额外磁盘空间，清理需用户另行同意。
 - 本地需要 **Python 3 + Pillow（支持 WebP）或 ImageMagick** 来完整解码校验；不会自动安装。已有 `TAPTAP_PY` / `PYTHON` 可指定解释器，`TAPTAP_IMAGE_MAGICK` 可指定 ImageMagick。找不到可用处理器、处理超时或体积无法达标时，返回 `phase: preflight, submitted: false`，不会拿未处理原图继续上传、重登或换付费通道。
 - 可用 `TAPTAP_IMAGE_REF_MAX_EDGE`、`TAPTAP_IMAGE_REF_MAX_BYTES`、`TAPTAP_IMAGE_REF_MAX_TOTAL_BYTES` 调整本地目标（字节单位），`TAPTAP_IMAGE_REFERENCE_CACHE` 调整缓存目录。程序调用的显式参数优先于环境变量，环境变量优先于通道默认值；不会改动已选模型和通道顺序。
 - 结果中的 `referencePreparation` / `notes` 给出处理前后大小、尺寸、MIME、SHA-256、透明度、处理器版本和缓存命中情况，不公开本地完整路径。`--out` 及派生输出若与任一原参考图同路径、符号链接或硬链接指向同一文件，会被拒绝。
@@ -356,14 +391,14 @@ python -B scripts/verify-reference-image-diagnostics.py
 
 ## 配置
 
-设置 → **TapTap Maker** 页，直接填并保存（存到 `$DSH_HOME/taptap-maker-dev/`，不进任何 Maker 工作区）：
+设置 → **TapTap Maker** 页，直接填并保存（存到 `$DSH_HOME/game-forge/`，不进任何 Maker 工作区）：
 
 - **额度红线** — 开关，关之前会弹确认
 - **生成通道优先级** — 三条链路（生图 / 视频 / 背景音乐）**共用**一张排序表：
   拖拽或用 ↑↓ 调顺序、每条通道一个启用开关、一个「额度不足时自动换下一条通道」总开关。
   每行同时显示**开关**（要不要用它）、**顺序**（第几顺位）、**就绪状态点**（配好没有）——
   「关着」和「开着但没配」分开显示，因为这两件事的下一步完全不同。
-  存到 `$DSH_HOME/taptap-maker-dev/lanes.json`，即时生效。
+  存到 `$DSH_HOME/game-forge/lanes.json`，即时生效。
   - 默认顺序与改造前一致（视频：中转站 → MiniMax → 本地视频；生图：网页 → 中转站），升级后行为不突变。
   - **自动切换默认关闭**：打开后可能在你不知情的情况下动用付费通道。
   - 只有**额度 / 配额 / 限流**类失败才换通道；参数写错这类问题换了也一样错，不会白跑一轮。
@@ -402,85 +437,85 @@ python -B scripts/verify-reference-image-diagnostics.py
 
 ```sh
 # 视频通道：查看 / 调整顺序、开关、额度不足是否自动换
-/taptap-video lanes
-/taptap-video lanes --order minimax,relay --off local --fallback on
+/game-video lanes
+/game-video lanes --order minimax,relay --off local --fallback on
 
 # 生图首选：ChatGPT 网页（首次登录一次）
-node <plugin-dir>/src/taptap-gpt.mjs login
-node <plugin-dir>/src/taptap-gpt.mjs gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
+node <plugin-dir>/src/game-image-web.mjs login
+node <plugin-dir>/src/game-image-web.mjs gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
 
 # 出图慢时：把「已经生成好但没下到」的图抓回来（不重新生成，省额度）
-node <plugin-dir>/src/taptap-gpt.mjs pending   # 有没有待抓取的对话
-node <plugin-dir>/src/taptap-gpt.mjs grab      # 抓 pending 那个对话
-node <plugin-dir>/src/taptap-gpt.mjs grab --url https://chatgpt.com/c/xxxx
+node <plugin-dir>/src/game-image-web.mjs pending   # 有没有待抓取的对话
+node <plugin-dir>/src/game-image-web.mjs grab      # 抓 pending 那个对话
+node <plugin-dir>/src/game-image-web.mjs grab --url https://chatgpt.com/c/xxxx
 
 # 网页生图总开关（关掉后改走中转站）
-node <plugin-dir>/src/taptap-gpt.mjs lane status
-node <plugin-dir>/src/taptap-gpt.mjs lane off
+node <plugin-dir>/src/game-image-web.mjs lane status
+node <plugin-dir>/src/game-image-web.mjs lane off
 
 # 图片存放位置：默认跟随当前项目（<项目>/sucai/images），也可自定义
-node <plugin-dir>/src/taptap-gpt.mjs dir                 # 看当前解析结果
-node <plugin-dir>/src/taptap-gpt.mjs dir --set "D:\my-images"
-node <plugin-dir>/src/taptap-gpt.mjs dir --set "{project}/imgs"
-node <plugin-dir>/src/taptap-gpt.mjs dir --reset         # 恢复跟随项目
+node <plugin-dir>/src/game-image-web.mjs dir                 # 看当前解析结果
+node <plugin-dir>/src/game-image-web.mjs dir --set "D:\my-images"
+node <plugin-dir>/src/game-image-web.mjs dir --set "{project}/imgs"
+node <plugin-dir>/src/game-image-web.mjs dir --reset         # 恢复跟随项目
 
 # 账号轮询：添加账号 → 各登录一次 → 之后自动轮换
-node <plugin-dir>/src/taptap-gpt.mjs pool add --id a2 --label "小号"
-node <plugin-dir>/src/taptap-gpt.mjs login --account a2
-node <plugin-dir>/src/taptap-gpt.mjs pool list          # 看状态
-node <plugin-dir>/src/taptap-gpt.mjs pool unban --id a2 # 恢复冷却账号
+node <plugin-dir>/src/game-image-web.mjs pool add --id a2 --label "小号"
+node <plugin-dir>/src/game-image-web.mjs login --account a2
+node <plugin-dir>/src/game-image-web.mjs pool list          # 看状态
+node <plugin-dir>/src/game-image-web.mjs pool unban --id a2 # 恢复冷却账号
 
 # 生图回退：中转站（尺寸按需，支持透明底 + 缩小）
-node <plugin-dir>/src/taptap-image.mjs --prompt "蓝色盾牌图标" --out icon.png --transparent --downscale 128x128
+node <plugin-dir>/src/game-image-relay.mjs --prompt "蓝色盾牌图标" --out icon.png --transparent --downscale 128x128
 
 # 章鱼生图（积分站，可选通道；先看模型价与余额再决定用哪个模型）
-node <plugin-dir>/src/taptap-zaiduyu.mjs status          # 脚本/Python/账号 三态
-node <plugin-dir>/src/taptap-zaiduyu.mjs models          # 实时模型清单 + 单张积分 + 余额
-node <plugin-dir>/src/taptap-zaiduyu.mjs gen --prompt "小猫赏月" --model gpt-image-2 --ratio 16:9
+node <plugin-dir>/src/game-zaiduyu.mjs status          # 脚本/Python/账号 三态
+node <plugin-dir>/src/game-zaiduyu.mjs models          # 实时模型清单 + 单张积分 + 余额
+node <plugin-dir>/src/game-zaiduyu.mjs gen --prompt "小猫赏月" --model gpt-image-2 --ratio 16:9
 # 站点账号在【设置页】登录（无需命令行）：
 #   设置页 → 生成通道 → 「章鱼生图（积分站）」卡 → 填账号密码 → 点「登录并保存」
 #   插件会先连站点做一次只读验证（不扣积分），通过才保存，即时生效、不用重开宿主。
-#   凭据存本机 $DSH_HOME/taptap-maker-dev/zaiduyu.json，密码不回显、不进 Maker 工作区。
+#   凭据存本机 $DSH_HOME/game-forge/zaiduyu.json，密码不回显、不进 Maker 工作区。
 # 兼容：环境变量 ZAIDUYU_USER / ZAIDUYU_PASS 仍可用（文件值优先）。不建议把密码
 #   写进终端命令 —— 那会落进对话记录与本机日志。
 
 # BGM 账号池：添加账号 → 各登录一次 → 额度用完自动轮换
-node <plugin-dir>/src/taptap-bgm-web.mjs login                      # 主账号
-node <plugin-dir>/src/taptap-bgm-web.mjs pool add --id b2 --label "小号"
-node <plugin-dir>/src/taptap-bgm-web.mjs login --account b2
-node <plugin-dir>/src/taptap-bgm-web.mjs pool list                  # 看状态
-node <plugin-dir>/src/taptap-bgm-web.mjs gen --prompt "史诗管弦战斗音乐"  # 自动选可用账号
+node <plugin-dir>/src/game-bgm-web.mjs login                      # 主账号
+node <plugin-dir>/src/game-bgm-web.mjs pool add --id b2 --label "小号"
+node <plugin-dir>/src/game-bgm-web.mjs login --account b2
+node <plugin-dir>/src/game-bgm-web.mjs pool list                  # 看状态
+node <plugin-dir>/src/game-bgm-web.mjs gen --prompt "史诗管弦战斗音乐"  # 自动选可用账号
 
 # 音效：搜索 / 安装 / 查看来源
-node <plugin-dir>/src/taptap-audio.mjs search "金币音效"
-node <plugin-dir>/src/taptap-audio.mjs add "金币音效" --project <maker-project> --out coin.wav
+node <plugin-dir>/src/game-audio.mjs search "金币音效"
+node <plugin-dir>/src/game-audio.mjs add "金币音效" --project <maker-project> --out coin.wav
 
 # 本地音效生成（CC0 库没有合适素材时的兜底；零额度，需 NVIDIA 显卡）
-node <plugin-dir>/src/taptap-sfx.mjs check                       # 硬件体检（不够就止步）
-node <plugin-dir>/src/taptap-sfx.mjs guide                       # 打印 5.3GB 模型【手动】下载命令
-node <plugin-dir>/src/taptap-sfx.mjs verify --fast               # 下载后校验（--fast 只比大小）
-node <plugin-dir>/src/taptap-sfx.mjs deps                        # 打印依赖命令；确认后才加 --yes
-node <plugin-dir>/src/taptap-sfx.mjs doctor                      # 装好后体检
-node <plugin-dir>/src/taptap-sfx.mjs gen "coin pickup, bright arcade blip" -s 3 --project <maker-project>
+node <plugin-dir>/src/game-sfx.mjs check                       # 硬件体检（不够就止步）
+node <plugin-dir>/src/game-sfx.mjs guide                       # 打印 5.3GB 模型【手动】下载命令
+node <plugin-dir>/src/game-sfx.mjs verify --fast               # 下载后校验（--fast 只比大小）
+node <plugin-dir>/src/game-sfx.mjs deps                        # 打印依赖命令；确认后才加 --yes
+node <plugin-dir>/src/game-sfx.mjs doctor                      # 装好后体检
+node <plugin-dir>/src/game-sfx.mjs gen "coin pickup, bright arcade blip" -s 3 --project <maker-project>
 # 模型权重本插件【绝不自动下载】：先体检、用户同意、用户自己在终端逐条跑 curl。
-node <plugin-dir>/src/taptap-audio.mjs sources
+node <plugin-dir>/src/game-audio.mjs sources
 
-# BGM：生成提示词 + 打开网页（对话里用 /taptap-bgm 即可）
-/taptap-bgm 史诗管弦战斗音乐，紧张激烈
+# BGM：生成提示词 + 打开网页（对话里用 /game-bgm 即可）
+/game-bgm 史诗管弦战斗音乐，紧张激烈
 
 # 网页下载后，自动导入项目（转格式 + 装进 bgm + 生成 meta）
-node <plugin-dir>/src/taptap-audio.mjs import --in "C:\Users\<你>\Downloads" \
+node <plugin-dir>/src/game-audio.mjs import --in "C:\Users\<你>\Downloads" \
   --project <maker-project> --kind bgm --to wav --latest
 
 # 音频转换（需要 ffmpeg）
-node <plugin-dir>/src/taptap-audio-convert.mjs --in sfx --out out --to wav --mono --rate 44100 --normalize
+node <plugin-dir>/src/game-audio-convert.mjs --in sfx --out out --to wav --mono --rate 44100 --normalize
 
 # skills 更新
-node <plugin-dir>/src/taptap-skills-update.mjs
+node <plugin-dir>/src/game-skills-update.mjs
 ```
 
-对话里也可直接用斜杠命令：`/taptap-image`、`/taptap-audio`、`/taptap-bgm`、
-`/taptap-audio-convert`、`/taptap-skills`、`/taptap-setup`。
+对话里也可直接用斜杠命令：`/game-image-relay`、`/game-audio`、`/game-bgm`、
+`/game-audio-convert`、`/game-skills`、`/taptap-setup`。
 
 ## 素材来源与授权（重要）
 
@@ -546,16 +581,20 @@ API 完全不通用，硬搬会让 agent 调用不存在的接口。
 
 ## 关于「额度红线」
 
-它守的是这 12 个消耗 Maker MCP 内置额度的工具：
-`generate_image`、`batch_generate_images`、`edit_image`、`create_video_task`、`query_video_task`、
+它守的是这 11 个消耗 Maker MCP 内置额度的**生成**工具：
+`generate_image`、`batch_generate_images`、`edit_image`、`create_video_task`、
 `text_to_music`、`text_to_sound_effect`、`batch_sound_effects`、`audition_voices_for_character`、
 `confirm_character_voice`、`text_to_dialogue`、`create_3d_asset`。
 
-只读 / 状态 / 构建 / 反馈 / LSP 类工具不受限。
+只读 / 查询 / 状态 / 构建 / 反馈 / LSP 类工具不受限（`query_video_task` 只是查进度，允许调用；
+但别把「查进度」当成「再提交一次」）。
+
+这条红线管的是 **Maker 内置额度**。插件自己的图片 / 音效 / BGM 通道花的是你自己的账号或积分，
+另有规则（见上）。关掉红线开关只会移除这一段，**不会**连带删掉工作流守则。
 
 ## 隐私
 
-- API Key 只写进 `$DSH_HOME/taptap-maker-dev/{image,music,minimax}.json`，**绝不进入会自动提交的 Maker 工作区**。
+- API Key 只写进 `$DSH_HOME/game-forge/{image,music,minimax}.json`，**绝不进入会自动提交的 Maker 工作区**。
 - 素材落在 `<项目>/sucai/`（图片 / 视频 / BGM 三类分开），每个目录自带 `.gitignore`
   自我忽略，所以即使 Maker 自动提交整个工程也不会把它们推上去。只有最后合成的那一张
   整图会被复制进项目 `assets/image/`。

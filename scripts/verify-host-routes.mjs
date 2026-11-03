@@ -54,7 +54,7 @@ const server = http.createServer((req, res) => {
   })
 })
 await new Promise((r) => server.listen(0, '127.0.0.1', r))
-const BASE = `http://127.0.0.1:${server.address().port}/api/taptap-maker-dev`
+const BASE = `http://127.0.0.1:${server.address().port}/api/game-forge`
 
 const req = async (method, sub, body) => {
   const r = await fetch(`${BASE}/${sub}`, {
@@ -94,7 +94,7 @@ console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默�
   ok(b.json.hasApiKey === true, '只改 model 时 Key 仍在（修复前会被清空）')
   ok(b.json.model === 'gpt-image-2.5', 'model 已更新')
 
-  const raw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'image.json'), 'utf8'))
+  const raw = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'image.json'), 'utf8'))
   ok(raw.apiKey === 'sk-precious-key', '磁盘上的 Key 没被空串覆盖')
   ok(raw.baseURL === 'https://api.example.com/v1', 'baseURL 未受影响')
 
@@ -105,7 +105,7 @@ console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默�
   })
   ok(c.status === 200, '先写入中转站配置')
   const d = await req('POST', 'video-relay', { apiKey: '', model: 'vid-2' })
-  const relayRaw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'video-relay.json'), 'utf8'))
+  const relayRaw = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'video-relay.json'), 'utf8'))
   ok(relayRaw.apiKey === 'sk-relay-keep', '只改 model 时中转站 Key 没被清空', relayRaw.apiKey)
   ok(relayRaw.model === 'vid-2', '中转站 model 已更新')
   ok(d.status === 200, '保存返回 200')
@@ -117,7 +117,7 @@ console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默�
   ok(typeof masked === 'string' && masked.includes('…'), `GET 回的是掩码形态（${masked}）`)
   const e = await req('POST', 'video-relay', { ...g2.json.relay, model: 'vid-3' })
   ok(e.status === 200, '设置页整表单回传（含掩码 Key）返回 200')
-  const relayRaw2 = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'video-relay.json'), 'utf8'))
+  const relayRaw2 = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'video-relay.json'), 'utf8'))
   ok(relayRaw2.apiKey === 'sk-relay-keep', '掩码被识别为「未修改」，磁盘 Key 仍是真值', relayRaw2.apiKey)
   ok(relayRaw2.model === 'vid-3', '掩码回传时 model 照常更新')
 
@@ -126,7 +126,7 @@ console.log('\n[1b] 设置页改一项，不该抹掉其它项（Key 被静默�
   const maskedImg = f1.json.apiKey
   ok(typeof maskedImg === 'string' && maskedImg.includes('…'), `GET /image 回掩码（${maskedImg}）`)
   const f2 = await req('POST', 'image', { ...f1.json, model: 'gpt-image-x' })
-  const imgRaw2 = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'image.json'), 'utf8'))
+  const imgRaw2 = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'image.json'), 'utf8'))
   ok(imgRaw2.apiKey === 'sk-precious-key', '生图卡掩码回传后 Key 仍是真值')
   ok(imgRaw2.model === 'gpt-image-x', '生图卡掩码回传时 model 照常更新')
 }
@@ -143,7 +143,7 @@ console.log('\n[2] POST /video-minimax（设置页 MiniMax 配置卡）')
 
   const clr = await req('POST', 'video-minimax', { clear: true })
   ok(clr.status === 200 && clr.json.hasApiKey === false, 'clear:true 能真的清掉 Key')
-  const fileRaw = JSON.parse(fs.readFileSync(path.join(home, 'taptap-maker-dev', 'minimax.json'), 'utf8'))
+  const fileRaw = JSON.parse(fs.readFileSync(path.join(home, 'game-forge', 'minimax.json'), 'utf8'))
   ok(fileRaw.apiKey === undefined || fileRaw.apiKey === '', '磁盘上的 Key 确实被删了（不是只清了界面）')
   ok(clr.json.baseURL === 'https://api.minimax.io', '清 Key 不会顺手把站点清掉')
 
@@ -216,7 +216,7 @@ console.log('\n[4] 通道优先级 / 开关路由')
   })
   ok(junk.json.autoFallback === true, '非布尔值不会误开/误关总开关（保持原值）')
   // 直接写坏文件，验证读取端对非布尔的处理
-  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'),
+  fs.writeFileSync(path.join(home, 'game-forge', 'lanes.json'),
     JSON.stringify({ autoFallback: 'yes', groups: {} }), 'utf8')
   ok((await req('GET', 'lanes')).json.autoFallback === false, '磁盘上的非布尔值按「关」处理')
 
@@ -248,7 +248,7 @@ console.log('\n[5] 素材落点随项目（GET /lanes 与 /asset-dirs 都返回�
   ok(typeof g.json.dirs.image.dir === 'string' && g.json.dirs.image.dir.length > 0, '图片目录非空', g.json.dirs.image.dir)
   // 这个测试不在 Maker 工程里跑，所以三类都该退回 $DSH_HOME。
   ok(g.json.dirs.image.source === 'default', '不在项目里 → source=default', g.json.dirs.image.source)
-  ok(g.json.dirs.image.dir.startsWith(path.join(home, 'taptap-maker-dev')), '图片目录在 $DSH_HOME 下', g.json.dirs.image.dir)
+  ok(g.json.dirs.image.dir.startsWith(path.join(home, 'game-forge')), '图片目录在 $DSH_HOME 下', g.json.dirs.image.dir)
   ok(g.json.dirs.video.dir.includes('video-jobs'), '视频目录退回 video-jobs', g.json.dirs.video.dir)
   ok(g.json.dirs.bgm.dir.includes('bgm-downloads'), 'BGM 目录退回 bgm-downloads', g.json.dirs.bgm.dir)
 

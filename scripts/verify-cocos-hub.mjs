@@ -1,0 +1,513 @@
+#!/usr/bin/env node
+/**
+ * Cocos 集成的离线验证：不需要真的开 Cocos Creator，也不需要装扩展。
+ *
+ * 覆盖的风险点（都是「看起来能跑、实际会写错工程」那类）：
+ *  - 身份校验：端口上的服务自报的是**另一个项目**时必须中止；
+ *  - 写令牌：写操作要把 `expected_context` 带上；
+ *  - 排队与锁：同项目第二个写操作要被挡住，过期锁能被回收；
+ *  - 配置层：patch 行能正确增/改/删，非法内容拒绝写入；
+ *  - 注册表：slug/名称/前缀解析，歧义时报错而不是猜；
+ *  - 协议：JSON 与 SSE 两种返回都能解析，Accept 不对时服务端 406 也要如实报错；
+ *  - stdio 服务：initialize / tools/list / tools/call 全链路可用。
+ *
+ * 跑法：node scripts/verify-cocos-hub.mjs
+ */
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import http from 'node:http'
+import { spawn } from 'node:child_process'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-verify-'))
+
+let passed = 0
+const failures = []
+
+async function test(name, fn) {
+  try {
+    await fn()
+    passed += 1
+    process.stdout.write(`  ok   ${name}\n`)
+  } catch (error) {
+    failures.push({ name, error })
+    process.stdout.write(`  FAIL ${name}\n       ${error?.message ?? error}\n`)
+  }
+}
+
+// ── 1. 客户端 / 身份校验（本地假 MCP 服务）──────────────────────────────
+function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFirst = false, toolError = false } = {}) {
+  const state = { calls: [], sseOnce, sseNotifyFirst, toolError }
+  const expectedContext = `${projectId}:instance-1`
+  const server = http.createServer((req, res) => {
+    const url = new URL(req.url, 'http://localhost')
+    if (req.method === 'GET' && url.pathname === '/health') {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({
+        ok: true,
+        name: 'funplay-cocos-mcp',
+        version: 'test',
+        projectName: path.basename(projectPath),
+        projectIdentity: projectId,
+        context: {
+          project_id: projectId,
+          instance_id: 'instance-1',
+          project_path: projectPath,
+          expected_context: expectedContext,
+        },
+      }))
+      return
+    }
+    if (req.method !== 'POST') {
+      res.writeHead(404).end('not found')
+      return
+    }
+    const accept = String(req.headers.accept ?? '')
+    if (!accept.includes('text/event-stream')) {
+      res.writeHead(406, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ error: 'Accept must include text/event-stream' }))
+      return
+    }
+    let body = ''
+    req.on('data', (chunk) => { body += chunk })
+    req.on('end', () => {
+      const message = JSON.parse(body)
+      state.calls.push(message)
+      const reply = (result) => {
+        const payload = { jsonrpc: '2.0', id: message.id, result }
+        if (state.sseNotifyFirst) {
+          // 同一条 SSE 流里先塞一条服务端通知（id 不匹配），再给真正的响应。
+          // 客户端如果「没匹配到就取最后一条」会拿错，这里用来锁住这个行为。
+          state.sseNotifyFirst = false
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          const notice = JSON.stringify({ jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1 } })
+          res.end(`event: message\ndata: ${notice}\n\nevent: message\ndata: ${JSON.stringify(payload)}\n\n`)
+          return
+        }
+        if (state.sseOnce) {
+          state.sseOnce = false
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          res.end(`event: message\ndata: ${JSON.stringify(payload)}\n\n`)
+          return
+        }
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(payload))
+      }
+      if (message.method === 'initialize') {
+        reply({
+          protocolVersion: message.params?.protocolVersion ?? '2026-07-28',
+          serverInfo: { name: 'funplay-cocos-mcp', version: 'test' },
+          funplay: {
+            server: 'funplay-cocos-mcp',
+            projectName: path.basename(projectPath),
+            projectIdentity: projectId,
+            routingVersion: 1,
+            context: {
+              project_id: projectId,
+              instance_id: 'instance-1',
+              project_path: projectPath,
+              expected_context: expectedContext,
+            },
+          },
+          capabilities: { tools: {} },
+        })
+        return
+      }
+      if (message.method === 'tools/list') {
+        reply({
+          tools: [
+            { name: 'execute_javascript', description: 'exec', inputSchema: { type: 'object' } },
+            { name: 'get_scene_info', description: 'scene', inputSchema: { type: 'object' } },
+          ],
+        })
+        return
+      }
+      if (message.method === 'tools/call') {
+        if (state.toolError) {
+          reply({ isError: true, content: [{ type: 'text', text: '上游拒绝：场景里有未保存的改动' }] })
+          return
+        }
+        reply({
+          content: [{ type: 'text', text: `called ${message.params?.name}` }],
+          data: {
+            tool: message.params?.name,
+            gotExpectedContext: Boolean(message.params?.arguments?.expected_context),
+            args: message.params?.arguments ?? {},
+          },
+        })
+        return
+      }
+      if (message.method && message.method.startsWith('notifications/')) {
+        res.writeHead(202).end()
+        return
+      }
+      res.writeHead(400).end('{}')
+    })
+  })
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port
+      resolve({ server, port, state })
+    })
+  })
+}
+
+async function main() {
+  const load = (relative) => import(pathToFileURL(path.join(ROOT, relative)).href)
+  const { CocosMcpError, McpHttpClient } = await load('src/cocos/mcp-http.mjs')
+  const { connectTarget } = await load('src/cocos/router.mjs')
+  const { projectSlug, normalizeProjectPath } = await load('src/cocos/paths.mjs')
+  const { acquireFileLock, releaseFileLock, makeOwner, peekLock, withProjectLock } = await load('src/cocos/locks.mjs')
+  const { acquireBuildSlot, releaseBuildSlot, buildSlotsStatus } = await load('src/cocos/locks.mjs')
+  const { TOOL_INDEX } = await load('src/cocos/tools.mjs')
+  const { upsertMcpRow, removeMcpRow, findRowBlock, renderRow } = await load('src/cocos/register.mjs')
+  const { upsertProject, resolveProjectRef, listProjects } = await load('src/cocos/registry.mjs')
+  const { tokenize } = await load('src/cocos/command.mjs')
+
+  process.stdout.write('\ncocos hub 验证\n')
+
+  // ── 客户端 + 身份 ────────────────────────────────────────────
+  const projectA = path.join(tmpRoot, 'game-a')
+  const projectB = path.join(tmpRoot, 'game-b')
+  fs.mkdirSync(path.join(projectA, 'assets'), { recursive: true })
+  fs.mkdirSync(path.join(projectB, 'assets'), { recursive: true })
+  fs.writeFileSync(path.join(projectA, 'package.json'), JSON.stringify({ name: 'game-a', creator: { version: '3.8.8' } }))
+  fs.writeFileSync(path.join(projectB, 'package.json'), JSON.stringify({ name: 'game-b', creator: { version: '3.8.8' } }))
+
+  const mockA = await startMockServer({ projectPath: projectA, projectId: 'pid-a' })
+  const mockB = await startMockServer({ projectPath: projectB, projectId: 'pid-b', sseOnce: true })
+
+  await test('客户端能握手并读出项目身份', async () => {
+    const client = new McpHttpClient(`http://127.0.0.1:${mockA.port}/mcp/project/pid-a/`)
+    await client.initialize()
+    const identity = client.identity()
+    assert.equal(identity.projectId, 'pid-a')
+    assert.equal(normalizeProjectPath(identity.projectPath), normalizeProjectPath(projectA))
+    assert.ok(identity.expectedContext.includes('pid-a'))
+  })
+
+  await test('写调用会把 expected_context 带给上游', async () => {
+    const client = new McpHttpClient(`http://127.0.0.1:${mockA.port}/mcp/project/pid-a/`)
+    await client.initialize()
+    const result = await client.toolsCall('execute_javascript', { code: 'return 1' }, {
+      expectedContext: client.identity().expectedContext,
+    })
+    assert.equal(result?.data?.gotExpectedContext, true)
+  })
+
+  await test('SSE 帧格式的响应也能解析', async () => {
+    const client = new McpHttpClient(`http://127.0.0.1:${mockB.port}/mcp/project/pid-b/`)
+    await client.initialize()
+    const result = await client.toolsCall('get_scene_info', {})
+    assert.equal(result?.data?.tool, 'get_scene_info')
+  })
+
+  await test('只读调用不带身份令牌（避免被上游 schema 拒绝）', async () => {
+    const client = new McpHttpClient(`http://127.0.0.1:${mockA.port}/mcp/project/pid-a/`)
+    await client.initialize()
+    const result = await client.toolsCall('get_scene_info', {})
+    assert.equal(result?.data?.gotExpectedContext, false)
+  })
+
+  await test('SSE 流里先来一条通知时，仍取到 id 匹配的那条响应', async () => {
+    const mockNotify = await startMockServer({ projectPath: projectA, projectId: 'pid-a', sseNotifyFirst: true })
+    const client = new McpHttpClient(`http://127.0.0.1:${mockNotify.port}/mcp/project/pid-a/`)
+    await client.initialize()
+    const result = await client.toolsCall('get_scene_info', {})
+    assert.equal(result?.data?.tool, 'get_scene_info', '不能把通知当成结果')
+    mockNotify.server.close()
+  })
+
+  await test('上游 isError 必须抛错（不能当成功）', async () => {
+    const mockErr = await startMockServer({ projectPath: projectA, projectId: 'pid-a', toolError: true })
+    const client = new McpHttpClient(`http://127.0.0.1:${mockErr.port}/mcp/project/pid-a/`)
+    await client.initialize()
+    let error = null
+    try {
+      await client.toolsCall('get_scene_info', {})
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error !== null, 'isError 结果必须抛出')
+    assert.equal(error.code, 'UPSTREAM_TOOL_ERROR')
+    assert.match(error.message, /未保存的改动/)
+    mockErr.server.close()
+  })
+
+  await test('端口上自报的是另一个项目时必须中止（防写错工程）', async () => {
+    const target = {
+      entry: { slug: projectSlug(projectA), name: 'game-a', path: projectA },
+      health: { port: mockB.port, projectId: 'pid-b', projectPath: projectB },
+      group: null,
+    }
+    let error = null
+    try {
+      await connectTarget(target)
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error instanceof CocosMcpError, '应当抛出 CocosMcpError')
+    assert.equal(error.code, 'PROJECT_MISMATCH')
+  })
+
+  await test('身份一致时连接成功并返回端点', async () => {
+    const target = {
+      entry: { slug: projectSlug(projectA), name: 'game-a', path: projectA },
+      health: { port: mockA.port, projectId: 'pid-a', projectPath: projectA },
+      group: null,
+    }
+    const connection = await connectTarget(target)
+    assert.ok(connection.endpoint.includes(`:${mockA.port}`))
+    assert.equal(connection.identity.projectId, 'pid-a')
+  })
+
+  // ── 锁 ──────────────────────────────────────────────────────
+  await test('同项目的第二个写操作会被挡住', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-lock-'))
+    const ownerA = makeOwner('test-a')
+    const ownerB = makeOwner('test-b')
+    const file = path.join(home, 'l.lock')
+    const first = await acquireFileLock(file, { owner: ownerA })
+    assert.equal(first.ok, true)
+    const second = await acquireFileLock(file, { owner: ownerB, waitMs: 0 })
+    assert.equal(second.ok, false)
+    assert.equal(second.holder.key, ownerA.key)
+    releaseFileLock(file, ownerA)
+    const third = await acquireFileLock(file, { owner: ownerB })
+    assert.equal(third.ok, true)
+    releaseFileLock(file, ownerB)
+  })
+
+  await test('过期锁会被回收（进程崩了不会永久卡死）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-stale-'))
+    const file = path.join(home, 'stale.lock')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, JSON.stringify({ key: 'dead', pid: 999999, host: os.hostname(), ts: Date.now() - 60000, expiresAt: Date.now() - 30000 }))
+    assert.equal(peekLock(file), null)
+    const owned = await acquireFileLock(file, { owner: makeOwner('stale-test') })
+    assert.equal(owned.ok, true)
+    releaseFileLock(file, owned.holder)
+  })
+
+  await test('刚创建但内容还没写完的锁不会被抢走（wx 竞态）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-race-'))
+    const file = path.join(home, 'race.lock')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    // 模拟「另一个进程已创建文件、正在写入」：内容是半截 JSON，mtime 是现在。
+    fs.writeFileSync(file, '{"key":"other","pid":')
+    const peek = peekLock(file)
+    assert.ok(peek !== null, '正在写入的锁不能被报告成空闲')
+    const stolen = await acquireFileLock(file, { owner: makeOwner('racer'), waitMs: 0 })
+    assert.equal(stolen.ok, false, '不能把别人正在写的锁删掉')
+
+    // 同一份坏内容，但文件很旧 → 才算残留，可以回收。
+    const old = new Date(Date.now() - 60000)
+    fs.utimesSync(file, old, old)
+    const reclaimed = await acquireFileLock(file, { owner: makeOwner('reclaimer'), waitMs: 0 })
+    assert.equal(reclaimed.ok, true)
+    releaseFileLock(file, reclaimed.holder)
+  })
+
+  await test('withProjectLock 释放后同一项目可再次获取', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-with-'))
+    const slug = 'game-a-abc123'
+    const value = await withProjectLock(home, slug, makeOwner('one'), async () => 42)
+    assert.equal(value, 42)
+    let busyError = null
+    await withProjectLock(home, slug, makeOwner('two'), async () => {
+      try {
+        await withProjectLock(home, slug, makeOwner('three'), async () => 'nope')
+      } catch (error) {
+        busyError = error
+      }
+    })
+    assert.ok(busyError !== null, '嵌套写操作应当被拒')
+    assert.match(busyError.message, /只允许一个写操作/)
+  })
+
+  await test('构建槽位按上限统计，且上限为 2 时第二个槽位可见', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-slots-'))
+    const ownerA = makeOwner('build-a')
+    const ownerB = makeOwner('build-b')
+    const slotOne = await acquireBuildSlot(home, ownerA, { max: 2, waitMs: 0 })
+    assert.equal(slotOne.ok, true)
+    assert.equal(slotOne.slot, 1)
+    const slotTwo = await acquireBuildSlot(home, ownerB, { max: 2, waitMs: 0 })
+    assert.equal(slotTwo.ok, true)
+    assert.equal(slotTwo.slot, 2)
+    const busy = await acquireBuildSlot(home, makeOwner('build-c'), { max: 2, waitMs: 0 })
+    assert.equal(busy.ok, false, '两个槽位都占满时必须拒绝')
+    assert.equal(busy.holders.length, 2, '错误信息里要列出两个占用者')
+    assert.equal(buildSlotsStatus(home, 1).length, 1, '上限 1 时只应看到第一个槽位')
+    assert.equal(buildSlotsStatus(home, 2).length, 2, '上限 2 时应看到两个槽位')
+    releaseBuildSlot(slotOne.file, ownerA)
+    releaseBuildSlot(slotTwo.file, ownerB)
+  })
+
+  await test('cocos_status 能查「已登记但没运行」的项目', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-status-'))
+    const registered = await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })
+    const slug = projectSlug(projectA)
+    assert.ok(registered.projects[slug])
+    const result = await TOOL_INDEX.get('cocos_status').handler(
+      { project: slug },
+      { dshHome: home, config: {}, sessionId: 'verify' },
+    )
+    assert.equal(result.slug, slug)
+    assert.equal(result.running, false)
+    assert.equal(result.meta?.creatorVersion, '3.8.8')
+  })
+
+  // ── 配置层 patch ────────────────────────────────────────────
+  await test('patch 行能新增、保持幂等、再删除', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-patch-'))
+    const patchFile = path.join(home, 'profiles', 'desktop', 'cordis.patch.yml')
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true })
+    fs.writeFileSync(patchFile, '- id: existing\n  name: something\n  config:\n    a: 1\n')
+    const nodePath = process.execPath
+    const hubPath = path.join(ROOT, 'src/cocos/server.mjs')
+
+    const first = upsertMcpRow({ dshHome: home, nodePath, hubPath })
+    assert.equal(first.changed, true)
+    const text = fs.readFileSync(patchFile, 'utf8')
+    assert.match(text, /- id: mcp-cocos/)
+    assert.match(text, /serverName: cocos/)
+    assert.match(text, /id: existing/, '用户原有条目必须保留')
+
+    const second = upsertMcpRow({ dshHome: home, nodePath, hubPath })
+    assert.equal(second.changed, false, '重复登记应幂等')
+
+    const removed = removeMcpRow({ dshHome: home })
+    assert.equal(removed.changed, true)
+    const after = fs.readFileSync(patchFile, 'utf8')
+    assert.ok(!after.includes('mcp-cocos'))
+    assert.match(after, /id: existing/)
+  })
+
+  await test('非法 patch 文件拒绝写入（不硬塞）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-badpatch-'))
+    const patchFile = path.join(home, 'profiles', 'desktop', 'cordis.patch.yml')
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true })
+    fs.writeFileSync(patchFile, 'this: is not a patch list\n')
+    let error = null
+    try {
+      upsertMcpRow({ dshHome: home, nodePath: process.execPath, hubPath: path.join(ROOT, 'src/cocos/server.mjs') })
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error !== null)
+    assert.equal(error.code, 'PATCH_NOT_A_LIST')
+    assert.equal(fs.readFileSync(patchFile, 'utf8'), 'this: is not a patch list\n', '文件不能被改动')
+  })
+
+  await test('renderRow 生成的 YAML 块能被 findRowBlock 找到', async () => {
+    const row = renderRow({ nodePath: 'C:\\Program Files\\nodejs\\node.exe', hubPath: 'D:\\a b\\server.mjs', buildSlots: 2 })
+    const found = findRowBlock(`${row}\n- id: next\n  name: x\n`)
+    assert.ok(found !== null)
+    assert.match(found.block, /--build-slots/)
+    assert.match(found.block, /- '2'/)
+  })
+
+  // ── 注册表 ──────────────────────────────────────────────────
+  await test('注册表：slug / 名称 / 前缀解析，歧义要报错', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-reg-'))
+    const a = await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })
+    const slugA = projectSlug(projectA)
+    assert.ok(a.projects[slugA])
+    const b = await upsertProject(home, { path: path.join(tmpRoot, 'game-ab'), name: 'game-ab' })
+    assert.equal(listProjects(home).length, 2)
+    assert.equal(resolveProjectRef(home, slugA).slug, slugA)
+    assert.equal(resolveProjectRef(home, projectA).slug, slugA)
+    assert.equal(resolveProjectRef(home, 'game-a').slug, slugA)
+    let ambiguous = null
+    try {
+      resolveProjectRef(home, 'game-a')
+      // 'game-a' 精确匹配到同名项目，不应歧义
+    } catch (error) {
+      ambiguous = error
+    }
+    assert.equal(ambiguous, null)
+  })
+
+  await test('registry 写入是原子的（不留下临时文件）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-atomic-'))
+    await upsertProject(home, { path: projectA, name: 'game-a' })
+    await upsertProject(home, { path: projectB, name: 'game-b' })
+    const dir = path.join(home, 'game-forge', 'cocos')
+    const leftovers = fs.readdirSync(dir).filter((name) => name.includes('.tmp'))
+    assert.deepEqual(leftovers, [])
+  })
+
+  // ── 命令解析 ────────────────────────────────────────────────
+  await test('命令 tokenize 支持带空格的路径与引号', async () => {
+    assert.deepEqual(tokenize('install "D:\\my games\\demo" --yes'), ['install', 'D:\\my games\\demo', '--yes'])
+    assert.deepEqual(tokenize('  list  '), ['list'])
+    assert.deepEqual(tokenize("build 'a b' --platform web-mobile"), ['build', 'a b', '--platform', 'web-mobile'])
+  })
+
+  // ── stdio 服务 ──────────────────────────────────────────────
+  await test('stdio 服务：initialize / tools/list / tools/call 全链路', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-stdio-'))
+    const child = spawn(process.execPath, [path.join(ROOT, 'src/cocos/server.mjs'), '--home', home], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, DSH_HOME: home },
+    })
+    const responses = []
+    let buffer = ''
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString()
+      let index
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index).trim()
+        buffer = buffer.slice(index + 1)
+        if (line === '') continue
+        responses.push(JSON.parse(line))
+      }
+    })
+    const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`)
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2026-07-28', capabilities: {}, clientInfo: { name: 'verify', version: '0' } } })
+    send({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} })
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
+    send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'cocos_projects', arguments: {} } })
+
+    const deadline = Date.now() + 20000
+    while (responses.length < 3 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    }
+    child.stdin.end()
+    await new Promise((resolve) => { child.on('exit', resolve); setTimeout(resolve, 5000) })
+
+    const init = responses.find((item) => item.id === 1)
+    assert.ok(init?.result?.serverInfo?.name === 'cocos', 'initialize 应返回 serverInfo')
+    const list = responses.find((item) => item.id === 2)
+    const names = list.result.tools.map((tool) => tool.name)
+    for (const expected of ['cocos_projects', 'cocos_exec', 'cocos_scene', 'cocos_build', 'cocos_raw']) {
+      assert.ok(names.includes(expected), `tools/list 应包含 ${expected}`)
+    }
+    const call = responses.find((item) => item.id === 3)
+    assert.equal(call.result.isError, false)
+    const payload = JSON.parse(call.result.content[0].text)
+    assert.ok(Array.isArray(payload.projects), 'cocos_projects 应返回 projects 数组')
+  })
+
+  mockA.server.close()
+  mockB.server.close()
+
+  // ── 结果 ────────────────────────────────────────────────────
+  process.stdout.write(`\n通过 ${passed} 项，失败 ${failures.length} 项\n`)
+  if (failures.length > 0) {
+    for (const failure of failures) {
+      process.stdout.write(`\n[${failure.name}]\n${failure.error?.stack ?? failure.error}\n`)
+    }
+    process.exitCode = 1
+  }
+  fs.rmSync(tmpRoot, { recursive: true, force: true })
+}
+
+main().catch((error) => {
+  process.stderr.write(`${error?.stack ?? error}\n`)
+  process.exit(1)
+})

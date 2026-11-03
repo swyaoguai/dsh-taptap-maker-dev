@@ -28,7 +28,7 @@ const ok = (cond, label, extra = '') => {
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-audio-assets-'))
 console.log(`临时目录：${scratch}\n`)
 
-const audioSrc = fs.readFileSync(new URL('../src/taptap-audio.mjs', import.meta.url), 'utf8')
+const audioSrc = fs.readFileSync(new URL('../src/game-audio.mjs', import.meta.url), 'utf8')
 const libSrc = fs.readFileSync(new URL('../src/audio-library.mjs', import.meta.url), 'utf8')
 const seqSrc = fs.readFileSync(new URL('../src/video-sequence.mjs', import.meta.url), 'utf8')
 
@@ -47,7 +47,7 @@ console.log('\n[1] ffmpeg 必须走 ffmpegPath()，不能是裸名字')
 
 console.log('\n[2] .meta / .seq.json 必须是原子写')
 {
-  for (const [name, src] of [['taptap-audio.mjs', audioSrc], ['audio-library.mjs', libSrc]]) {
+  for (const [name, src] of [['game-audio.mjs', audioSrc], ['audio-library.mjs', libSrc]]) {
     ok(/\.partial/.test(src), `${name} 用 .partial 临时名写 .meta`)
     ok(/renameSync\(`\$\{meta\}\.partial`, meta\)|renameSync\(`\$\{[^}]*meta\}\.partial`/.test(src), `${name} 写完后 rename 就位`)
     // 不应再有裸的 meta 写入
@@ -67,7 +67,7 @@ console.log('\n[3] 原子写的实际效果（驱动真实 import）')
   const wav = path.join(scratch, 'tone.wav')
   execFileSync(ffmpegPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', wav])
 
-  const mod = await import('../src/taptap-audio.mjs')
+  const mod = await import('../src/game-audio.mjs')
   const res = mod.installFile(wav, proj, 'bgm')
   ok(fs.existsSync(res.target), '音频文件已落盘')
   ok(fs.existsSync(res.meta), '.meta 已生成')
@@ -95,11 +95,11 @@ console.log('\n[4] 转换分支仍可用（ffmpegPath 解析 + 超时）')
   const wav = path.join(scratch, 'tone2.wav')
   execFileSync(ffmpegPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=220:duration=1', wav])
 
-  const mod = await import('../src/taptap-audio.mjs')
+  const mod = await import('../src/game-audio.mjs')
   // 直接驱动 importLocalFiles 的转换路径（通过 CLI 参数等价物）
   const { spawnSync } = await import('node:child_process')
   const cli = spawnSync(process.execPath, [
-    new URL('../src/taptap-audio.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
+    new URL('../src/game-audio.mjs', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'),
     'import', wav, '--project', proj, '--to', 'mp3',
   ], { encoding: 'utf8' })
   let out = null
@@ -116,7 +116,7 @@ console.log('\n[5] installFile 的 outName 路径穿越防护（2026-10-25）')
   fs.mkdirSync(path.join(proj, 'assets'), { recursive: true })
   const wav = path.join(scratch, 'tone3.wav')
   execFileSync(ffmpegPath(), ['-y', '-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=330:duration=1', wav])
-  const mod = await import('../src/taptap-audio.mjs')
+  const mod = await import('../src/game-audio.mjs')
   const sfxDir = path.join(proj, 'assets', 'audio', 'sfx')
 
   const r1 = mod.installFile(wav, proj, 'sfx', '..\\..\\evil.wav')

@@ -22,9 +22,9 @@
   本插件按用户提供材料的原样分发处理，不对其做再授权；如原作者对分发方式
   有异议，请提出，我们会调整或移除。
 - 落地：`skills/zaiduyu-imagegen/`（`generate.py` 原样保留，未改动逻辑；
-  仅 `SKILL.md` 的本机安装一节改写为通用集成说明）+ `src/taptap-zaiduyu.mjs`
+  仅 `SKILL.md` 的本机安装一节改写为通用集成说明）+ `src/game-zaiduyu.mjs`
   （Node 包装层：Python 探测、凭据检查、输出解析，为本插件自写）。
-- 凭据模型：设置页验证后保存在本机 `$DSH_HOME/taptap-maker-dev/zaiduyu.json`，
+- 凭据模型：设置页验证后保存在本机 `$DSH_HOME/game-forge/zaiduyu.json`，
   环境变量 `ZAIDUYU_USER` / `ZAIDUYU_PASS` 只作兼容兜底；运行上游脚本时只注入
   子进程环境，不进命令行参数、不回显密码、不放入 Maker 工作区。
 
@@ -33,10 +33,10 @@
 - 模型：`stabilityai/stable-audio-open-1.0`（Stability AI）。
 - 许可证：**Stability AI Community License** —— 个人与年营收 < 100 万美元的
   团队可免费商用；完整条款以用户下载包内的 `LICENSE.md` 为准。
-- **本插件不分发模型权重**：约 5.3GB 权重由用户依 `taptap-sfx guide` 的指引
+- **本插件不分发模型权重**：约 5.3GB 权重由用户依 `game-sfx guide` 的指引
   **自行手动下载**（ModelScope / HuggingFace 官方渠道），并且先做硬件体检。
 - 落地：`skills/taptap-maker-local-sfx/scripts/`（sfx_env.py 环境管理 +
-  generate.py 推理脚本，为整合编写）+ `src/taptap-sfx.mjs`（编排与落盘，本插件自写）。
+  generate.py 推理脚本，为整合编写）+ `src/game-sfx.mjs`（编排与落盘，本插件自写）。
 
 ---
 

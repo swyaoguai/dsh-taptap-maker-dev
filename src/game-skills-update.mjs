@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * taptap-skills-update — refresh the bundled-skill cache from configured
+ * game-skills-update — refresh the bundled-skill cache from configured
  * sources, and detect which skills are new or changed since last cycle.
  *
  * Source spec forms (array of strings in config.skills.sources):
@@ -18,7 +18,7 @@
  * Network/git are optional. In an offline environment this is a safe no-op
  * that only records the attempt.
  *
- * @module src/taptap-skills-update.mjs
+ * @module src/game-skills-update.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'

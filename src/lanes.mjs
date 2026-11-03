@@ -6,7 +6,7 @@
  * 下一条**。这里把「有哪些通道、按什么顺序、哪些开着、失败要不要自动换」
  * 收敛成一份可排序的列表，三条链路共用同一套语义。
  *
- * 落盘：$DSH_HOME/taptap-maker-dev/lanes.json
+ * 落盘：$DSH_HOME/game-forge/lanes.json
  *   {
  *     "autoFallback": true,          // 全局：额度不足时是否自动换下一条通道
  *     "groups": {

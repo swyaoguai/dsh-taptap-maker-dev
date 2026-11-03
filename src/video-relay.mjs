@@ -27,7 +27,7 @@
  *        baseUrl 指向中转站根，协议与官方一致。很多中转站就是这么转的。
  *
  * 共同遵守的东西（与生图中转站一致）：
- *   - 凭据落在 `$DSH_HOME/taptap-maker-dev/video-relay.json`，绝不进工作区；
+ *   - 凭据落在 `$DSH_HOME/game-forge/video-relay.json`，绝不进工作区；
  *   - 报错原文回到界面/对话里，不吞；
  *   - 「获取模型」走 `GET {base}/models`，中转站给什么列什么。
  *

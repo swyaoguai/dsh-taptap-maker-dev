@@ -15,8 +15,8 @@ import { Readable } from 'node:stream'
 import vm from 'node:vm'
 
 import { runWithFallback } from '../src/lanes.mjs'
-import { consumeGenFlags, parseArgs as parseSfxArgs } from '../src/taptap-sfx.mjs'
-import { collectReferences, parseArgs as parseZaiduyuArgs } from '../src/taptap-zaiduyu.mjs'
+import { consumeGenFlags, parseArgs as parseSfxArgs } from '../src/game-sfx.mjs'
+import { collectReferences, parseArgs as parseZaiduyuArgs } from '../src/game-zaiduyu.mjs'
 
 let passed = 0
 let failed = 0
@@ -25,9 +25,9 @@ async function check(name, run) {
   catch (error) { failed += 1; console.error(`  FAIL ${name}: ${error.message}`) }
 }
 
-const gptSource = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
-const sfxSource = fs.readFileSync(new URL('../src/taptap-sfx.mjs', import.meta.url), 'utf8')
-const zaiduyuSource = fs.readFileSync(new URL('../src/taptap-zaiduyu.mjs', import.meta.url), 'utf8')
+const gptSource = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
+const sfxSource = fs.readFileSync(new URL('../src/game-sfx.mjs', import.meta.url), 'utf8')
+const zaiduyuSource = fs.readFileSync(new URL('../src/game-zaiduyu.mjs', import.meta.url), 'utf8')
 
 // Execute the real function body with dependencies replaced in memory. Never
 // reimplement the logic under test, or execute the CLI's automatic entry point.
@@ -370,6 +370,9 @@ function hostFixture(name) {
   const noop = () => () => {}
   const context = {
     logger: { info() {}, warn() {} },
+    // 顶层 ctx 也要有 effect：插件在 apply() 里用 ctx.effect 托管版本检查定时器
+    // （真宿主一定提供；这里不补就会在加载时 TypeError）。
+    effect: (fn) => { try { return fn() } catch { /* 依赖真实宿主的 effect 忽略 */ } },
     inject(_names, setup) {
       setup({
         effect: (effect) => effect(),
@@ -386,7 +389,7 @@ function hostFixture(name) {
   writeVideoRelayConfigPatch(home, { ...config, enabled: true })
   async function call(method, sub, body) {
     const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))])
-    Object.assign(req, { method, url: `/api/taptap-maker-dev/${sub}`, headers: {} })
+    Object.assign(req, { method, url: `/api/game-forge/${sub}`, headers: {} })
     let status, payload
     await handler(req, { writeHead(s) { status = s }, end(text) { payload = JSON.parse(text) } })
     return { status, payload }
@@ -422,7 +425,7 @@ try {
     spawnCalls = []; events = []
     processResult = { code: 0, stdout: JSON.stringify({ outputs: ['MEMORY-ONLY.png'] }), stderr: '' }
     const tick = new Promise((resolve) => setTimeout(() => { events.push('tick'); resolve() }, 0))
-    const result = await fixture.commands.get('taptap-image').handler({ rawInput })
+    const result = await fixture.commands.get('game-image-relay').handler({ rawInput })
     events.push('done')
     await tick
     assert.equal(result.kind, 'success')
@@ -442,7 +445,7 @@ try {
     await check(`image subprocess failure never retries: ${response.error ?? response.stderr}`, async () => {
       const fixture = hostFixture(`failure-${passed + failed}`)
       spawnCalls = []; processResult = response
-      const result = await fixture.commands.get('taptap-image').handler({ rawInput: 'offline icon' })
+      const result = await fixture.commands.get('game-image-relay').handler({ rawInput: 'offline icon' })
       assert.equal(result.kind, 'error')
       assert.equal(spawnCalls.length, 1)
     })
@@ -458,7 +461,7 @@ try {
         creates += 1
         return new Response(JSON.stringify({ data: [{ b64_json: pngBase64 }] }))
       }
-      const result = await fixture.commands.get('taptap-gpt').handler({ rawInput: 'offline relay icon' })
+      const result = await fixture.commands.get('game-image').handler({ rawInput: 'offline relay icon' })
       assert.equal(result.kind, 'success', 'do not require an unrelated GPT account')
       assert.equal(creates, 1)
       assert.doesNotMatch(result.text, /\bundefined\b/)

@@ -27,7 +27,7 @@ user-invocable: true             # 可选
 ## 放哪里
 
 - **插件内置**：`<plugin>/skills/<name>/SKILL.md`（随插件分发，优先级 rank 360）。
-- **更新缓存**：`$DSH_HOME/taptap-maker-dev/skills-cache/`（更新器写入，rank 350，略高于内置，便于用新版覆盖同名）。
+- **更新缓存**：`$DSH_HOME/game-forge/skills-cache/`（更新器写入，rank 350，略高于内置，便于用新版覆盖同名）。
 - 两者都不在任何 Maker 工作区内，不会被 Maker 运行时自动提交。
 
 > 项目级 `.dsh/skills`、`.agents/skills` 由 dsh 自带的文件 skill 提供器负责，优先级更高（100/200），会盖过本插件同名 skill——需要项目特供时放那里。
@@ -54,4 +54,4 @@ config:
 - 插件启动 5s 后跑一次，之后每 `updateIntervalHours` 跑一次（定时器 unref，不挡退出）。
 - 更新器对每个 skill 存 sha256 到 `skills-cache/.update-manifest.json`，对比得出**新增/变更**，有变化就让 skill 注册表失效、热刷新。
 - 单个源失败不影响其它源；离线/无源时只记录一次 `lastChecked`。
-- 手动触发：`/taptap-skills` 命令，或 `node <plugin>/src/taptap-skills-update.mjs --source <spec> [--cache-dir <dir>]`。
+- 手动触发：`/game-skills` 命令，或 `node <plugin>/src/game-skills-update.mjs --source <spec> [--cache-dir <dir>]`。

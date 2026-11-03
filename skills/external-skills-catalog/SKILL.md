@@ -41,8 +41,8 @@ TapTap Maker 跑在 **UrhoX（Urho3D 衍生）+ Lua 5.4** 上。名单里很多 
 本插件的更新器会从 `config.skills.sources` 拉取并缓存，热更新到 skill 列表。源可以是：
 
 ```yaml
-- id: taptap-maker-dev
-  name: dsh-taptap-maker-dev
+- id: game-forge
+  name: dsh-game-forge
   config:
     skills:
       sources:

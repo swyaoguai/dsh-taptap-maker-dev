@@ -5,8 +5,8 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseSlashGenArgs } from '../src/taptap-gpt.mjs'
-import { parseSlashArgs } from '../src/taptap-image.mjs'
+import { parseSlashGenArgs } from '../src/game-image-web.mjs'
+import { parseSlashArgs } from '../src/game-image-relay.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 let passed = 0
@@ -61,7 +61,7 @@ console.log('\n[4] 空提示词给出明确错误')
 {
   const src = fs.readFileSync(path.join(root, 'index.js'), 'utf8')
   ok(/请给一句图片描述/.test(src), '命令层拒绝空描述')
-  ok(/图生图：\/taptap-gpt/.test(src), '错误附带图生图示例')
+  ok(/图生图：\/game-image/.test(src), '错误附带图生图示例')
 }
 
 console.log('\n[5] 中转站真实解析器导出参考图、布尔开关与漏值')

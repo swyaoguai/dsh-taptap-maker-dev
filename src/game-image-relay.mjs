@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * taptap-image — generate a game image asset through an OpenAI-compatible
+ * game-image-relay — generate a game image asset through an OpenAI-compatible
  * `/images/generations` endpoint, using the user's own model/key/URL.
  *
  * This is the custom image lane for TapTap Maker development: it never touches
@@ -8,10 +8,10 @@
  * agent calls this CLI from pwsh instead of `generate_image`.
  *
  * Usage:
- *   node taptap-image.mjs --prompt "一只橙色小猫，扁平矢量风格" --out D:\tmp\cat.png
- *   node taptap-image.mjs --prompt "..." --out out.png --size 1536x1024 --n 1
- *   node taptap-image.mjs --prompt "蓝色盾牌图标，扁平居中留白" --out icon.png --transparent --downscale 128x128
- *   node taptap-image.mjs --config         # print effective config (key masked)
+ *   node game-image-relay.mjs --prompt "一只橙色小猫，扁平矢量风格" --out D:\tmp\cat.png
+ *   node game-image-relay.mjs --prompt "..." --out out.png --size 1536x1024 --n 1
+ *   node game-image-relay.mjs --prompt "蓝色盾牌图标，扁平居中留白" --out icon.png --transparent --downscale 128x128
+ *   node game-image-relay.mjs --config         # print effective config (key masked)
  *
  * Size is NOT fixed: `--size WxH` passes through to the endpoint. If the
  * endpoint only accepts 1024x1024 / 1024x1536 / 1536x1024, a size-rejection is
@@ -24,12 +24,12 @@
  * present; otherwise the full image is kept and the exact command is printed.
  *
  * Credentials precedence (see src/paths.js resolveImageConfig):
- *   credentialsFile JSON > env (TAPTAP_IMAGE_*) > $DSH_HOME/taptap-maker-dev/image.json
+ *   credentialsFile JSON > env (TAPTAP_IMAGE_*) > $DSH_HOME/game-forge/image.json
  *
  * Safety: the resolved API key is NEVER printed in full and must live outside
  * any TapTap Maker project workspace (the Maker runtime auto-commits the repo).
  *
- * @module src/taptap-image.mjs
+ * @module src/game-image-relay.mjs
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -47,7 +47,7 @@ import {
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024'])
 
 /**
- * 解析 `/taptap-image <描述> [--ref …] [--size …] [--transparent …]` 的斜杠命令输入。
+ * 解析 `/game-image-relay <描述> [--ref …] [--size …] [--transparent …]` 的斜杠命令输入。
  *
  * 为什么不能用正则剥 flag（旧写法）：flag 表是人工维护的白名单，漏一个就是
  * 「合法参数没人认领」。实测过的真实后果：
@@ -93,7 +93,7 @@ export function parseSlashArgs(raw) {
 /** 导出以便测试直接打真实实现（复刻一份解析器等于没测）。 */
 export function parseArgs(argv) {
   // 用 tokens.mjs 的 flagOf / looksLikeFlag（对齐 Python argparse），与
-  // taptap-gpt / taptap-sfx / taptap-zaiduyu 同一套语义。之前各写一套判断
+  // game-image / game-sfx / game-zaiduyu 同一套语义。之前各写一套判断
   // （`startsWith('--')` / `startsWith('-')` / 正则），同一句话在不同链路上
   // 结果不同 —— 属于最难查的一类 bug。本 CLI 对外只承诺长格式，短开关照旧忽略。
   const args = { _: [] }
@@ -617,7 +617,7 @@ async function main() {
     const inputs = collectInputs(args)
     if (typeof args.prompt !== 'string' || inputs.length === 0 || typeof args.out !== 'string') {
       process.stderr.write(
-        'usage: taptap-image edit --in <原图> --prompt "<风格描述>" --out <输出.png> [--size WxH]\n'
+        'usage: game-image-relay edit --in <原图> --prompt "<风格描述>" --out <输出.png> [--size WxH]\n'
         + '       多图参考：--in a.png --in b.png   （或 --in "a.png,b.png" / --refs ...）\n'
         + '       单图模型：--single-ref（只用第一张）；确认支持多图：--multi-ref\n',
       )
@@ -630,8 +630,8 @@ async function main() {
   }
   if (typeof args.prompt !== 'string' || typeof args.out !== 'string') {
     process.stderr.write(
-      'usage: taptap-image [--prompt "<text>" --out <file.png> [--size WxH] [--n 1] [--transparent] [--downscale WxH]]\n'
-      + '       taptap-image edit --in <原图> --prompt "<风格>" --out <输出.png>   # 图生图（spine reskin）\n',
+      'usage: game-image-relay [--prompt "<text>" --out <file.png> [--size WxH] [--n 1] [--transparent] [--downscale WxH]]\n'
+      + '       game-image-relay edit --in <原图> --prompt "<风格>" --out <输出.png>   # 图生图（spine reskin）\n',
     )
     process.exitCode = 2
     return

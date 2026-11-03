@@ -64,7 +64,7 @@ const env = {
   TAPTAP_IMAGE_API_KEY: 'sk-test',
   TAPTAP_IMAGE_MODEL: 'gpt-image-1',
 }
-const cli = path.resolve('src/taptap-image.mjs')
+const cli = path.resolve('src/game-image-relay.mjs')
 const run = async (args, extraEnv = {}) => {
   try {
     const { stdout } = await execFileAsync('node', [cli, ...args], { env: { ...env, ...extraEnv }, encoding: 'utf8' })
@@ -140,7 +140,7 @@ console.log('\n[7] 统一入口 generateImage：中转站回退带参考图时�
   // 这是最容易「看起来接上了、实际没生效」的地方：relayOpts 带了 in，
   // 但旧的 runLane 无条件调 generateImage（/images/generations，纯文生图），
   // 参考图被静默丢弃 —— 用户以为图生图生效，实际拿到一张无关新图。
-  const gptSrc = fs.readFileSync(new URL('../src/taptap-gpt.mjs', import.meta.url), 'utf8')
+  const gptSrc = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
   const runLane = /const runLane = async \(laneId\) => \{[\s\S]*?\n  \}/.exec(gptSrc)?.[0] ?? ''
   ok(runLane.length > 0, '能找到 runLane')
   ok(/wantsRefs/.test(runLane), 'runLane 会判断是否带了参考图')
@@ -154,13 +154,13 @@ console.log('\n[7] 统一入口 generateImage：中转站回退带参考图时�
 
   // 真跑一次：给 mock 端点发请求，确认走的是 /images/edits 且带两张图。
   seen = []
-  const { generateImage: unified } = await import('../src/taptap-gpt.mjs')
+  const { generateImage: unified } = await import('../src/game-image-web.mjs')
   const home = path.join(scratch, 'home-unified')
-  fs.mkdirSync(path.join(home, 'taptap-maker-dev'), { recursive: true })
-  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'image.json'), JSON.stringify({
+  fs.mkdirSync(path.join(home, 'game-forge'), { recursive: true })
+  fs.writeFileSync(path.join(home, 'game-forge', 'image.json'), JSON.stringify({
     baseURL: `http://127.0.0.1:${port}/v1`, apiKey: 'sk-test', model: 'gpt-image-1',
   }))
-  fs.writeFileSync(path.join(home, 'taptap-maker-dev', 'lanes.json'), JSON.stringify({
+  fs.writeFileSync(path.join(home, 'game-forge', 'lanes.json'), JSON.stringify({
     autoFallback: true,
     groups: { image: { order: ['gptWeb', 'relayImage'], enabled: { gptWeb: false, relayImage: true } } },
   }))

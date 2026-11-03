@@ -58,7 +58,7 @@ const STATE = {
     ok: true, identifier: 'phone_111', password: MASKED,
     hasCredentials: true, source: 'file', envShadowed: false,
     script: true, usable: true, lastVerifiedAt: '2026-10-29T05:00:00.000Z',
-    lastIdentifier: 'phone_111', file: '/home/.dsh/taptap-maker-dev/zaiduyu.json',
+    lastIdentifier: 'phone_111', file: '/home/.dsh/game-forge/zaiduyu.json',
   },
   form: { identifier: 'phone_111', password: '' },
   busy: '', err: '', note: '', warnNote: '',

@@ -56,7 +56,7 @@ const StatusChip = (props) => ({ tag: '#StatusChip', props: props ?? {}, kids: [
 // 组件要的数据（模拟后端 GET /lanes 的返回）
 const LOADED = {
   autoFallback: false,
-  file: '/home/.dsh/taptap-maker-dev/lanes.json',
+  file: '/home/.dsh/game-forge/lanes.json',
   groups: {
     video: {
       label: '视频',
@@ -109,9 +109,16 @@ if (sandbox.__card) {
   ok(buttons.some((b) => b.props['aria-label'] === '视频中转站 上移'), '上移按钮带 aria-label（键盘可达）')
   ok(buttons.some((b) => b.props['aria-label'] === '自选本地视频 下移'), '下移按钮带 aria-label')
 
+  // 拖拽的落点已经从「整行 draggable」改成「每行一个专门的抓手」：
+  //   - 整行可拖会让按在开关/上下按钮上的一动就变成拖拽，点不准；
+  //   - 关掉的通道**也要能排**（重新打开后就按这个顺序走），所以三行都有抓手，
+  //     不是「只有启用的能拖」。
+  // 于是断言改成：每行恰好一个抓手 + 行上接住 dragover/drop + 抓手上发 dragstart。
   const draggables = flat.filter((n) => n.props && n.props.draggable === true)
-  ok(draggables.length === 2, '只有启用的通道可拖拽（关掉的不给拖）', String(draggables.length))
-  ok(draggables.every((n) => typeof n.props.onDrop === 'function' && typeof n.props.onDragStart === 'function'), '拖拽事件齐备（onDragStart/onDragOver/onDrop）')
+  ok(draggables.length === 3, '每条通道各一个拖拽抓手（含关掉的通道）', String(draggables.length))
+  ok(draggables.every((n) => typeof n.props.onDragStart === 'function'), '抓手上发 onDragStart')
+  const rows = flat.filter((n) => n.props && typeof n.props.onDragOver === 'function' && typeof n.props.onDrop === 'function')
+  ok(rows.length === 3, '每行都接住 onDragOver / onDrop（含关掉的通道）', String(rows.length))
 
   ok(flat.some((n) => n.tag === '#Toggle' && n.props['aria-pressed'] === true && typeof n.props.onClick === 'function'), '有处于开启态且可点击的开关')
 

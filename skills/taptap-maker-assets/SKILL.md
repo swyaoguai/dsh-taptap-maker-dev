@@ -2,6 +2,7 @@
 name: taptap-maker-assets
 description: TapTap Maker 资源落盘规范：assets/ 自动补 .meta 的陷阱、中间产物隔离、命名/图集/尺寸预算，以及不花内置额度的补素材顺序。
 whenToUse: 要往工程里加/改图片、音频、模型等资源，或规划资源目录与命名时。
+pinned: true  # 治理类：资源落盘/自动化提交安全规则，不许被外部覆盖
 ---
 
 # TapTap Maker 资源规范

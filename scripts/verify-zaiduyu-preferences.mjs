@@ -19,7 +19,7 @@ async function check(name, run) {
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-zaiduyu-preferences-'))
 console.log(`Retained offline fixtures: ${scratch}`)
 const homeFor = (name) => path.join(scratch, name)
-const fileFor = (home) => path.join(home, 'taptap-maker-dev', 'zaiduyu-preferences.json')
+const fileFor = (home) => path.join(home, 'game-forge', 'zaiduyu-preferences.json')
 let preferences
 let importError
 try { preferences = await import('../src/zaiduyu-preferences.mjs') }
@@ -45,7 +45,7 @@ await check('clear writes an empty preference without deleting or touching other
   const h = homeFor('clear')
   const p = helpers()
   p.writeZaiduyuPreferences(h, { defaultModel: 'offline-image-A' })
-  const marker = path.join(h, 'taptap-maker-dev', 'account-placeholder.txt')
+  const marker = path.join(h, 'game-forge', 'account-placeholder.txt')
   fs.writeFileSync(marker, 'untouched offline marker', 'utf8')
   assert.deepEqual(p.writeZaiduyuPreferences(h, { defaultModel: '' }), { defaultModel: '' })
   assert.ok(fs.existsSync(fileFor(h)))

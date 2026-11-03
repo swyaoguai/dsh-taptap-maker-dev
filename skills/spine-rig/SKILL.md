@@ -24,7 +24,7 @@ Windows/PowerShell + 本插件目录重写，算法未改动。
 
 ```powershell
 # <skill-dir> = 本 SKILL.md 所在目录；下文 <scripts> = <skill-dir>\scripts
-D:\dsh-taptap-maker-dev\skills\spine-rig\scripts\
+D:\dsh-game-forge\skills\spine-rig\scripts\
 ```
 
 （PowerShell 里路径含空格时记得加引号。）
@@ -216,10 +216,10 @@ parts/ ──合成整图──> composite.png ──图生图──> reskin.png
 
 **第 R2 步：图生图换皮**（两条通道，都不花 Maker 额度）：
 
-- **通道 A：中转站 `/images/edits`**（本插件 `taptap-image edit`，已支持）：
+- **通道 A：中转站 `/images/edits`**（本插件 `game-image-relay edit`，已支持）：
 
 ```powershell
-node "<插件目录>\src\taptap-image.mjs" edit `
+node "<插件目录>\src\game-image-relay.mjs" edit `
   --in composite.png `
   --prompt "保持构图与每个部件的位置完全不变，把角色重绘为翡翠绿银色皇家礼服风格，扁平游戏美术" `
   --out reskin.png
@@ -259,7 +259,7 @@ python "<scripts>\reskin_atlas.py" `
 Spine JSON/atlas/PNG **不能直接丢进 Maker**（UrhoX 没有原生 Spine 运行时）。两条落地路径：
 
 1. **序列帧化（推荐，引擎无感）**：用官方 Spine Web Player 渲染各动画逐帧导出
-   （或直接用本插件的 `/taptap-video` 抽帧管线处理预览视频），再按
+   （或直接用本插件的 `/game-video` 抽帧管线处理预览视频），再按
    `taptap-maker-video-frames` 的规范切图进 `assets/`，游戏里用 AnimatedSprite
    式的序列帧播放。优点：零运行时依赖；缺点：文件体积大于骨骼数据。
 2. **骨骼运行时自实现（进阶）**：Maker 有 `AnimationStateMachine` / 骨骼

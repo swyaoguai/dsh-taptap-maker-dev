@@ -10,19 +10,19 @@ whenToUse: 需要给游戏生成/补充图片素材（图标、精灵、卡面�
 
 | | 通道 | 何时用 |
 |---|---|---|
-| **首选** | **ChatGPT 网页生图**（`taptap-gpt`） | 默认走这条。用你自己的 ChatGPT 账号 / 免费额度 |
-| **回退** | **中转站**（`taptap-image`，OpenAI 兼容 `/images`） | 网页通道不可用：已关闭、未登录、所有账号都触配额、或网页选择器失效 |
+| **首选** | **ChatGPT 网页生图**（`game-image`） | 默认走这条。用你自己的 ChatGPT 账号 / 免费额度 |
+| **回退** | **中转站**（`game-image-relay`，OpenAI 兼容 `/images`） | 网页通道不可用：已关闭、未登录、所有账号都触配额、或网页选择器失效 |
 
 **不要一上来就调中转站。** 也永远不要调 Maker 内置 `generate_image`（消耗额度）。
 
 ### ⚠️ 先确认总开关
 
-网页生图有一个**总开关**（设置页「ChatGPT 网页生图」卡右上角，或 `/taptap-gpt lane on|off`）。
+网页生图有一个**总开关**（设置页「ChatGPT 网页生图」卡右上角，或 `/game-image lane on|off`）。
 开关是 **OFF** 时：`gen` 会直接拒绝执行（返回 `lane_disabled`），应当改走中转站，
 而不是反复尝试网页通道，也不要自作主张去改开关状态。
 
 ```powershell
-node "<plugin>/src/taptap-gpt.mjs" lane status   # 查开关
+node "<plugin>/src/game-image-web.mjs" lane status   # 查开关
 ```
 
 ---
@@ -31,13 +31,13 @@ node "<plugin>/src/taptap-gpt.mjs" lane status   # 查开关
 
 ```powershell
 # 首次：登录一次（会开真实浏览器，Google/Apple/手机号/邮箱均可，免费账号即可生图）
-node "<plugin>/src/taptap-gpt.mjs" login
+node "<plugin>/src/game-image-web.mjs" login
 
-# 生成（不给 --out 时自动存到 <项目>/.taptap-images/，跟随项目）
-node "<plugin>/src/taptap-gpt.mjs" gen --prompt "一只橙色小猫，扁平矢量风格"
-node "<plugin>/src/taptap-gpt.mjs" gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
-node "<plugin>/src/taptap-gpt.mjs" status      # 登录状态 + 账号池 + 下载目录
-node "<plugin>/src/taptap-gpt.mjs" dir         # 看图片存到哪
+# 生成（不给 --out 时自动存到 <项目>/sucai/images/，跟随项目）
+node "<plugin>/src/game-image-web.mjs" gen --prompt "一只橙色小猫，扁平矢量风格"
+node "<plugin>/src/game-image-web.mjs" gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
+node "<plugin>/src/game-image-web.mjs" status      # 登录状态 + 账号池 + 下载目录
+node "<plugin>/src/game-image-web.mjs" dir         # 看图片存到哪
 ```
 
 对话里直接说「生成一个蓝色盾牌图标」即可，模型默认走这条。
@@ -47,11 +47,11 @@ node "<plugin>/src/taptap-gpt.mjs" dir         # 看图片存到哪
 一个账号触到配额会自动换下一个：
 
 ```powershell
-node "<plugin>/src/taptap-gpt.mjs" pool add --id a2 --label "小号"
-node "<plugin>/src/taptap-gpt.mjs" login --account a2     # 每个账号各登录一次
-node "<plugin>/src/taptap-gpt.mjs" pool list              # 看状态：已登录/冷却/封禁
-node "<plugin>/src/taptap-gpt.mjs" pool unban --id a2     # 恢复某个冷却/封禁账号
-node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复全部
+node "<plugin>/src/game-image-web.mjs" pool add --id a2 --label "小号"
+node "<plugin>/src/game-image-web.mjs" login --account a2     # 每个账号各登录一次
+node "<plugin>/src/game-image-web.mjs" pool list              # 看状态：已登录/冷却/封禁
+node "<plugin>/src/game-image-web.mjs" pool unban --id a2     # 恢复某个冷却/封禁账号
+node "<plugin>/src/game-image-web.mjs" pool unban             # 不带 id = 恢复全部
 ```
 
 - 每个账号有**独立浏览器 profile**，一个被封不会污染其他账号。
@@ -76,9 +76,9 @@ node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复�
 7. **出图慢（1~3 分钟），超时别重新生成**：脚本现在会等"生成中"状态结束、只认本次新出现的图再下载；
    真等超时会返回 `pendingUrl`（那个对话的链接）。此时**先用 `grab` 把已生成好的图抓回来**：
    ```powershell
-   node "<plugin>/src/taptap-gpt.mjs" pending        # 看有没有待抓取的对话
-   node "<plugin>/src/taptap-gpt.mjs" grab           # 抓 pending 里那个对话（不重新生成）
-   node "<plugin>/src/taptap-gpt.mjs" grab --url <对话链接>
+   node "<plugin>/src/game-image-web.mjs" pending        # 看有没有待抓取的对话
+   node "<plugin>/src/game-image-web.mjs" grab           # 抓 pending 里那个对话（不重新生成）
+   node "<plugin>/src/game-image-web.mjs" grab --url <对话链接>
    ```
    `gen` 自己也会先尝试续抓上一轮未完成的图（`--no-resume` 可关闭）。**重复 `gen` 会白烧一次生成额度。**
 
@@ -86,7 +86,7 @@ node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复�
 
 ## 回退：中转站（OpenAI 兼容 /images）
 
-配置在 `$DSH_HOME/taptap-maker-dev/image.json`（在 Maker 工作区之外，避免被运行时自动提交泄露 key）：
+配置在 `$DSH_HOME/game-forge/image.json`（在 Maker 工作区之外，避免被运行时自动提交泄露 key）：
 
 ```json
 { "baseURL": "https://your-endpoint/v1", "apiKey": "sk-...", "model": "gpt-image-2.5", "size": "1024x1024" }
@@ -97,8 +97,8 @@ node "<plugin>/src/taptap-gpt.mjs" pool unban             # 不带 id = 恢复�
 （设置页保存的值必须压过机器上的环境变量残留，否则会出现「显示已保存却不生效」。）
 
 ```powershell
-node "<plugin>/src/taptap-image.mjs" --prompt "一只橙色小猫，扁平矢量风格" --out D:\tmp\cat.png
-node "<plugin>/src/taptap-image.mjs" --config    # 查看生效配置（key 掩码）
+node "<plugin>/src/game-image-relay.mjs" --prompt "一只橙色小猫，扁平矢量风格" --out D:\tmp\cat.png
+node "<plugin>/src/game-image-relay.mjs" --config    # 查看生效配置（key 掩码）
 ```
 
 接口：`POST {baseURL}/images/generations`，`Authorization: Bearer <key>`，body `{model,prompt,size,n}`；优先读响应 `b64_json`。
@@ -107,14 +107,14 @@ node "<plugin>/src/taptap-image.mjs" --config    # 查看生效配置（key 掩�
 
 ```powershell
 # 中转站：单图参考
-node "<plugin>/src/taptap-image.mjs" edit --in 原图.png --prompt "改成赛博朋克风格" --out 输出.png
+node "<plugin>/src/game-image-relay.mjs" edit --in 原图.png --prompt "改成赛博朋克风格" --out 输出.png
 
 # 中转站：多图参考（OpenAI 标准 image[] 数组）
-node "<plugin>/src/taptap-image.mjs" edit --in 角色.png --in 服装.png --prompt "按服装替换角色衣服" --out 输出.png
-node "<plugin>/src/taptap-image.mjs" edit --in "角色.png,服装.png" --prompt "..." --out 输出.png   # 等价写法
+node "<plugin>/src/game-image-relay.mjs" edit --in 角色.png --in 服装.png --prompt "按服装替换角色衣服" --out 输出.png
+node "<plugin>/src/game-image-relay.mjs" edit --in "角色.png,服装.png" --prompt "..." --out 输出.png   # 等价写法
 
 # 网页通道：把参考图上传进 ChatGPT 输入框
-node "<plugin>/src/taptap-gpt.mjs" gen --prompt "把这个角色改成水彩风格" --ref 角色.png --out 输出.png
+node "<plugin>/src/game-image-web.mjs" gen --prompt "把这个角色改成水彩风格" --ref 角色.png --out 输出.png
 ```
 
 ### 上传前的本地参考图保护
@@ -122,7 +122,7 @@ node "<plugin>/src/taptap-gpt.mjs" gen --prompt "把这个角色改成水彩风�
 插件入口会先完整解码参考图，按通道做尺寸/体积预处理，再把不可变快照送进浏览器/API；不是再次生图，不消耗生成额度。网页默认 2048px、单张 1 MiB / 整组 8 MiB；中转站默认 2048px、4 / 16 MiB 且保持 PNG 兼容；章鱼插件入口默认 3072px、2 / 16 MiB。它们是本地优化目标，不是 HTTP 服务器限额。
 
 - 小图不重新编码；扩展名按真实 MIME 规范化。保留比例、透明度，规范 EXIF 朝向；不覆盖原图，拒绝与原图同文件的输出路径。
-- 缓存位于 `$DSH_HOME/taptap-maker-dev/reference-images/ref-upload-v2/`，不放游戏 `assets/`、不需要 `.meta`；按内容+策略复用，完整发布，不自动删除。
+- 缓存位于 `$DSH_HOME/game-forge/reference-images/ref-upload-v2/`，不放游戏 `assets/`、不需要 `.meta`；按内容+策略复用，完整发布，不自动删除。
 - 本机需可用 Python Pillow 或 ImageMagick；未就绪、坏图、动画、超时、压缩后仍超预算时返回 `phase: preflight, submitted: false`。**不要因此重登、重新提交、切换付费通道或直接上传未经处理原图**；如实告知本地原因。
 - 成功/后续错误的 `referencePreparation` 和 `notes` 用于说明处理前后体积、格式、尺寸及缓存情况；不要把输出 `--downscale` 当成上传前压缩。
 - 当前设置中的通道顺序/开关和本次明确模型优先；本节不授权调整它们。整段对话 JSON 过大造成的 `413`、上游 `model_not_found` 不在此修复范围。
@@ -153,13 +153,13 @@ node "<plugin>/src/taptap-gpt.mjs" gen --prompt "把这个角色改成水彩风�
 
 ## 落盘规范（Maker 工作区，两条通道通用）
 
-- **图片落点默认跟随项目**：在项目根执行 `gen` 时存到 `<项目>/.taptap-images/`，不再丢到 C 盘。
+- **图片落点默认跟随项目**：在项目根执行 `gen` 时存到 `<项目>/sucai/images/`，不再丢到 C 盘。
   该目录自带一个 `.gitignore`（内容 `*`），避免被 Maker 运行时自动提交。
-  - 看当前解析：`node "<plugin>/src/taptap-gpt.mjs" dir`
+  - 看当前解析：`node "<plugin>/src/game-image-web.mjs" dir`
   - 自定义：`dir --set "D:\my-images"` 或 `dir --set "{project}/imgs"`（支持 `{project}` / `{home}`）
   - 恢复跟随项目：`dir --reset`；单次覆盖：`gen --dir <目录>`
   - 设置页「ChatGPT 网页生图」卡里也有同样的输入框
-- 生成/抠图全程在 `assets/` **之外**的临时目录做（`.taptap-images/` 就是现成的）。
+- 生成/抠图全程在 `assets/` **之外**的临时目录做（`sucai/images/` 就是现成的）。
 - 裁好的成品才搬进 `assets/image/...`，并**补同名 `.meta`**：`{"uuid":"<27位随机串>"}`。
 - 两条通道都无远程映射，后续改图只能重新生成（`edit_image` 对它们无效）。
 - 小资源（图标 / 小 UI）：出干净大图（构图留白、主体居中），再用 `--downscale <宽>x<高>`（128x128 / 64x64）高质量缩小，切忌直接让模型出极小尺寸。

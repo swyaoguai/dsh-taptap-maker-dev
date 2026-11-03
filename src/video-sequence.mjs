@@ -248,7 +248,7 @@ function log(job, level, message) {
  * 作业根目录。
  *
  * 在 Maker 项目里跑 → `<项目>/sucai/video/<作业名>-<id>/`（跟随项目，三类素材
- * 统一收在 sucai 下）；否则退回 `$DSH_HOME/taptap-maker-dev/video-jobs/<id>/`。
+ * 统一收在 sucai 下）；否则退回 `$DSH_HOME/game-forge/video-jobs/<id>/`。
  *
  * ⚠️ 目录名带**作业名**而不是只用 id：用户在资源管理器里看到 `奔跑-j7k2p`
  * 比看到 `j7k2p` 有用得多。但作业名会变，而目录名一旦定下就不能跟着变（否则
@@ -514,7 +514,7 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
     if (job.video?.downloadError) {
       throw new Error(
         '这个作业的视频**已经生成成功**，只是上次下载失败（视频还在云端，重试不额外扣费）。\n'
-        + '不要重新提交。请运行：/taptap-video poll\n'
+        + '不要重新提交。请运行：/game-video poll\n'
         + `（上次错误：${String(job.video.downloadError).slice(0, 200)}）`,
       )
     }
@@ -527,7 +527,7 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
         action: '重新提交一个**卡在「提交中」且没有 task_id** 的作业',
         consequence: '上一次提交在过程中被中断，服务端**可能已经收下并扣了费**；'
           + '若它其实在跑，这次重投就是多花一份钱。',
-        undo: '没有撤销。先用 /taptap-video status 看台账，确认服务端没有该任务。',
+        undo: '没有撤销。先用 /game-video status 看台账，确认服务端没有该任务。',
       })
       if (!gate.ok) {
         throw new Error(
@@ -544,7 +544,7 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
       job.video = cleared.video
       log(job, 'warn', '用户确认后重投此前卡在「提交中」的作业')
     } else {
-      throw new Error(`视频任务已在跑（${job.video.taskId}），等它跑完再提交，避免重复扣费。查看进度：/taptap-video poll`)
+      throw new Error(`视频任务已在跑（${job.video.taskId}），等它跑完再提交，避免重复扣费。查看进度：/game-video poll`)
     }
   }
   // 🚫 上一次提交「结果未知」时**不许再提交**。
@@ -557,7 +557,7 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
       action: '在「上一次提交结果未知」的情况下**再提交一次**',
       consequence: `上一次提交（${job.video.submitId ?? '未知'}）没有收到服务端回应，`
         + '但服务端很可能已经收下并在生成、额度也可能已经扣了。再提交就是**多花一份钱**。',
-      undo: '没有撤销 —— 钱已经花出去了。先用 /taptap-video status 与 /taptap-video poll 确认。',
+      undo: '没有撤销 —— 钱已经花出去了。先用 /game-video status 与 /game-video poll 确认。',
     })
     if (!gate.ok) {
       throw new Error(`${gate.text}\n\n${UNCERTAIN_HINT}`)
@@ -566,11 +566,11 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
   const prompt = `${job.prompt.trim()}${job.suffix.trim() ? `\n${job.suffix.trim()}` : ''}`
   if (prompt.trim() === '') throw new Error('提示词为空：先写一句「角色在做什么」')
   if (job.mode === 'frames' && !job.refs.firstFrame) {
-    throw new Error('首尾帧模式至少要一张首帧图（可用 /taptap-video first <图片路径> 指定）')
+    throw new Error('首尾帧模式至少要一张首帧图（可用 /game-video first <图片路径> 指定）')
   }
   const backend = resolveBackend(job, config, home)
   if (backend === 'local') {
-    throw new Error('当前是「自选视频」后端：没有可提交的远程任务。直接用 /taptap-video use <mp4 路径> 挂上本地视频')
+    throw new Error('当前是「自选视频」后端：没有可提交的远程任务。直接用 /game-video use <mp4 路径> 挂上本地视频')
   }
   // 模型能力只在官方 MiniMax 后端下有意义：中转站的模型名由中转站自己定义。
   // 抽成函数：auto 模式下从中转站**回退**到 MiniMax 时同样要过这道关，
@@ -578,16 +578,16 @@ export async function submitJobVideo(home, id, config, { rawInput } = {}) {
   const assertMinimaxModel = () => {
     // ⚠️ 模型不允许被自动替换。这里**只报错、绝不换模型**：视频按秒计费，
     //    静默换一个「差不多」的模型等于替用户改了要买的东西。
-    //    需要换必须用户自己下指令（/taptap-video set --model … 或设置页）。
+    //    需要换必须用户自己下指令（/game-video set --model … 或设置页）。
     const wanted = String(job.settings.model ?? '').trim()
     if (wanted === '') {
-      throw new Error('作业没有指定模型：先 /taptap-video set --model <模型名>，或在设置页「MiniMax」里选一个。'
+      throw new Error('作业没有指定模型：先 /game-video set --model <模型名>，或在设置页「MiniMax」里选一个。'
         + '（插件不会替你猜模型）')
     }
     const cap = capabilityOf(wanted)
     if (job.refs.lastFrame && !cap.supportsLastFrame) {
       throw new Error(`${wanted} 不支持尾帧。`
-        + `可选：换成 ${modelsSupportingLastFrame().join(' / ')}（/taptap-video set --model <模型名>），或用 /taptap-video last --clear 清掉尾帧。`
+        + `可选：换成 ${modelsSupportingLastFrame().join(' / ')}（/game-video set --model <模型名>），或用 /game-video last --clear 清掉尾帧。`
         + '（插件不会自动替你换模型）')
     }
   }
@@ -779,8 +779,8 @@ const UNCERTAIN_HINT = [
   '',
   '🚫 请不要直接再跑一次 run —— 那会再提交一个新任务，等于多花一份钱。',
   '先做这两件事：',
-  '  1) /taptap-video status  看这个作业的台账记录',
-  '  2) /taptap-video poll    继续查（如果 task_id 已记下，就能把片子拿回来）',
+  '  1) /game-video status  看这个作业的台账记录',
+  '  2) /game-video poll    继续查（如果 task_id 已记下，就能把片子拿回来）',
   '确认服务端那边**确实没有**这个任务之后，再重新提交。',
 ].join('\n')
 
@@ -933,7 +933,7 @@ export async function pollJobVideo(home, id, config) {
       downloadFailedAt: Date.now(),
       updatedAt: Date.now(),
     }
-    log(fresh2, 'warn', `视频已生成但下载失败（${error?.message ?? error}）；再跑一次 /taptap-video poll 会直接重试下载，不扣费`)
+    log(fresh2, 'warn', `视频已生成但下载失败（${error?.message ?? error}）；再跑一次 /game-video poll 会直接重试下载，不扣费`)
     // 记下下载线索，短路径重试时不用重新查询就能拿到地址。
     fresh2.video.downloadHint = backend === 'relay' && !relayIsMinimax
       ? JSON.stringify({ directUrl: query.directUrl, contentUrl: query.contentUrl })
@@ -1473,27 +1473,27 @@ function luaSnippet(fileName, manifest) {
 
 /* ─────────────────────────────── 自检 / 提示 ────────────────────────────── */
 
-/** 作业级别的「下一步该做什么」，给 /taptap-video 与聊天用。 */
+/** 作业级别的「下一步该做什么」，给 /game-video 与聊天用。 */
 export function nextStepOf(job) {
   if (job.video?.status === 'uncertain') {
-    return '②⚠ 上次提交**结果未知**（可能已扣费）：先 /taptap-video status 看台账、/taptap-video poll 继续查；'
+    return '②⚠ 上次提交**结果未知**（可能已扣费）：先 /game-video status 看台账、/game-video poll 继续查；'
       + '确认服务端确实没有该任务后，才用 --yes 重新提交'
   }
-  if (job.video?.status === 'empty') return '① 设置首帧（/taptap-video first <图片>）并写提示词（/taptap-video prompt <文字>）'
-  if (job.video?.status === 'running') return '② 视频生成中，等它跑完（/taptap-video poll）'
+  if (job.video?.status === 'empty') return '① 设置首帧（/game-video first <图片>）并写提示词（/game-video prompt <文字>）'
+  if (job.video?.status === 'running') return '② 视频生成中，等它跑完（/game-video poll）'
   if (job.video?.status === 'error') return `② 视频失败：${job.video.error}${job.video.hint ? `（${job.video.hint}）` : ''}`
   if (job.video?.status === 'error' || job.video?.status === 'uncertain') {
     return `② 视频未成功：${job.video.error ?? ''}`
   }
-  if (job.frames?.status === 'empty') return '③ 抽帧：/taptap-video frames'
+  if (job.frames?.status === 'empty') return '③ 抽帧：/game-video frames'
   if (job.frames?.status === 'error') return `③ 抽帧失败：${job.frames.error}`
-  if ((job.frames?.keyed ?? []).length === 0) return '④ 抠像：/taptap-video key'
-  if (job.sheet?.status !== 'ready') return '⑤ 合成：/taptap-video sheet'
-  if (!job.import) return '⑥ 导入 Maker：/taptap-video import <工程目录>'
+  if ((job.frames?.keyed ?? []).length === 0) return '④ 抠像：/game-video key'
+  if (job.sheet?.status !== 'ready') return '⑤ 合成：/game-video sheet'
+  if (!job.import) return '⑥ 导入 Maker：/game-video import <工程目录>'
   return '✓ 已完成，可以进游戏里看效果'
 }
 
-/** 环境自检：ffmpeg / Key 类型 / 站点 / 套餐 / 中转站（设置页与 /taptap-video doctor 共用）。 */
+/** 环境自检：ffmpeg / Key 类型 / 站点 / 套餐 / 中转站（设置页与 /game-video doctor 共用）。 */
 export async function doctor(home, config) {
   const ffmpeg = await checkFfmpeg()
   const kind = detectKeyKind(config.apiKey)

@@ -8,7 +8,7 @@ import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parent.parent
-source = (ROOT / "src/taptap-gpt.mjs").read_text(encoding="utf-8")
+source = (ROOT / "src/game-image-web.mjs").read_text(encoding="utf-8")
 start = source.index("    # Keep a screenshot so the failure can be diagnosed without guessing.")
 end = source.index('    result["steps"] = steps', start)
 BLOCK = compile(textwrap.dedent(source[start:end]), "embedded-diagnostic-write", "exec")

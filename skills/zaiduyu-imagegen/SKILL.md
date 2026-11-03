@@ -15,7 +15,7 @@ whenToUse: 用户要求生图且想用 zaiduyu 多模型积分站，或 ChatGPT 
 
 设置页 →「生成通道」→「章鱼生图（积分站）」卡：填账号 + 密码 → 点「登录并保存」。
 插件会先用这组凭据去站点跑一次**只读**积分查询验证，通过才落盘到本机
-`$DSH_HOME/taptap-maker-dev/zaiduyu.json`，**即时生效、不需要重开宿主**。
+`$DSH_HOME/game-forge/zaiduyu.json`，**即时生效、不需要重开宿主**。
 调用脚本时凭据只注入**子进程环境变量**，绝不拼进命令行参数（argv 会进进程列表与日志）。
 
 兼容路径：环境变量 `ZAIDUYU_USER` / `ZAIDUYU_PASS` 仍然支持（文件值优先），
@@ -195,7 +195,7 @@ python "<skill-dir>/scripts/generate.py" --makeup 2026-10-20
 
 - 技能位置：随插件分发于 `<插件目录>/skills/zaiduyu-imagegen/`；`<skill-dir>` 即本目录。
 - **优先用本插件的包装 CLI 而不是裸调 `generate.py`**：
-  `node "<插件目录>/src/taptap-zaiduyu.mjs" gen --prompt "..." --ratio 9:16`
+  `node "<插件目录>/src/game-zaiduyu.mjs" gen --prompt "..." --ratio 9:16`
   已保存默认时不传 `--model`；本次用户明确另选才加 `--model <ID>`。
   包装层已经处理 Python 探测、凭据注入（读设置页保存的 `zaiduyu.json`）、
   UTF-8 环境、预检解析与统一失败形状；裸调时这些都得自己做，且**不能用命令行传密码**。
@@ -213,4 +213,4 @@ python "<skill-dir>/scripts/generate.py" --makeup 2026-10-20
   ```
 
 - 生图是同步接口，单张实测 1 分钟起步，命令执行超时必须设到 300 秒以上，不要用默认短超时。
-- **与其他生图通道的关系**：本站为积分制第三方通道，与 ChatGPT 网页生图（`/taptap-gpt`）、中转站（`/taptap-image`）、Maker 内置额度并列；通道优先级由用户在设置页决定，不要替用户改动通道顺序，也不要默认走本站。
+- **与其他生图通道的关系**：本站为积分制第三方通道，与 ChatGPT 网页生图（`/game-image`）、中转站（`/game-image-relay`）、Maker 内置额度并列；通道优先级由用户在设置页决定，不要替用户改动通道顺序，也不要默认走本站。
