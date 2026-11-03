@@ -166,8 +166,11 @@ export function resolveProjectRef(dshHome, ref) {
   const projects = listProjects(dshHome)
   if (ref === null || ref === undefined || String(ref).trim() === '') return null
   const want = String(ref).trim()
+  const lower = want.toLowerCase()
 
   const bySlug = projects.find((entry) => entry.slug === want)
+    // slug 统一是小写生成的；用户手打大写（WXZJ-xxx）也该命中。
+    ?? projects.find((entry) => entry.slug.toLowerCase() === lower)
   if (bySlug) return bySlug
 
   if (path.isAbsolute(want) || want.includes('/') || want.includes('\\')) {
@@ -175,7 +178,7 @@ export function resolveProjectRef(dshHome, ref) {
     if (byPath) return byPath
   }
 
-  const lower = want.toLowerCase()
+
   const byName = projects.filter((entry) => String(entry.name || '').toLowerCase() === lower
     || path.basename(String(entry.path || '')).toLowerCase() === lower)
   if (byName.length === 1) return byName[0]
@@ -184,7 +187,9 @@ export function resolveProjectRef(dshHome, ref) {
       + byName.map((entry) => `${entry.slug} (${entry.path})`).join('；'))
   }
 
-  const byPrefix = projects.filter((entry) => entry.slug.startsWith(lower))
+  // slug 前缀匹配：同样要在大小写不敏感的文件系统上折叠大小写
+  // （slug 本身是折叠后生成的，用户手打 `WXZJ` 应该也能命中 `wxzj-…`）。
+  const byPrefix = projects.filter((entry) => entry.slug.toLowerCase().startsWith(lower))
   if (byPrefix.length === 1) return byPrefix[0]
   if (byPrefix.length > 1) {
     throw new Error(`项目前缀 "${want}" 有多个候选：${byPrefix.map((entry) => entry.slug).join('、')}`)

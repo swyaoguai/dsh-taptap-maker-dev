@@ -131,7 +131,13 @@ node src/cocos/cli.mjs register --yes
 | `PROJECT_MISMATCH` | 端口上的服务是另一个项目 | **停手**，重新 `cocos_projects` |
 | `UNVERIFIED_IDENTITY` | 服务没上报项目路径 | 换支持身份上报的扩展版本 |
 | `UPSTREAM_TOOL_MISSING` | 扩展档位里没这个工具 | 切 full 档，或用 `cocos_exec` |
+| `UPSTREAM_TOOL_ERROR` | 上游工具自己报错（`isError`） | 看返回文案，别当成成功 |
 | `BUILD_BUSY` | 构建槽位已满 | 等当前构建结束 |
+| `SPAWN_FAILED` | 编辑器/构建进程没起来 | 检查 `creator_exe` 路径 |
+| `NOT_COCOS_PROJECT` | 目录不是 Cocos 工程（缺 `creator.version`） | 别把扩展装进 Maker 工程 |
+| `UNSUPPORTED_VERSION` | Creator 2.x | 2.x 不支持这套扩展 |
+| `DOWNLOAD_TOO_BIG` / `CHECKSUM_MISMATCH` | 下载包异常 | 换网络重试；校验失败不要安装 |
+| `PATCH_NOT_A_LIST` / `ROW_CONFLICT` | 配置层不是条目列表 / 已有同名条目不是我们写的 | 手工检查 profile patch，勿强写 |
 
 ## 5. 限制（如实说明）
 

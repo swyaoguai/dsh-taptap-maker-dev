@@ -2472,7 +2472,9 @@ window.__ModuleLoader__.load({
         try {
           const r = await fetch(`${API_BASE}/cocos`, { headers: { accept: 'application/json' } })
           const j = await r.json()
-          if (j?.ok) { setData(j); setLoadError(null); setMsg(null) } else {
+          // 注意：这里**不**清 msg。以前成功后会 setMsg(null)，于是
+          // 「已写入配置」这类提示会在一瞬间被刷新结果抹掉，用户以为没生效。
+          if (j?.ok) { setData(j); setLoadError(null) } else {
             setLoadError(j?.error ?? `HTTP ${r.status}`)
           }
         } catch (e) {
@@ -2482,10 +2484,14 @@ window.__ModuleLoader__.load({
 
       useEffect(() => { load() }, [load])
 
+      /** confirm 在某些宿主/嵌入式 webview 里可能不可用：不可用时按「同意」处理，
+       *  否则按钮点了完全没反应，用户根本没法操作。 */
+      const ask = (text) => (typeof window.confirm === 'function' ? window.confirm(text) : true)
+
       const toggleRegister = async () => {
+        if (busy !== '') return
         const next = !(data?.registered === true)
-        if (next && !window.confirm(
-          '将往 DSH profile 的 cordis.patch.yml 写入一条 mcp-cocos 配置（只增删这一条，会自动备份）。继续？')) return
+        if (next && !ask('将往 DSH profile 的 cordis.patch.yml 写入一条 mcp-cocos 配置（只增删这一条，会自动备份）。继续？')) return
         setBusy('register')
         setMsg(null)
         try {
@@ -2506,10 +2512,10 @@ window.__ModuleLoader__.load({
       }
 
       const install = async () => {
+        if (busy !== '') return
         const target = projectPath.trim()
         if (target === '') { setMsg({ kind: 'err', text: '先填一个 Cocos 工程目录' }); return }
-        if (!window.confirm(
-          `将从 GitHub 下载 funplay-cocos-mcp（MIT）并校验 SHA256，解压到：\n${target}\\extensions\\\n\n继续？`)) return
+        if (!ask(`将从 GitHub 下载 funplay-cocos-mcp（MIT）并校验 SHA256，解压到：\n${target}\\extensions\\\n\n继续？`)) return
         setBusy('install')
         setMsg(null)
         setInstallResult(null)

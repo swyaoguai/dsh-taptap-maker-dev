@@ -70,41 +70,63 @@ export function stripTrailingSep(value) {
   return s.replace(/[\\/]+$/, '')
 }
 
-/** 两个路径是否指同一个项目（Windows 大小写不敏感）。 */
+/** 大小写不敏感的文件系统（Windows 默认、macOS 默认）。 */
+const CASE_INSENSITIVE_FS = process.platform === 'win32' || process.platform === 'darwin'
+
+/** 两个路径是否指同一个项目。 */
 export function sameProjectPath(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a === '' || b === '') return false
   const na = normalizeProjectPath(stripTrailingSep(a))
   const nb = normalizeProjectPath(stripTrailingSep(b))
-  if (process.platform === 'win32') return na.toLowerCase() === nb.toLowerCase()
+  if (CASE_INSENSITIVE_FS) return na.toLowerCase() === nb.toLowerCase()
   return na === nb
 }
 
-/** 目录名 → 可读 slug 片段（ASCII 安全，非 ASCII 目录名退回 project）。 */
+/** 目录名 → 可读 slug 片段（保留中文等字母，其余非字母数字折成 `-`）。 */
 function slugStem(projectPath) {
   const normal = normalizeProjectPath(projectPath)
   const base = path.basename(normal) || 'project'
-  const ascii = base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 20)
+  // 用 \p{L}\p{N} 而不是 [a-z0-9]：中文目录名以前会被整段抹成 "project"，
+  // 三个中文工程在列表里全叫 project-xxxxxx，只能靠哈希分辨。
+  const ascii = String(base)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}_-]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 24)
   return ascii || 'project'
 }
 
 /**
  * 稳定的项目 slug：`wxzj-cocos-1a2b3c`。
  *
- * 哈希输入是「规范化后的全路径小写」，所以：
+ * 哈希输入是「规范化后的全路径」：
  *  - 同目录名、不同路径 → 不同 slug（不会在锁/注册表里串）；
- *  - 同一个项目从不同写法（大小写、末尾斜杠、符号链接）进来 → 同一个 slug。
+ *  - 同一个项目从不同写法（末尾斜杠、符号链接）进来 → 同一个 slug；
+ *  - **大小写只在大小写不敏感的文件系统上折叠**：Linux 上 `/Home/App` 与
+ *    `/home/app` 是两个不同目录，以前统一 toLowerCase 会让它们撞成同一个 slug，
+ *    于是锁和注册表条目互相覆盖。
  */
 export function projectSlug(projectPath) {
   const normal = normalizeProjectPath(stripTrailingSep(projectPath))
-  const hash = crypto.createHash('sha1').update(normal.toLowerCase()).digest('hex').slice(0, 6)
+  const key = CASE_INSENSITIVE_FS ? normal.toLowerCase() : normal
+  const hash = crypto.createHash('sha1').update(key).digest('hex').slice(0, 6)
   return `${slugStem(normal)}-${hash}`
 }
 
-/** 当前 DSH profile 的用户 patch 层（MCP 配置行写在这里）。 */
+/**
+ * 当前 profile 的用户 patch 层（MCP 配置行写在这里）。
+ *
+ * 用 `DSH_PROFILE` 指定 profile；命令行里没这个变量时默认 desktop。
+ * 如果该 profile 目录并不存在（比如用户在别的 profile/纯 CLI 下跑），
+ * 回落到 home 级 patch（`$DSH_HOME/cordis.patch.yml`）—— 它同样会在启动时应用，
+ * 总比往一个不存在的目录里写要好。
+ */
 export function profilePatchPath(dshHome) {
   const home = resolveDshHome(dshHome)
   const profile = String(process.env.DSH_PROFILE || 'desktop')
-  return path.join(home, 'profiles', profile, 'cordis.patch.yml')
+  const profilePatch = path.join(home, 'profiles', profile, 'cordis.patch.yml')
+  if (fs.existsSync(path.dirname(profilePatch))) return profilePatch
+  return path.join(home, 'cordis.patch.yml')
 }
 
 /** 当前 profile 目录。 */

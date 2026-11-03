@@ -76,15 +76,16 @@ export async function resolveTarget({ dshHome, project, requireLive = true, cach
     entry = resolveProjectRef(dshHome, project)
     if (entry === null) {
       // 用户可能直接给了个路径：能读成 Cocos 工程就自动登记，省一步。
+      // 已登记过的（路径一致）直接复用，避免每条调用都过一次跨进程锁。
       const meta = readProjectMeta(String(project))
       if (meta !== null) {
-        const saved = await upsertProject(dshHome, {
+        const known = projects.find((item) => sameProjectPath(item.path, meta.path))
+        entry = known ?? (await upsertProject(dshHome, {
           slug: projectSlug(meta.path),
           name: meta.name,
           path: meta.path,
           creatorVersion: meta.creatorVersion,
-        })
-        entry = saved.projects[projectSlug(meta.path)]
+        })).projects[projectSlug(meta.path)]
       } else {
         throw new CocosMcpError(
           `不认识项目 "${project}"。已登记的项目：${projects.length > 0 ? projects.map((item) => item.slug).join('、') : '(空)'}。`

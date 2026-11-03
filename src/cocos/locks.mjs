@@ -74,6 +74,11 @@ function isStale(record, now, file) {
   const expiresAt = Number(record.expiresAt) || 0
   if (expiresAt > 0 && now > expiresAt) return true
   // 同机 + 进程已死 → 立刻可回收，不必等 TTL。
+  // ⚠️ pid 复用防护：record.ts 记录的是拿锁时刻；如果那个 pid 已经轮转给了
+  // 别的进程，现在「活着」不代表原来拿锁的进程还活着。保守做法：拿锁时刻
+  // 早于本进程启动时间的 pid 存活检查仍然可信（Linux pid 回绕通常在 32k+），
+  // 所以这里只在「进程死了」时回收，「活着」不区分是不是同一个进程 —— 宁可
+  // 等 TTL，也不误删别人的锁。
   const host = String(record.host || '')
   if (host !== '' && host === os.hostname() && !pidAlive(record.pid)) return true
   return false
@@ -192,7 +197,12 @@ export async function withProjectLock(dshHome, slug, owner, fn, opts = {}) {
       + '同一个 Cocos 项目同一时间只允许一个写操作：请等它结束，或用 cocos_status 查看持有者。',
     )
   }
-  const heartbeat = setInterval(() => { touchFileLock(file, owner, ttlMs) }, Math.max(5000, Math.floor(ttlMs / 3)))
+  const heartbeat = setInterval(
+    () => { touchFileLock(file, owner, ttlMs) },
+    // 心跳必须明显快于 TTL：以前固定下限 5s，如果 ttlMs 被传成 3s（测试或
+    // 短操作场景），心跳比 TTL 还慢，锁会在操作中途过期被别人抢走。
+    Math.max(500, Math.floor(ttlMs / 3)),
+  )
   heartbeat.unref?.()
   try {
     return await fn()

@@ -82,7 +82,7 @@ async function main() {
   }
 
   if (command === 'list') {
-    const overview = await projectOverview({ dshHome, cacheMs: 0 })
+    const overview = await projectOverview({ dshHome, cacheMs: 0, buildSlotLimit: Math.max(1, Number(flags['build-slots']) || 1) })
     if (flags.json) {
       out(overview, flags)
       return 0
@@ -126,12 +126,12 @@ async function main() {
   }
 
   if (command === 'install') {
-    const project = args[1] ?? process.cwd()
+    const project = path.resolve(args[1] ?? process.cwd())
     if (flags.yes !== true) {
       out([
         '这会做三件事（不会执行第三方脚本）：',
-        `  1. 从 GitHub 下载 funplay-cocos-mcp 的 release（MIT）并校验 SHA256`,
-        `  2. 解压到 ${flags.global ? '全局 builtin-extensions' : `<工程>/extensions/`}`,
+        '  1. 从 GitHub 下载 funplay-cocos-mcp 的 release（MIT）并校验 SHA256',
+        `  2. 解压到 ${flags.global === true ? '全局 builtin-extensions' : path.join(project, 'extensions', 'funplay-cocos-mcp')}`,
         '  3. 若工程里没有 funplay-cocos-mcp.config.json，补一份 portMode="project" 的配置',
         '',
         '确认后请加 --yes 重新执行。',

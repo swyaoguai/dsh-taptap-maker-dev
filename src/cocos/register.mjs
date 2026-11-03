@@ -67,21 +67,30 @@ export function mcpRowStatus({ dshHome } = {}) {
   }
 }
 
-/** 渲染我们那一行的标准文本。 */
+/**
+ * 渲染我们那一行的标准文本。
+ *
+ * ⚠️ 参数全部走 `q()`（YAML 单引号字面量）。之前 `buildSlots` 直接数字插值没问题，
+ * 但 `serverName` 曾经是裸插值 —— 带空格或冒号的名字会把整条配置写坏，
+ * 而且 upsertMcpRow 的幂等检查（文本比较）从此永远不相等，每次都重写。
+ */
 export function renderRow({ nodePath, hubPath, serverName = MCP_SERVER_NAME, buildSlots = 1, timeoutMs = 600000 }) {
+  // 安全的 serverName 不加引号：这样已经写过一次的行保持逐字节一致，
+  // 幂等检查不会因为「加不加引号」而反复判定为需要重写。
+  const serverNameValue = /^[A-Za-z0-9_-]+$/.test(serverName) ? serverName : q(serverName)
   const lines = [
     `- id: ${MCP_ROW_ID}`,
     "  name: '@deepseek-ai/dsh-mcp-client'",
     '  # 由 dsh-game-forge 的 /game-cocos register 写入；删掉这一整条即可注销。',
     '  config:',
-    `    serverName: ${serverName}`,
+    `    serverName: ${serverNameValue}`,
     '    transport: stdio',
     `    command: ${q(nodePath)}`,
     '    args:',
     `      - ${q(hubPath)}`,
     "      - '--build-slots'",
-    `      - '${buildSlots}'`,
-    `    toolCallTimeoutMs: ${timeoutMs}`,
+    `      - '${Number(buildSlots) || 1}'`,
+    `    toolCallTimeoutMs: ${Number(timeoutMs) || 600000}`,
     '    failOnStartupError: false',
   ]
   return lines.join('\n')
@@ -110,15 +119,31 @@ export function upsertMcpRow({ dshHome, nodePath, hubPath, serverName = MCP_SERV
   }
 
   const trimmed = text.trim()
-  const looksLikeList = trimmed === '' || trimmed.startsWith('- ') || trimmed.startsWith('[]') || trimmed.startsWith('#')
+  // 严格判断「是不是一份条目列表」：去掉注释与空行后，第一个有效行必须以 `- `
+  // 或 `[` 开头。以前只看整体开头是不是 `#`，于是
+  //   # 一些注释
+  //   someKey: value        ← 其实是个 mapping
+  // 也能通过，追加 `- id:` 行会把整份 YAML 结构破坏成非法内容。
+  const meaningful = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '' && !line.startsWith('#'))
+  const looksLikeList = meaningful.length === 0
+    || meaningful[0].startsWith('- ')
+    || meaningful[0].startsWith('-')
+    || meaningful[0].startsWith('[')
   if (!looksLikeList) {
     throw new CocosMcpError(
-      `${file} 不是一份合法的条目列表（应以 "- id:" 或注释开头）。为避免写坏你的配置，已中止。`,
+      `${file} 不是一份合法的条目列表（去掉注释后应以 "- id:" 或 "[" 开头）。为避免写坏你的配置，已中止。`,
       { code: 'PATCH_NOT_A_LIST' },
     )
   }
+  // 保留用户文件原本的换行风格：之前统一 join('\n') 会把 CRLF 文件整体改成 LF，
+  // 在 git 里表现为「整份文件被重写」。
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
 
   const row = renderRow({ nodePath, hubPath, serverName, buildSlots })
+  const rowLines = row.split('\n')
   const found = findRowBlock(text)
   let next
   let action
@@ -135,14 +160,14 @@ export function upsertMcpRow({ dshHome, nodePath, hubPath, serverName = MCP_SERV
       return { changed: false, action: 'unchanged', file }
     }
     const lines = text.split(/\r?\n/)
-    next = [...lines.slice(0, found.start), ...row.split('\n'), ...lines.slice(found.end)].join('\n')
+    next = [...lines.slice(0, found.start), ...rowLines, ...lines.slice(found.end)].join(eol)
     action = 'updated'
-  } else if (trimmed === '' || trimmed === '[]') {
-    next = `# dsh-game-forge: Cocos MCP 入口（/game-cocos register 写入）\n${row}\n`
+  } else if (meaningful.length === 0 || (meaningful.length === 1 && meaningful[0] === '[]')) {
+    next = [`# dsh-game-forge: Cocos MCP 入口（/game-cocos register 写入）`, ...rowLines, ''].join(eol)
     action = 'created'
   } else {
-    const separator = text.endsWith('\n') ? '' : '\n'
-    next = `${text}${separator}\n# dsh-game-forge: Cocos MCP 入口（/game-cocos register 写入）\n${row}\n`
+    const separator = text.endsWith('\n') ? '' : eol
+    next = `${text}${separator}${eol}# dsh-game-forge: Cocos MCP 入口（/game-cocos register 写入）${eol}${rowLines.join(eol)}${eol}`
     action = 'appended'
   }
 
@@ -166,7 +191,15 @@ export function removeMcpRow({ dshHome } = {}) {
   const found = findRowBlock(text)
   if (found === null) return { changed: false, action: 'absent', file }
   const lines = text.split(/\r?\n/)
-  const next = [...lines.slice(0, found.start), ...lines.slice(found.end)].join('\n')
+  const eol = text.includes('\r\n') ? '\r\n' : '\n'
+  // 我们写入时是「说明注释 + 条目」两块；两处都要带走，别在用户文件里留孤儿注释。
+  let start = found.start
+  const prevLine = lines[start - 1]
+  if (typeof prevLine === 'string' && prevLine.includes('dsh-game-forge: Cocos MCP 入口')) start -= 1
+  let end = found.end
+  const nextLine = lines[end]
+  if (typeof nextLine === 'string' && nextLine.includes('dsh-game-forge: Cocos MCP 入口')) end += 1
+  const next = [...lines.slice(0, start), ...lines.slice(end)].join(eol)
   const backup = `${file}.bak-cocos-${Date.now()}`
   try { fs.copyFileSync(file, backup) } catch { /* 忽略 */ }
   const tmp = `${file}.tmp-${process.pid}`

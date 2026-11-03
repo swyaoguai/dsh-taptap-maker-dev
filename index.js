@@ -818,9 +818,16 @@ export function apply(ctx, config = {}) {
         // 同源判断挡住跨站来源，非浏览器调用（不带 Origin）照旧放行。
         const sameOrigin = (() => {
           const origin = req.headers.origin
+          // 同源请求在部分浏览器/嵌 webview 里也可能带 "null" 字符串（sandbox/opaque origin）。
+          // "null" 不是可信来源，按跨站处理更安全。
           if (typeof origin !== 'string' || origin === '') return true
+          if (origin === 'null') return false
           try {
-            return new URL(origin).host === req.headers.host
+            const originUrl = new URL(origin)
+            // host 已含端口；再比一次协议，避免 https 页面打到 http 端口这类混用。
+            const host = String(req.headers.host ?? '')
+            const isLocal = originUrl.hostname === '127.0.0.1' || originUrl.hostname === 'localhost'
+            return originUrl.host === host && (isLocal || host !== '')
           } catch {
             return false
           }

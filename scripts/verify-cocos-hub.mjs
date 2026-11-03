@@ -412,6 +412,68 @@ async function main() {
     assert.match(found.block, /- '2'/)
   })
 
+  await test('patch 写入保留文件原本的 CRLF 换行', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-crlf-'))
+    const patchFile = path.join(home, 'profiles', 'desktop', 'cordis.patch.yml')
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true })
+    fs.writeFileSync(patchFile, '- id: existing\r\n  name: something\r\n')
+    upsertMcpRow({ dshHome: home, nodePath: process.execPath, hubPath: path.join(ROOT, 'src/cocos/server.mjs') })
+    const text = fs.readFileSync(patchFile, 'utf8')
+    assert.ok(text.includes('\r\n'), 'CRLF 文件不应被改成 LF')
+    assert.ok(!/[^\r]\n/.test(text), '不应混入裸 LF')
+    removeMcpRow({ dshHome: home })
+    const after = fs.readFileSync(patchFile, 'utf8')
+    assert.ok(after.includes('\r\n'))
+    assert.ok(!/[^\r]\n/.test(after))
+  })
+
+  await test('撤掉登记行时一并清掉本插件的说明注释', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-cleanup-'))
+    const patchFile = path.join(home, 'profiles', 'desktop', 'cordis.patch.yml')
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true })
+    fs.writeFileSync(patchFile, '- id: keep\n  name: x\n')
+    upsertMcpRow({ dshHome: home, nodePath: process.execPath, hubPath: path.join(ROOT, 'src/cocos/server.mjs') })
+    assert.ok(fs.readFileSync(patchFile, 'utf8').includes('dsh-game-forge: Cocos MCP 入口'))
+    removeMcpRow({ dshHome: home })
+    const text = fs.readFileSync(patchFile, 'utf8')
+    assert.ok(!text.includes('dsh-game-forge: Cocos MCP 入口'), '注释不应留成孤儿')
+    assert.ok(!text.includes('mcp-cocos'))
+    assert.match(text, /id: keep/)
+  })
+
+  await test('注释开头但实际是 mapping 的 patch 文件也要拒绝写入', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-mapping-'))
+    const patchFile = path.join(home, 'profiles', 'desktop', 'cordis.patch.yml')
+    fs.mkdirSync(path.dirname(patchFile), { recursive: true })
+    fs.writeFileSync(patchFile, '# 一些说明\nsomeKey: value\n')
+    let error = null
+    try {
+      upsertMcpRow({ dshHome: home, nodePath: process.execPath, hubPath: path.join(ROOT, 'src/cocos/server.mjs') })
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error !== null, 'mapping 文件必须拒绝')
+    assert.equal(error.code, 'PATCH_NOT_A_LIST')
+    assert.equal(fs.readFileSync(patchFile, 'utf8'), '# 一些说明\nsomeKey: value\n')
+  })
+
+  await test('slug：中文目录名保留可读性，不同中文项目不撞名', async () => {
+    const a = projectSlug(path.join(tmpRoot, '游戏甲'))
+    const b = projectSlug(path.join(tmpRoot, '游戏乙'))
+    assert.match(a, /^游戏甲-[0-9a-f]{6}$/)
+    assert.notEqual(a, b)
+  })
+
+  await test('slug：同一路径不同写法得到同一个 slug', async () => {
+    const base = path.join(tmpRoot, 'same-proj')
+    fs.mkdirSync(path.join(base, 'assets'), { recursive: true })
+    const one = projectSlug(base)
+    const two = projectSlug(`${base}${path.sep}`)
+    const three = projectSlug(process.platform === 'win32' ? base.toUpperCase() : base)
+    assert.equal(one, two)
+    assert.equal(one, three, '大小写不敏感的文件系统上应视为同一项目')
+  })
+
   // ── 注册表 ──────────────────────────────────────────────────
   await test('注册表：slug / 名称 / 前缀解析，歧义要报错', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-reg-'))
