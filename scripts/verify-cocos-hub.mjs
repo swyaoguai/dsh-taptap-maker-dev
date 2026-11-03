@@ -275,6 +275,22 @@ async function main() {
   })
 
   // ── 锁 ──────────────────────────────────────────────────────
+  await test('releaseFileLock 缺 owner 时拒绝释放（不能删别人的锁）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-rel-'))
+    const file = path.join(home, 'owned.lock')
+    const owner = makeOwner('holder')
+    const acquired = await acquireFileLock(file, { owner })
+    assert.equal(acquired.ok, true)
+    // 以前 owner 缺失会跳过校验直接删锁 —— 任何忘记传 owner 的调用点都能放掉别人的锁。
+    assert.equal(releaseFileLock(file, undefined), false)
+    assert.equal(releaseFileLock(file, {}), false)
+    assert.equal(fs.existsSync(file), true, '锁必须还在')
+    assert.equal(releaseFileLock(file, { key: 'not-the-owner' }), false)
+    assert.equal(fs.existsSync(file), true)
+    assert.equal(releaseFileLock(file, owner), true)
+    assert.equal(fs.existsSync(file), false)
+  })
+
   await test('同项目的第二个写操作会被挡住', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-lock-'))
     const ownerA = makeOwner('test-a')

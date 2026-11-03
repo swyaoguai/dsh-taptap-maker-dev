@@ -153,11 +153,21 @@ export function touchFileLock(file, owner, ttlMs = DEFAULT_TTL_MS) {
   }
 }
 
-/** 释放锁；owner 不匹配则不动（防止删掉别人的锁）。 */
+/**
+ * 释放锁。
+ *
+ * ⚠️ `owner` **必填**。以前的判断是 `if (owner && holder.key !== owner.key) return false`
+ * —— owner 缺失时直接跳过校验、把锁删掉。也就是说任何忘记传 owner 的调用点都能
+ * 删掉别人的锁，而写锁的意义就是「只有持有者能放」。这种 API 形态必须堵死：
+ * 拿不出 owner 就拒绝释放（返回 false），由调用方修正。
+ */
 export function releaseFileLock(file, owner) {
+  if (owner === null || owner === undefined || typeof owner.key !== 'string' || owner.key === '') {
+    return false
+  }
   const holder = readLock(file)
   if (!holder) return false
-  if (owner && holder.key !== owner.key) return false
+  if (holder.key !== owner.key) return false
   try {
     fs.unlinkSync(file)
     return true

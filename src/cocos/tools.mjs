@@ -638,6 +638,7 @@ export const TOOL_DEFINITIONS = [
       }
       const deadline = Date.now() + waitMs
       let exitCode = null
+      let timedOut = false
       await new Promise((resolve) => {
         let poll = null
         const finish = (code) => {
@@ -648,10 +649,38 @@ export const TOOL_DEFINITIONS = [
         child.on('exit', (code) => finish(code))
         child.on('error', () => finish(null))
         poll = setInterval(() => {
-          if (Date.now() > deadline) finish(null)
+          if (Date.now() > deadline) { timedOut = true; finish(null) }
         }, 1000)
         poll.unref?.()
       })
+      if (timedOut) {
+        // 超时 ≠ 构建结束：进程还在写 build/ 与 library/。**绝不能**在这个状态
+        // 放掉项目锁——那等于告诉其它会话「可以安全改场景了」，而工程此刻正被
+        // 构建进程写。把锁移交给后台看门狗，进程真正退出才释放。
+        releaseBuildSlot(slot.file, owner)
+        clearInterval(lockHeartbeat)
+        const watchdog = setInterval(() => {
+          let alive = true
+          try { process.kill(child.pid, 0) } catch { alive = false }
+          if (!alive) {
+            clearInterval(watchdog)
+            releaseFileLock(lockFile, owner)
+          }
+        }, 5000)
+        watchdog.unref?.()
+        let tail = ''
+        try { tail = fs.readFileSync(logFile, 'utf8').slice(-4000) } catch { /* 还没落盘 */ }
+        return {
+          ...base,
+          waiting: true,
+          timedOut: true,
+          exitCode: null,
+          finished: false,
+          logTail: tail,
+          note: `等待 ${Math.round(waitMs / 1000)}s 后超时，但构建进程（pid ${child.pid}）还在跑。`
+            + '项目写锁保留到构建真正结束；期间该项目不能改场景/资源。',
+        }
+      }
       releaseAll()
       if (buildError !== null) {
         throw new CocosMcpError(`构建进程启动失败：${buildError.message ?? buildError}（exe: ${exe}）`, { code: 'SPAWN_FAILED' })

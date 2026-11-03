@@ -257,10 +257,24 @@ rl.on('close', () => {
 })
 
 process.on('uncaughtException', (error) => {
-  log(`未捕获异常：${errorText(error)}`)
+  // fail-fast：未捕获异常意味着「状态未知」——继续服务就等于在不确定的状态下
+  // 执行写操作（改场景、放锁）。宁可死掉让客户端重连（mcp-client 有重连预算），
+  // 也不要在这种状态下发号施令。
+  log(`未捕获异常，进程退出：${errorText(error)}`)
+  try {
+    process.exit(1)
+  } catch {
+    process.exitCode = 1
+  }
 })
 process.on('unhandledRejection', (error) => {
-  log(`未处理的 Promise 拒绝：${errorText(error)}`)
+  // 未处理的 Promise 拒绝同样按 fail-fast 处理，避免「以为成功、其实没写」。
+  log(`未处理的 Promise 拒绝，进程退出：${errorText(error)}`)
+  try {
+    process.exit(1)
+  } catch {
+    process.exitCode = 1
+  }
 })
 
 log(`已启动（home=${dshHome}, buildSlots=${config.buildSlots}）`)

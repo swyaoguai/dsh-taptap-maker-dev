@@ -121,6 +121,19 @@ node src/cocos/cli.mjs register --yes
 也不改全局 npm。已有的 `funplay-cocos-mcp.config.json` 不会被覆盖
 （除非你明确 `--force`）。
 
+### 构建期间的锁定语义（重要）
+
+构建不是「跑完就完了」那么简单，它会持续写 `build/`、`library/`、`temp/`：
+
+- **构建开始就持有该项目的写锁**，直到构建进程退出为止（心跳续期，进程没了自动回收）。
+  这期间同一个项目的改场景/资源刷新会被告知「等构建结束」，而不是两路一起写工程。
+- 构建槽位（全机上限，默认 1）与项目写锁是两层：前者防止多项目同时构建拖死机器，
+  后者防止「一边构建一边改场景」。
+- `cocos_build` 带 `wait_ms` 等待时如果**超时但进程还在跑**，锁**不会**释放——
+  把锁留给后台看门狗，进程真正退出才放。否则等于对外宣布「可以安全改工程了」，
+  而工程此刻正被构建写。
+- 构建报 `PROJECT_BUSY` 表示该项目有别的写操作在跑；报 `BUILD_BUSY` 表示全机构建槽位满了。
+
 ## 4. 运行模型与错误码
 
 | 错误码 | 含义 | 该怎么办 |
@@ -133,6 +146,7 @@ node src/cocos/cli.mjs register --yes
 | `UPSTREAM_TOOL_MISSING` | 扩展档位里没这个工具 | 切 full 档，或用 `cocos_exec` |
 | `UPSTREAM_TOOL_ERROR` | 上游工具自己报错（`isError`） | 看返回文案，别当成成功 |
 | `BUILD_BUSY` | 构建槽位已满 | 等当前构建结束 |
+| `PROJECT_BUSY` | 该项目已有写操作在跑，构建会与它冲突 | 等它结束（`cocos_status` 看持有者） |
 | `SPAWN_FAILED` | 编辑器/构建进程没起来 | 检查 `creator_exe` 路径 |
 | `NOT_COCOS_PROJECT` | 目录不是 Cocos 工程（缺 `creator.version`） | 别把扩展装进 Maker 工程 |
 | `UNSUPPORTED_VERSION` | Creator 2.x | 2.x 不支持这套扩展 |

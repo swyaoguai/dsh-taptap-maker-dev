@@ -833,7 +833,9 @@ export function apply(ctx, config = {}) {
           }
         })()
         if (req.method === 'GET' && sub === 'cocos') {
-          const data = await cocosStatus({ dshHome: home, buildSlots: config.cocos?.buildSlots })
+          // fresh=1 时跳过发现缓存（UI「刷新」按钮用；默认走短缓存，避免切 tab 就扫进程）。
+          const fresh = url.searchParams.get('fresh') === '1'
+          const data = await cocosStatus({ dshHome: home, buildSlots: config.cocos?.buildSlots, fresh })
           return sendJson(res, 200, { ok: true, ...data })
         }
         if (req.method === 'POST' && sub === 'cocos/register') {

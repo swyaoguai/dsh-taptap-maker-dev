@@ -2468,9 +2468,9 @@ window.__ModuleLoader__.load({
       const [projectPath, setProjectPath] = useState('')
       const [installResult, setInstallResult] = useState(null)
 
-      const load = useCallback(async () => {
+      const load = useCallback(async (fresh = false) => {
         try {
-          const r = await fetch(`${API_BASE}/cocos`, { headers: { accept: 'application/json' } })
+          const r = await fetch(`${API_BASE}/cocos${fresh ? '?fresh=1' : ''}`, { headers: { accept: 'application/json' } })
           const j = await r.json()
           // 注意：这里**不**清 msg。以前成功后会 setMsg(null)，于是
           // 「已写入配置」这类提示会在一瞬间被刷新结果抹掉，用户以为没生效。
@@ -2549,7 +2549,10 @@ window.__ModuleLoader__.load({
             h('span', { style: registered ? S.pill : S.offPill }, registered ? '已登记' : '未登记'),
           ),
           h('div', { style: S.btnRow },
-            h('button', { style: S.ghostBtn, onClick: load, disabled: busy !== '' }, '刷新'),
+            // ⚠️ 必须包一层：直接写 onClick: load，React 会把 click 事件当作
+            // 第一个参数传进去，事件对象恒为真值 → fresh 永远为 true，
+            // 「默认走缓存」就白做了。
+            h('button', { style: S.ghostBtn, onClick: () => load(true), disabled: busy !== '' }, '刷新'),
             h('button', {
               style: registered ? S.ghostBtn : S.btn,
               onClick: toggleRegister,
