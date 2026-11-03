@@ -321,6 +321,7 @@ dsh plugin --profile <profile> add dsh-game-forge
 ```
 
 命令行等价：`node src/cocos/cli.mjs install/register/doctor/list/build`。
+不想记命令也行：设置页 →「其他」分组 → **Cocos Creator** 卡片（项目列表 + 登记 + 装扩展）。
 
 **同时开 2~3 个项目为什么不会冲突**（细节见 [docs/cocos-mcp.md](docs/cocos-mcp.md)）：
 

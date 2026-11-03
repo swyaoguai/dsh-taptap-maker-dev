@@ -109,6 +109,9 @@ node src/cocos/cli.mjs register --yes
 ```
 
 对话里等价：`/game-cocos install <目录> --yes`、`/game-cocos register --yes`。
+不记命令也行：设置页「其他」分组里有一张 **Cocos Creator** 卡片，
+能看到项目列表/运行状态/构建槽位，两个按钮分别做「登记 MCP 服务」与「装到这个工程」
+（两个按钮都有确认框，写配置/下载都会写明落点）。
 
 登记写的是 profile 的 `cordis.patch.yml`（只增删 `id: mcp-cocos` 这一条，自动备份）。
 启用了配置热加载的宿主会在几秒内生效；**桌面端实测通常要重启一次桌面端**，
