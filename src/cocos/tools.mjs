@@ -18,20 +18,30 @@ import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { CocosMcpError } from './mcp-http.mjs'
 import { callProjectTool, connectTarget, projectOverview, readProjectMeta, resolveTarget } from './router.mjs'
+import { acquireFileLock, acquireBuildSlot, makeOwner, projectLockPath, releaseBuildSlot, releaseFileLock, touchFileLock, withProjectLock } from './locks.mjs'
 import { discoverLive, findCreatorExecutables, invalidateDiscoveryCache } from './discover.mjs'
-import { acquireBuildSlot, makeOwner, releaseBuildSlot } from './locks.mjs'
 import { downsampleList, sleep } from './util.mjs'
 import { sameProjectPath, shotsDir } from './paths.mjs'
 
 /** 上游工具清单缓存：同一端点 30 秒内不重复拉。 */
 const toolListCache = new Map()
+const TOOL_LIST_TTL_MS = 30000
+
+/** 定期清掉过期项，编辑器反复重启也不会积累。 */
+function pruneToolListCache() {
+  const now = Date.now()
+  for (const [key, value] of toolListCache) {
+    if (now - value.at >= TOOL_LIST_TTL_MS) toolListCache.delete(key)
+  }
+}
 
 async function upstreamTools(target, { timeoutMs = 15000 } = {}) {
   const { client, identity } = await connectTarget(target, { timeoutMs })
   const key = `${identity.projectId}:${identity.instanceId}`
   const cached = toolListCache.get(key)
-  if (cached && Date.now() - cached.at < 30000) return { client, identity, tools: cached.tools }
+  if (cached && Date.now() - cached.at < TOOL_LIST_TTL_MS) return { client, identity, tools: cached.tools }
   const tools = await client.toolsList()
+  if (toolListCache.size > 64) pruneToolListCache()
   toolListCache.set(key, { at: Date.now(), tools })
   return { client, identity, tools }
 }
@@ -51,18 +61,32 @@ function missingToolError(name, tools) {
   )
 }
 
-/** 统一的上游调用：先确认工具存在，再决定是否需要写锁。 */
-async function invoke({ dshHome, project, tool, args, mutating, sessionId, timeoutMs }) {
-  const target = await resolveTarget({ dshHome, project, requireLive: true })
-  const { client, identity, tools } = await upstreamTools(target, { timeoutMs: Math.min(timeoutMs ?? 20000, 30000) })
-  if (!tools.some((item) => item.name === tool)) throw missingToolError(tool, tools)
-  const result = await client.toolsCall(tool, args, {
-    // 只有写操作才带身份令牌：上游对只读工具会原样透传参数，
-    // 多塞一个参数在别的实现上可能被 schema 校验拒绝。
-    expectedContext: mutating ? identity.expectedContext : '',
-    timeoutMs: timeoutMs ?? 60000,
+/**
+ * 统一的上游调用：先确认工具存在，再决定是否需要写锁。
+ *
+ * ⚠️ 写操作**必须**走 withProjectLock：以前锁只在（无人调用的）callProjectTool
+ * 里，主路径的 cocos_exec / 场景保存 / 资源刷新全是裸调用 ——
+ * 「同一项目写操作串行」这个承诺实际是空的，两个会话可以同时改一个场景。
+ */
+async function invoke({ dshHome, project, tool, args, mutating, sessionId, timeoutMs, discovery }) {
+  const target = await resolveTarget({ dshHome, project, requireLive: true, discovery })
+  const run = async () => {
+    const { client, identity, tools } = await upstreamTools(target, { timeoutMs: Math.min(timeoutMs ?? 20000, 30000) })
+    if (!tools.some((item) => item.name === tool)) throw missingToolError(tool, tools)
+    const result = await client.toolsCall(tool, args, {
+      // 只有写操作才带身份令牌：上游对只读工具会原样透传参数，
+      // 多塞一个参数在别的实现上可能被 schema 校验拒绝。
+      expectedContext: mutating ? identity.expectedContext : '',
+      timeoutMs: timeoutMs ?? 60000,
+    })
+    return { result, identity, target }
+  }
+  if (!mutating) return run()
+  const owner = makeOwner(`tool:${tool}${sessionId ? `@${sessionId}` : ''}`)
+  return withProjectLock(dshHome, target.entry.slug, owner, run, {
+    waitMs: 0,
+    note: `${target.entry.name || target.entry.slug} ← ${tool}`,
   })
-  return { result, identity, target }
 }
 
 /** 把上游返回的 content 数组压成可读文本（图片单独处理）。 */
@@ -191,7 +215,7 @@ export const TOOL_DEFINITIONS = [
       if (args.project) {
         // 先用注册表解析（支持 slug / 名称 / 前缀 / 路径），再回到视图列表里取状态。
         // 这样「已登记但此刻没开编辑器」的项目也能查，而不是报「找不到项目」。
-        const resolved = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false })
+        const resolved = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false, discovery: ctx.discovery })
         view = overview.projects.find((item) => item.slug === resolved.entry.slug) ?? null
         if (view === null) {
           return {
@@ -239,7 +263,7 @@ export const TOOL_DEFINITIONS = [
     },
     mutating: false,
     handler: async (args, ctx) => {
-      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false })
+      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false, discovery: ctx.discovery })
       if (target.health !== null) {
         return { alreadyRunning: true, slug: target.entry.slug, port: target.health.port, path: target.entry.path }
       }
@@ -304,6 +328,7 @@ export const TOOL_DEFINITIONS = [
     handler: async (args, ctx) => {
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
         project: args.project,
         tool: 'execute_javascript',
         args: { context: args.context, code: args.code, args: args.args ?? {} },
@@ -360,6 +385,7 @@ export const TOOL_DEFINITIONS = [
       if (typeof args.depth === 'number') payload.depth = args.depth
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
         project: args.project,
         tool: spec.tool,
         args: payload,
@@ -404,6 +430,7 @@ export const TOOL_DEFINITIONS = [
       if (typeof args.wait_ms === 'number') payload.waitMs = args.wait_ms
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
         project: args.project,
         tool: spec.tool,
         args: payload,
@@ -441,6 +468,7 @@ export const TOOL_DEFINITIONS = [
       if (typeof args.limit === 'number') payload.limit = args.limit
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
         project: args.project,
         tool: spec.tool,
         args: payload,
@@ -472,7 +500,7 @@ export const TOOL_DEFINITIONS = [
         preview: 'capture_preview_screenshot',
         game: 'capture_game_screenshot',
       }[scope]
-      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: true })
+      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: true, discovery: ctx.discovery })
       const { client, identity, tools } = await upstreamTools(target)
       if (!tools.some((item) => item.name === tool)) throw missingToolError(tool, tools)
       const result = await client.toolsCall(tool, {}, {
@@ -511,7 +539,7 @@ export const TOOL_DEFINITIONS = [
     },
     mutating: false,
     handler: async (args, ctx) => {
-      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false })
+      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false, discovery: ctx.discovery })
       const exe = args.creator_exe && fs.existsSync(args.creator_exe)
         ? args.creator_exe
         : await resolveCreatorExe({ dshHome: ctx.dshHome, entry: target.entry })
@@ -521,6 +549,20 @@ export const TOOL_DEFINITIONS = [
       const maxSlots = Number(ctx.config?.buildSlots ?? 1) || 1
       const owner = makeOwner(`build:${target.entry.slug}`)
       const waitMs = Math.max(0, Number(args.wait_ms) || 0)
+      // 构建期间要持有该项目的写锁：构建和「交互改场景」并发是典型的坏组合
+      // （两路同时写 library/ 与场景文件）。锁 TTL 覆盖构建等待期 + 心跳保活。
+      const lockTtl = Math.max(60 * 60 * 1000, waitMs + 10 * 60 * 1000)
+      const lockAcquired = await acquireFileLock(projectLockPath(ctx.dshHome, target.entry.slug), {
+        owner, ttlMs: lockTtl, waitMs: 0, note: `build ${args.platform ?? 'web-mobile'}`,
+      })
+      if (!lockAcquired.ok) {
+        const holder = lockAcquired.holder ?? {}
+        throw new CocosMcpError(
+          `项目 ${target.entry.slug} 有另一个写操作进行中（${holder.label ?? '?'}），构建会与它冲突，已取消。`
+          + '先等该操作结束，或用 cocos_status 查看持有者。',
+          { code: 'PROJECT_BUSY' },
+        )
+      }
       const slot = await acquireBuildSlot(ctx.dshHome, owner, {
         max: maxSlots,
         // 只启动不等待时给 30 秒排队时间，否则等构建本身的时间。
@@ -529,11 +571,22 @@ export const TOOL_DEFINITIONS = [
       })
       if (!slot.ok) {
         const holders = (slot.holders ?? []).map((item) => `slot${item.slot}: ${item.holder?.label ?? '?'}`).join('；')
+        // 拿不到构建槽位：把上面的项目写锁还回去，否则项目会被锁死到 TTL。
+        releaseFileLock(projectLockPath(ctx.dshHome, target.entry.slug), owner)
         throw new CocosMcpError(
           `构建槽位已满（上限 ${maxSlots}，全机串行）。当前占用：${holders || '未知'}。`
           + '等当前构建结束再试；这是为了避免多个项目同时构建互相拖慢、抢 Cocos 缓存。',
           { code: 'BUILD_BUSY' },
         )
+      }
+      const lockFile = projectLockPath(ctx.dshHome, target.entry.slug)
+      // 锁续期 + 统一释放：构建可能跑几十分钟，没有心跳会被 TTL 判为残留。
+      const lockHeartbeat = setInterval(() => { touchFileLock(lockFile, owner, lockTtl) }, Math.max(500, Math.floor(lockTtl / 3)))
+      lockHeartbeat.unref?.()
+      const releaseAll = () => {
+        clearInterval(lockHeartbeat)
+        releaseFileLock(lockFile, owner)
+        releaseBuildSlot(slot.file, owner)
       }
       const logFile = path.join(shotsDir(ctx.dshHome), `${target.entry.slug}-build-${Date.now()}.log`)
       let buildError = null
@@ -545,7 +598,7 @@ export const TOOL_DEFINITIONS = [
           onError: (error) => { buildError = error },
         })
       } catch (error) {
-        releaseBuildSlot(slot.file, owner)
+        releaseAll()
         throw error
       }
       const base = {
@@ -556,13 +609,13 @@ export const TOOL_DEFINITIONS = [
         logFile,
       }
       if (waitMs <= 0) {
-        // 不等待：构建结束（或进程根本没起来）就释放槽位。
+        // 不等待：构建结束（或进程根本没起来）就释放槽位与项目锁。
         // 事件 + 兜底轮询两条路：detached 进程的 exit 事件在某些启动器上不可靠，
         // 但只靠 pid 存活判断又可能因为 pid 复用而误判。
         let timer = null
         const cleanup = () => {
           if (timer !== null) { clearInterval(timer); timer = null }
-          releaseBuildSlot(slot.file, owner)
+          releaseAll()
         }
         child.on('exit', cleanup)
         child.on('error', cleanup)
@@ -576,7 +629,12 @@ export const TOOL_DEFINITIONS = [
           cleanup()
           throw new CocosMcpError(`启动构建失败：${buildError.message ?? buildError}（exe: ${exe}）`, { code: 'SPAWN_FAILED' })
         }
-        return { ...base, waiting: false, note: '构建已启动；用 cocos_status 看槽位、用日志文件跟踪进度，槽位会在进程退出后自动释放。' }
+        return {
+          ...base,
+          waiting: false,
+          note: '构建已启动；在此期间该项目被写锁占用（改场景/资源会等到构建结束），'
+            + '用 cocos_status 看槽位、用日志文件跟踪进度。',
+        }
       }
       const deadline = Date.now() + waitMs
       let exitCode = null
@@ -594,7 +652,7 @@ export const TOOL_DEFINITIONS = [
         }, 1000)
         poll.unref?.()
       })
-      releaseBuildSlot(slot.file, owner)
+      releaseAll()
       if (buildError !== null) {
         throw new CocosMcpError(`构建进程启动失败：${buildError.message ?? buildError}（exe: ${exe}）`, { code: 'SPAWN_FAILED' })
       }
@@ -631,6 +689,7 @@ export const TOOL_DEFINITIONS = [
       const payload = action === 'set_mode' ? { mode: args.mode, platform: args.mode } : {}
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
         project: args.project,
         tool,
         args: payload,
@@ -659,6 +718,7 @@ export const TOOL_DEFINITIONS = [
     handler: async (args, ctx) => {
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
         project: args.project,
         tool: args.tool,
         args: args.arguments ?? {},

@@ -39,8 +39,7 @@ async function test(name, fn) {
 }
 
 // ── 1. 客户端 / 身份校验（本地假 MCP 服务）──────────────────────────────
-function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFirst = false, toolError = false } = {}) {
-  const state = { calls: [], sseOnce, sseNotifyFirst, toolError }
+function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFirst = false, toolError = false, delayMs = 0 } = {}) {  const state = { calls: [], sseOnce, sseNotifyFirst, toolError }
   const expectedContext = `${projectId}:instance-1`
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost')
@@ -73,7 +72,7 @@ function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFir
     }
     let body = ''
     req.on('data', (chunk) => { body += chunk })
-    req.on('end', () => {
+    req.on('end', async () => {
       const message = JSON.parse(body)
       state.calls.push(message)
       const reply = (result) => {
@@ -96,6 +95,7 @@ function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFir
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify(payload))
       }
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs))
       if (message.method === 'initialize') {
         reply({
           protocolVersion: message.params?.protocolVersion ?? '2026-07-28',
@@ -150,14 +150,23 @@ function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFir
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const port = server.address().port
-      resolve({ server, port, state })
+      // 不 unref 的话，undici 的 keep-alive 连接 + 未关闭的 server 会让
+      // 整个校验脚本在测试跑完后「不退出」——看起来像卡住，其实是句柄没释放。
+      server.unref?.()
+      resolve({ server, port, state, stop: () => closeMockServer(server) })
     })
   })
 }
 
+/** 关掉 mock server，并强制断开 keep-alive 连接（否则进程不退出）。 */
+function closeMockServer(server) {
+  try { server.closeAllConnections?.() } catch { /* 老版本 Node 没有该方法 */ }
+  try { server.close() } catch { /* 已经关了 */ }
+}
+
 async function main() {
   const load = (relative) => import(pathToFileURL(path.join(ROOT, relative)).href)
-  const { CocosMcpError, McpHttpClient } = await load('src/cocos/mcp-http.mjs')
+  const { CocosMcpError, McpHttpClient, probeHealth } = await load('src/cocos/mcp-http.mjs')
   const { connectTarget } = await load('src/cocos/router.mjs')
   const { projectSlug, normalizeProjectPath } = await load('src/cocos/paths.mjs')
   const { acquireFileLock, releaseFileLock, makeOwner, peekLock, withProjectLock } = await load('src/cocos/locks.mjs')
@@ -219,7 +228,7 @@ async function main() {
     await client.initialize()
     const result = await client.toolsCall('get_scene_info', {})
     assert.equal(result?.data?.tool, 'get_scene_info', '不能把通知当成结果')
-    mockNotify.server.close()
+    closeMockServer(mockNotify.server)
   })
 
   await test('上游 isError 必须抛错（不能当成功）', async () => {
@@ -235,7 +244,7 @@ async function main() {
     assert.ok(error !== null, 'isError 结果必须抛出')
     assert.equal(error.code, 'UPSTREAM_TOOL_ERROR')
     assert.match(error.message, /未保存的改动/)
-    mockErr.server.close()
+    closeMockServer(mockErr.server)
   })
 
   await test('端口上自报的是另一个项目时必须中止（防写错工程）', async () => {
@@ -511,6 +520,43 @@ async function main() {
     assert.deepEqual(tokenize("build 'a b' --platform web-mobile"), ['build', 'a b', '--platform', 'web-mobile'])
   })
 
+  await test('cocos_exec 写操作会拿项目写锁：并发的第二个必须被拒', async () => {
+    // 假上游故意拖慢响应，制造锁重叠窗口；把 /health 结果塞进注入的 discovery，
+    // 整条工具路径（参数 → 身份 → 写锁 → 上游）都能在没有真编辑器时跑通。
+    const slow = await startMockServer({ projectPath: projectA, projectId: 'pid-a', delayMs: 500 })
+    const health = await probeHealth(slow.port)
+    assert.ok(health !== null, 'mock /health 应能被探到')
+    const fakeDiscovery = {
+      instances: [{
+        pid: 424242,
+        projectPath: projectA,
+        exePath: '',
+        build: false,
+        ports: [slow.port],
+        mcpHealths: [health],
+      }],
+      probedAt: Date.now(),
+      platform: process.platform,
+    }
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-execlock-'))
+    await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })
+    const slug = projectSlug(projectA)
+    const ctx = { dshHome: home, config: {}, sessionId: 'verify', discovery: fakeDiscovery }
+    const def = TOOL_INDEX.get('cocos_exec')
+    const call = () => def.handler({ project: slug, context: 'scene', code: 'return 1' }, ctx)
+    const [a, b] = await Promise.allSettled([call(), call()])
+    const okResults = [a, b].filter((item) => item.status === 'fulfilled')
+    const busyErrors = [a, b].filter((item) => item.status === 'rejected' && /只允许一个写操作/.test(String(item.reason)))
+    if (okResults.length !== 1) {
+      const details = [a, b].map((item) => item.status === 'rejected' ? `${item.reason?.code}: ${item.reason?.message}` : 'ok').join(' || ')
+      assert.fail(`并发两个写操作应恰好成功一个，实际：${details}`)
+    }
+    assert.equal(busyErrors.length, 1, '另一个应被写锁拒绝')
+    // 成功的那个返回后锁必须已释放。
+    assert.equal(fs.existsSync(path.join(home, 'game-forge', 'cocos', 'locks', `${slug}.write.lock`)), false)
+    closeMockServer(slow.server)
+  })
+
   await test('命令解析：flag 写在项目名前也不会把值当成项目名', async () => {
     const { parseTokens } = await load('src/cocos/command.mjs')
     const first = parseTokens(['myproj', '--platform', 'web-mobile', '--wait', '30'])
@@ -633,8 +679,8 @@ async function main() {
     assert.ok(Array.isArray(payload.projects), 'cocos_projects 应返回 projects 数组')
   })
 
-  mockA.server.close()
-  mockB.server.close()
+  closeMockServer(mockA.server)
+  closeMockServer(mockB.server)
 
   // ── 结果 ────────────────────────────────────────────────────
   process.stdout.write(`\n通过 ${passed} 项，失败 ${failures.length} 项\n`)

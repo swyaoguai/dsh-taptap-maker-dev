@@ -66,18 +66,36 @@ function pickHealth(group) {
  * @param {boolean} [opts.requireLive] 是否要求编辑器正在运行
  * @param {number} [opts.cacheMs]
  */
-export async function resolveTarget({ dshHome, project, requireLive = true, cacheMs } = {}) {
-  const discovery = await discoverLive({ cacheMs })
-  const groups = groupByProject(discovery)
+export async function resolveTarget({ dshHome, project, requireLive = true, cacheMs, discovery } = {}) {
+  // discovery 可注入：测试可以在没有真编辑器的情况下走完整条工具路径
+  // （参数校验 → 身份校验 → 写锁 → 上游调用），不必造一个 Cocos 出来。
+  const disc = discovery ?? await discoverLive({ cacheMs })
+  const groups = groupByProject(disc)
   const projects = listProjects(dshHome)
 
   let entry = null
   if (project !== null && project !== undefined && String(project).trim() !== '') {
     entry = resolveProjectRef(dshHome, project)
     if (entry === null) {
-      // 用户可能直接给了个路径：能读成 Cocos 工程就自动登记，省一步。
-      // 已登记过的（路径一致）直接复用，避免每条调用都过一次跨进程锁。
-      const meta = readProjectMeta(String(project))
+      // 还没登记、但确实在跑的项目：`cocos_projects` 会把它连同 slug 一起列出来，
+      // agent 自然会拿那个 slug 回来调用。以前这里直接报 UNKNOWN_PROJECT ——
+      // 列表里明明有、调用却说没有，属于自相矛盾。现在按 slug/路径回落到实时实例。
+      const want = String(project).trim()
+      const wantLower = want.toLowerCase()
+      const bySlug = groups.filter((group) => {
+        const slug = projectSlug(group.projectPath)
+        return slug === want || slug.toLowerCase() === wantLower || slug.toLowerCase().startsWith(wantLower)
+      })
+      const matched = bySlug.length === 1
+        ? bySlug[0]
+        : (bySlug.length > 1 ? null : groups.find((group) => sameProjectPath(group.projectPath, want)) ?? null)
+      if (bySlug.length > 1) {
+        throw new CocosMcpError(
+          `项目引用 "${want}" 匹配到多个正在运行的项目：${bySlug.map((group) => projectSlug(group.projectPath)).join('、')}`,
+          { code: 'AMBIGUOUS_PROJECT' },
+        )
+      }
+      const meta = readProjectMeta(matched?.projectPath ?? String(project))
       if (meta !== null) {
         const known = projects.find((item) => sameProjectPath(item.path, meta.path))
         entry = known ?? (await upsertProject(dshHome, {
@@ -88,7 +106,8 @@ export async function resolveTarget({ dshHome, project, requireLive = true, cach
         })).projects[projectSlug(meta.path)]
       } else {
         throw new CocosMcpError(
-          `不认识项目 "${project}"。已登记的项目：${projects.length > 0 ? projects.map((item) => item.slug).join('、') : '(空)'}。`
+          `不认识项目 "${project}"。已登记的项目：${projects.length > 0 ? projects.map((item) => item.slug).join('、') : '(空)'}`
+          + `${groups.length > 0 ? `；正在运行但未登记：${groups.map((group) => projectSlug(group.projectPath)).join('、')}` : ''}。`
           + '请用 /game-cocos list 查看，或传一个含 assets/ 的 Cocos 工程目录。',
           { code: 'UNKNOWN_PROJECT' },
         )
@@ -131,7 +150,7 @@ export async function resolveTarget({ dshHome, project, requireLive = true, cach
     }
   }
 
-  const group = findRunningProject(discovery, entry.path)
+  const group = findRunningProject(disc, entry.path)
   if (requireLive) {
     if (group === null || pickHealth(group) === null) {
       throw new CocosMcpError(
@@ -142,7 +161,7 @@ export async function resolveTarget({ dshHome, project, requireLive = true, cach
       )
     }
   }
-  return { entry, group, health: group === null ? null : pickHealth(group), discovery }
+  return { entry, group, health: group === null ? null : pickHealth(group), discovery: disc }
 }
 
 /**
