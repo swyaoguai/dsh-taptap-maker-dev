@@ -112,15 +112,22 @@ export async function resolveTarget({ dshHome, project, requireLive = true, cach
       )
     }
     const only = groups[0]
-    const meta = readProjectMeta(only.projectPath)
-    const slug = projectSlug(only.projectPath)
-    const saved = await upsertProject(dshHome, {
-      slug,
-      name: meta?.name ?? path.basename(only.projectPath),
-      path: only.projectPath,
-      creatorVersion: meta?.creatorVersion ?? '',
-    })
-    entry = saved.projects[slug]
+    // 已经登记过就不要每次都写一遍注册表：注册表写入现在带跨进程锁，
+    // 每条工具调用都写一次 = 每条调用多一次加锁 + 落盘（而且毫无信息增量）。
+    const known = projects.find((item) => sameProjectPath(item.path, only.projectPath))
+    if (known) {
+      entry = known
+    } else {
+      const meta = readProjectMeta(only.projectPath)
+      const slug = projectSlug(only.projectPath)
+      const saved = await upsertProject(dshHome, {
+        slug,
+        name: meta?.name ?? path.basename(only.projectPath),
+        path: only.projectPath,
+        creatorVersion: meta?.creatorVersion ?? '',
+      })
+      entry = saved.projects[slug]
+    }
   }
 
   const group = findRunningProject(discovery, entry.path)

@@ -18,6 +18,8 @@ import path from 'node:path'
 import {
   cocosRoot, normalizeProjectPath, projectSlug, registryPath, sameProjectPath, stripTrailingSep,
 } from './paths.mjs'
+import { acquireFileLock, makeOwner, releaseFileLock } from './locks.mjs'
+import { locksDir } from './paths.mjs'
 
 const EMPTY = Object.freeze({ version: 1, projects: {} })
 
@@ -63,18 +65,46 @@ export function writeRegistry(dshHome, data) {
     updatedAt: new Date().toISOString(),
   }
   const tmp = path.join(dir, `.projects.${process.pid}.${Date.now()}.tmp`)
-  fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`)
-  fs.renameSync(tmp, file)
+  try {
+    fs.writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`)
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    // rename 失败时别把 tmp 留成垃圾（下次 cleanup 也难判断它属于谁）。
+    try { fs.unlinkSync(tmp) } catch { /* 已经没了 */ }
+    throw error
+  }
   return payload
 }
 
-/** 串行化的一次读-改-写。mutator 返回新注册表（或 null 表示不改）。 */
+/**
+ * 串行化的一次读-改-写。
+ *
+ * 两层串行：
+ *  - 进程内队列（同一 host 里的并发调用）；
+ *  - **跨进程文件锁**（桌面端 + 命令行 / 两个 host 同时跑时，读-改-写会互相覆盖）。
+ *    只做进程内队列是不够的：DSH 桌面端与 `game-cocos` CLI 完全可能同时登记项目。
+ */
 export async function mutateRegistry(dshHome, mutator) {
   const run = writeChain.then(async () => {
-    const before = readRegistry(dshHome)
-    const after = await mutator(before)
-    if (after === null || after === undefined) return before
-    return writeRegistry(dshHome, after)
+    const owner = makeOwner('registry')
+    const lock = await acquireFileLock(path.join(locksDir(dshHome), 'registry.lock'), {
+      owner,
+      ttlMs: 15000,
+      waitMs: 10000,
+      pollMs: 120,
+      note: 'registry',
+    })
+    if (!lock.ok) {
+      throw new Error('注册表被另一个进程占用超过 10 秒（registry.lock）。请稍后重试。')
+    }
+    try {
+      const before = readRegistry(dshHome)
+      const after = await mutator(before)
+      if (after === null || after === undefined) return before
+      return writeRegistry(dshHome, after)
+    } finally {
+      releaseFileLock(path.join(locksDir(dshHome), 'registry.lock'), owner)
+    }
   })
   // 队列不能因为一次失败就中断后续写入。
   writeChain = run.then(() => undefined, () => undefined)
@@ -87,13 +117,17 @@ export async function upsertProject(dshHome, project, { touch = true } = {}) {
   const slug = project.slug || projectSlug(normal)
   return mutateRegistry(dshHome, (registry) => {
     const prev = registry.projects[slug] ?? {}
+    // 注意顺序：先展开 prev/project，再写「归一化后的必填字段」。
+    // 之前 `name: project.name || prev.name` 写在展开之前，会被 `...project` 里
+    // 的空字符串覆盖，导致条目名变成空、UI 上显示成一行空白。
+    const name = (typeof project.name === 'string' && project.name.trim() !== '')
+      ? project.name
+      : (typeof prev.name === 'string' && prev.name.trim() !== '' ? prev.name : path.basename(normal))
     const next = {
-      slug,
-      name: project.name || prev.name || path.basename(normal),
-      path: normal,
       ...prev,
       ...project,
       slug,
+      name,
       path: normal,
       lastSeen: touch ? new Date().toISOString() : (project.lastSeen ?? prev.lastSeen ?? null),
     }

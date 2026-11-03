@@ -166,6 +166,7 @@ async function main() {
   const { upsertMcpRow, removeMcpRow, findRowBlock, renderRow } = await load('src/cocos/register.mjs')
   const { upsertProject, resolveProjectRef, listProjects } = await load('src/cocos/registry.mjs')
   const { tokenize } = await load('src/cocos/command.mjs')
+  const { installExtension } = await load('src/cocos/install.mjs')
 
   process.stdout.write('\ncocos hub 验证\n')
 
@@ -446,6 +447,83 @@ async function main() {
     assert.deepEqual(tokenize('install "D:\\my games\\demo" --yes'), ['install', 'D:\\my games\\demo', '--yes'])
     assert.deepEqual(tokenize('  list  '), ['list'])
     assert.deepEqual(tokenize("build 'a b' --platform web-mobile"), ['build', 'a b', '--platform', 'web-mobile'])
+  })
+
+  await test('命令解析：flag 写在项目名前也不会把值当成项目名', async () => {
+    const { parseTokens } = await load('src/cocos/command.mjs')
+    const first = parseTokens(['myproj', '--platform', 'web-mobile', '--wait', '30'])
+    assert.deepEqual(first.positional, ['myproj'])
+    assert.equal(first.values.get('platform'), 'web-mobile')
+    assert.equal(first.values.get('wait'), '30')
+    // 之前用 indexOf('--wait') + 1 取值，这种顺序会把 '30' 当成项目
+    const second = parseTokens(['--wait', '30', 'myproj'])
+    assert.deepEqual(second.positional, ['myproj'])
+    assert.equal(second.values.get('wait'), '30')
+    const third = parseTokens(['--global', 'myproj'])
+    assert.ok(third.flags.has('global'))
+    assert.deepEqual(third.positional, ['myproj'])
+  })
+
+  await test('参数校验：拼错 project（projects）必须被拒，不能静默落到默认项目', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-args-'))
+    const child = spawn(process.execPath, [path.join(ROOT, 'src/cocos/server.mjs'), '--home', home], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, DSH_HOME: home },
+    })
+    const responses = []
+    let buffer = ''
+    child.stdout.on('data', (chunk) => {
+      buffer += chunk.toString()
+      let index
+      while ((index = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, index).trim()
+        buffer = buffer.slice(index + 1)
+        if (line !== '') responses.push(JSON.parse(line))
+      }
+    })
+    const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`)
+    send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '1999-01-01', capabilities: {} } })
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'cocos_exec', arguments: { projects: 'x', context: 'scene', code: 'return 1' } } })
+    const deadline = Date.now() + 20000
+    while (responses.length < 2 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100))
+    child.stdin.end()
+    await new Promise((resolve) => { child.on('exit', resolve); setTimeout(resolve, 3000) })
+
+    const init = responses.find((item) => item.id === 1)
+    assert.equal(init.result.protocolVersion, '2026-07-28', '不支持的协议版本必须回落到自己支持的版本')
+    const call = responses.find((item) => item.id === 2)
+    assert.equal(call.result.isError, true, '未知参数必须报错')
+    assert.match(call.result.content[0].text, /不认识参数/)
+  })
+
+  await test('安装拒绝非 Cocos 工程（防止塞进 Maker 工程）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-notcocos-'))
+    const makerLike = path.join(tmpRoot, 'maker-like')
+    fs.mkdirSync(path.join(makerLike, 'assets'), { recursive: true })
+    fs.writeFileSync(path.join(makerLike, 'package.json'), JSON.stringify({ name: 'maker-game', version: '1.0.0' }))
+    let error = null
+    try {
+      await installExtension({ projectPath: makerLike, dshHome: home })
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error !== null, '没有 creator.version 就必须拒绝')
+    assert.equal(error.code, 'NOT_COCOS_PROJECT')
+  })
+
+  await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-name-'))
+    await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })
+    const after = await upsertProject(home, { path: projectA, name: '' })
+    const slug = projectSlug(projectA)
+    assert.equal(after.projects[slug].name, 'game-a')
+  })
+
+  await test('注册表写入会释放跨进程锁（不留 registry.lock）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-reglock-'))
+    await upsertProject(home, { path: projectB, name: 'game-b' })
+    const lockFile = path.join(home, 'game-forge', 'cocos', 'locks', 'registry.lock')
+    assert.equal(fs.existsSync(lockFile), false, '写完后锁必须释放')
   })
 
   // ── stdio 服务 ──────────────────────────────────────────────

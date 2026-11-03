@@ -247,5 +247,3 @@ export function creatorVersionFromExe(exePath) {
   const any = /(\d+\.\d+\.\d+)/.exec(exePath)
   return any ? any[1] : ''
 }
-
-export { os as _os }

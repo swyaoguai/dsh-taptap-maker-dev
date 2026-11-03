@@ -46,6 +46,37 @@ function projectLine(project) {
   return `  ${project.slug}\n    ${project.path}\n    ${state}${project.registered ? '' : '  · 未登记'}`
 }
 
+/** 这些 flag 后面跟一个值（`--platform web-mobile`）；其余 flag 是开关。 */
+const FLAGS_WITH_VALUE = new Set(['platform', 'wait'])
+
+/**
+ * 把 tokens 拆成位置参数与 flag。
+ *
+ * 之前用「tokens.indexOf('--wait') + 1」取值，一旦用户把 flag 写在项目名前面
+ * （`/game-cocos build --wait 30 myproj`），`positional[0]` 会变成 '30'，
+ * **构建就打到错误的项目上**。这里集中解析，位置参数只收真正的位置 token。
+ */
+export function parseTokens(tokens) {
+  const flags = new Set()
+  const values = new Map()
+  const positional = []
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    if (token.startsWith('--')) {
+      const key = token.slice(2)
+      if (FLAGS_WITH_VALUE.has(key) && i + 1 < tokens.length && !tokens[i + 1].startsWith('--')) {
+        values.set(key, tokens[i + 1])
+        i += 1
+      } else {
+        flags.add(key)
+      }
+      continue
+    }
+    positional.push(token)
+  }
+  return { flags, values, positional }
+}
+
 function usageText() {
   return [
     'Cocos 集成（多项目安全）：',
@@ -74,9 +105,7 @@ function usageText() {
 export async function runCocosCommand(raw, ctx) {
   const tokens = tokenize(raw)
   const sub = (tokens[0] ?? '').toLowerCase()
-  const rest = tokens.slice(1)
-  const flags = new Set(rest.filter((token) => token.startsWith('--')).map((token) => token.slice(2)))
-  const positional = rest.filter((token) => !token.startsWith('--'))
+  const { flags, values, positional } = parseTokens(tokens.slice(1))
   const home = ctx.home
 
   try {
@@ -244,12 +273,12 @@ export async function runCocosCommand(raw, ctx) {
     if (sub === 'build') {
       const project = positional[0]
       if (!project) return { kind: 'error', text: '用法：/game-cocos build <项目> [--platform web-mobile] [--wait 秒]' }
-      const waitToken = tokens.indexOf('--wait')
-      const waitSeconds = waitToken >= 0 ? Number(tokens[waitToken + 1]) : 0
-      const platformToken = tokens.indexOf('--platform')
-      const platform = platformToken >= 0 ? tokens[platformToken + 1] : 'web-mobile'
+      // parseTokens 已经把 flag 和位置参数分开：`--wait 30 myproj` 这种顺序
+      // 不会再把 '30' 当成项目名（之前会，结果是构建打到错误工程）。
+      const waitSeconds = Number(values.get('wait')) || 0
+      const platform = values.get('platform') ?? 'web-mobile'
       const result = await TOOL_INDEX.get('cocos_build').handler(
-        { project, platform, wait_ms: Math.max(0, waitSeconds || 0) * 1000 },
+        { project, platform, wait_ms: Math.max(0, waitSeconds) * 1000 },
         { dshHome: home, config: { buildSlots: ctx.config?.cocos?.buildSlots ?? 1 }, sessionId: ctx.sessionId ?? '' },
       )
       return {

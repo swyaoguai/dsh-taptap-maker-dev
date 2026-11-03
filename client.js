@@ -2464,6 +2464,7 @@ window.__ModuleLoader__.load({
       const [data, setData] = useState(null)
       const [busy, setBusy] = useState('')
       const [msg, setMsg] = useState(null)
+      const [loadError, setLoadError] = useState(null)
       const [projectPath, setProjectPath] = useState('')
       const [installResult, setInstallResult] = useState(null)
 
@@ -2471,9 +2472,11 @@ window.__ModuleLoader__.load({
         try {
           const r = await fetch(`${API_BASE}/cocos`, { headers: { accept: 'application/json' } })
           const j = await r.json()
-          if (j?.ok) { setData(j); setMsg(null) } else setMsg({ kind: 'err', text: j?.error ?? '读取失败' })
+          if (j?.ok) { setData(j); setLoadError(null); setMsg(null) } else {
+            setLoadError(j?.error ?? `HTTP ${r.status}`)
+          }
         } catch (e) {
-          setMsg({ kind: 'err', text: `读取失败：${e?.message ?? e}` })
+          setLoadError(e?.message ?? String(e))
         }
       }, [])
 
@@ -2553,8 +2556,17 @@ window.__ModuleLoader__.load({
           '多个 Cocos 工程可以同时开：工具只登记一个 cocos 服务，用 project 参数路由到具体工程；'
           + '同一工程的写操作串行（写锁），构建全机排队 —— 不会把改动写进另一个工程里。'),
 
+        loadError !== null
+          ? h('p', { style: S.warn },
+            `读不到状态：${loadError}。`
+            + (data === null ? '（宿主可能还没加载新版本，重启一次 DSH 桌面端；路由不可用时这里也会报错。）' : ''))
+          : null,
+
         projects.length === 0
-          ? h('p', { style: S.hint }, '还没有登记或正在运行的 Cocos 工程。先在 Cocos Creator 里打开一个，或重启 DSH 后点「刷新」。')
+          ? h('p', { style: S.hint },
+            loadError !== null
+              ? '状态读取失败，无法判断有没有工程。'
+              : '还没有登记或正在运行的 Cocos 工程。先在 Cocos Creator 里打开一个，或重启 DSH 后点「刷新」。')
           : h('div', { style: S.scrollBox },
             projects.map((item) => h('div', {
               key: item.slug,

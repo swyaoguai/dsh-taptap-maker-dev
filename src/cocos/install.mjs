@@ -246,7 +246,17 @@ export async function installExtension({
   if (meta === null) {
     throw new CocosMcpError(`${normal} 看起来不是 Cocos 工程（缺 package.json 或 assets/）`, { code: 'NOT_COCOS_PROJECT' })
   }
-  if (meta.creatorVersion !== '' && !/^3\./.test(meta.creatorVersion)) {
+  // ⚠️ 这里必须严于 readProjectMeta：TapTap Maker 工程同样有 assets/，
+  // 往里面塞 Cocos 扩展等于污染一个会被自动提交的工作区。
+  // Cocos Creator 的 package.json 一定带 creator.version 字段 —— 就用它做硬校验。
+  if (meta.creatorVersion === '') {
+    throw new CocosMcpError(
+      `${normal} 的 package.json 没有 creator.version 字段 —— 不是 Cocos Creator 工程。`
+      + '（TapTap Maker / 其它带 assets/ 的工程不能装这个扩展。）',
+      { code: 'NOT_COCOS_PROJECT' },
+    )
+  }
+  if (!/^3\./.test(meta.creatorVersion)) {
     throw new CocosMcpError(
       `该扩展只支持 Cocos Creator 3.x（本项目 ${meta.creatorVersion}）。2.x 请另找对应插件。`,
       { code: 'UNSUPPORTED_VERSION' },

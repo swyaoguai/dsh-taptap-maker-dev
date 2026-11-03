@@ -21,6 +21,7 @@ import { clipText, errorText } from './util.mjs'
 
 const SERVER_INFO = { name: 'cocos', version: '1.0.0' }
 const DEFAULT_PROTOCOL = '2026-07-28'
+const SUPPORTED_PROTOCOLS = ['2026-07-28', '2025-06-18', '2025-03-26']
 
 function parseArgs(argv) {
   const out = { home: '', buildSlots: 1 }
@@ -79,6 +80,36 @@ function toolError(error) {
   }
 }
 
+/**
+ * 按工具声明的 inputSchema 做最小校验：必填项 + 未知顶层键。
+ *
+ * 为什么必须做：很多工具的 `project` 是可选的，「只有一个项目在跑」时可以省略。
+ * agent 手一抖写成 `{projects: 'x'}`（多了个 s），没有校验的话这个参数会被静默
+ * 丢弃 → 工具按「默认唯一项目」执行 → **改动打到没打算碰的工程里**。
+ * 这正是多项目场景里最危险的静默错误，所以宁可在这里报错打断。
+ */
+function validateArgs(def, args) {
+  const schema = def.inputSchema
+  if (schema === null || typeof schema !== 'object') return null
+  const properties = schema.properties !== null && typeof schema.properties === 'object' ? schema.properties : {}
+  const required = Array.isArray(schema.required) ? schema.required : []
+  for (const key of required) {
+    if (args[key] === undefined || args[key] === null) {
+      return `缺少必填参数 "${key}"（工具 ${def.name}）。`
+    }
+  }
+  if (schema.additionalProperties === false) {
+    const unknown = Object.keys(args).filter((key) => !(key in properties))
+    if (unknown.length > 0) {
+      const known = Object.keys(properties).join('、')
+      return `工具 ${def.name} 不认识参数：${unknown.map((key) => `"${key}"`).join('、')}。`
+        + `可用参数：${known || '(无)'}。`
+        + '注意 project 拼写（单数）—— 写错会被静默忽略，导致操作落到「默认项目」上。'
+    }
+  }
+  return null
+}
+
 async function handleToolCall(params) {
   const name = params?.name
   const def = TOOL_INDEX.get(name)
@@ -86,6 +117,11 @@ async function handleToolCall(params) {
     return toolError(new Error(`未知工具 "${name}"。可用工具：${[...TOOL_INDEX.keys()].join('、')}`))
   }
   const args = params?.arguments !== null && typeof params?.arguments === 'object' ? params.arguments : {}
+  const invalid = validateArgs(def, args)
+  if (invalid !== null) {
+    log(`工具 ${name} 参数被拒：${invalid}`)
+    return toolError(new Error(invalid))
+  }
   try {
     const value = await def.handler(args, { dshHome, sessionId, config, log })
     return toolResult(value)
@@ -144,9 +180,12 @@ async function dispatch(message) {
 
   switch (method) {
     case 'initialize': {
+      // MCP 握手：客户端报它想要的版本，服务端必须回**自己支持的**版本；
+      // 无脑回显客户端版本，等于承诺了一个我们没实现的协议行为。
       const requested = String(params?.protocolVersion ?? '')
+      const protocolVersion = SUPPORTED_PROTOCOLS.includes(requested) ? requested : DEFAULT_PROTOCOL
       result(id, {
-        protocolVersion: requested || DEFAULT_PROTOCOL,
+        protocolVersion,
         serverInfo: SERVER_INFO,
         capabilities: { tools: {}, resources: {} },
         instructions:
