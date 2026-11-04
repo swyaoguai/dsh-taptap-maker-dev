@@ -94,16 +94,22 @@ export function pythonProbeTimedOut() {
 export function findPlainPython() {
   if (pyCache !== undefined) return pyCache
   pyProbeTimedOut = false
+  const tryOnce = (bin, timeout) => spawnSync(bin, ['-c', 'import sys; print(sys.version_info[0])'], {
+    // 探测超时要短：设置页 GET /lanes 的 readiness 是同步路由，不能卡住。
+    // （那条路由现在传 probe:false，根本不会走到这里；真探测只发生在命令层。）
+    // 8 秒而不是 5 秒：忙机器上 python 冷启动实测 3~6.5 秒（2026-11，CPU 100% 时）。
+    encoding: 'utf8', timeout, windowsHide: true,
+  })
   for (const bin of ['python', 'python3', 'py']) {
     try {
-      const r = spawnSync(bin, ['-c', 'import sys; print(sys.version_info[0])'], {
-        // 探测超时要短：设置页 GET /lanes 的 readiness 是同步路由，不能卡住。
-        // （那条路由现在传 probe:false，根本不会走到这里；真探测只发生在命令层。）
-        // 8 秒而不是 5 秒：忙机器上 python 冷启动到 4 秒是实测过的。
-        encoding: 'utf8', timeout: 8000, windowsHide: true,
-      })
+      let r = tryOnce(bin, 8000)
+      // 超时就再给一次机会（第二次通常已经热了）：宁可多等几秒，也别把
+      // 「装着 python 但机器忙」误报成「没装」——那会让人白装一遍。
+      if (r.error?.code === 'ETIMEDOUT') {
+        r = tryOnce(bin, 15000)
+        if (r.error?.code === 'ETIMEDOUT') pyProbeTimedOut = true
+      }
       if (r.status === 0 && (r.stdout ?? '').trim() === '3') { pyCache = bin; return bin }
-      if (r.error?.code === 'ETIMEDOUT') pyProbeTimedOut = true
     } catch { /* try next */ }
   }
   pyCache = null

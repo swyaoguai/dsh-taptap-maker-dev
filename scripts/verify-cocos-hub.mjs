@@ -934,7 +934,10 @@ async function main() {
     send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} })
     send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'cocos_projects', arguments: {} } })
 
-    const deadline = Date.now() + 20000
+    // 20 秒是空载时的经验值；满负载（CPU 100%、Cocos 编辑器开着）时 tools/call
+    // 要枚举进程 + 读注册表，实测会超过 20 秒 —— 这条测的是**协议全链路能不能通**，
+    // 不是延迟，不该因为机器忙就红。
+    const deadline = Date.now() + 60000
     while (responses.length < 3 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, 100))
     }

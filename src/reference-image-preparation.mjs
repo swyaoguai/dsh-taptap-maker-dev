@@ -249,8 +249,13 @@ async function probe(bin, kind, deadline) {
   const args = kind === 'pillow'
     ? ['-c', 'import json,PIL; from PIL import Image,features; Image.init(); supported=features.get_supported(); needs={"PNG":"zlib","JPEG":"jpg","WEBP":"webp"}; formats=[name for name in ("PNG","JPEG","WEBP","GIF","BMP","AVIF") if name in Image.OPEN and (name not in needs or needs[name] in supported)]; print(json.dumps({"version":PIL.__version__,"webp":features.check("webp"),"resampling":hasattr(Image,"Resampling"),"formats":formats}))']
     : ['-version']
-  // 8 秒而不是 4 秒：忙机器上 python + import PIL 冷启动实测可到 4~5 秒。
-  const r = await runProcess(bin, args, { timeoutMs: Math.min(8000, remaining(deadline)) })
+  // 8 秒而不是 4 秒：忙机器上 python + import PIL 冷启动实测可到 4~6.5 秒。
+  // 超时**再试一次**（第二个 8 秒）：实测满负载时第一次冷启动会被拖慢，
+  // 第二次通常已经热了。最多多花 8 秒，但能避免把「装了 Pillow」误判成没装。
+  let r = await runProcess(bin, args, { timeoutMs: Math.min(8000, remaining(deadline)) })
+  if (r.stopped) {
+    try { r = await runProcess(bin, args, { timeoutMs: Math.min(8000, remaining(deadline)) }) } catch { /* keep first result */ }
+  }
   assertProcessAllowed(r)
   if (r.stopped) lastProbeTimedOut = true
   let value = null
