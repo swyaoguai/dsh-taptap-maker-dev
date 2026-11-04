@@ -110,7 +110,7 @@ import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDu
 import { installFile as installAudioAsset } from './src/game-audio.mjs'
 import os from 'node:os'
 import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile, parseSlashGenArgs, gptWebLaneReady } from './src/game-image-web.mjs'
-import { zaiduyuLaneUsable, generate as zaiduyuGenerate, models as zaiduyuModels, balance as zaiduyuBalance, zaiduyuQuotaHit, loginProbe, parseModelsText, extractGenArgs } from './src/game-zaiduyu.mjs'
+import { zaiduyuLaneUsable, pythonProbeTimedOut, generate as zaiduyuGenerate, models as zaiduyuModels, balance as zaiduyuBalance, zaiduyuQuotaHit, loginProbe, parseModelsText, extractGenArgs } from './src/game-zaiduyu.mjs'
 import { checkHardwareAsync as sfxCheckHardware, parseGenArgs as splitSfxGenArgs } from './src/game-sfx.mjs'
 // /game-image-relay 命令层的参数解析用通用消费器（见 src/tokens.mjs）。
 // 这里必须显式 import：node --check 不会发现「函数体内裸用了未导入的名字」，
@@ -2746,7 +2746,7 @@ export function apply(ctx, config = {}) {
               '章鱼生图（pai.zaiduyu.top 积分制多模型站，第三方 skill 整合，不消耗 Maker 内置额度、但花你自己买的积分）：',
               '',
               `脚本：${u.script ? '✓ 已随插件分发' : '✗ 缺失'}`,
-              `Python：${u.python ? `✓ ${u.python}` : '✗ 未找到（脚本只用标准库，装 Python 3.10+ 即可）'}`,
+              `Python：${u.python ? `✓ ${u.python}` : (pythonProbeTimedOut() ? '✗ 探测超时（机器忙时 python 冷启动可能超过 8 秒；稍后重试一次）' : '✗ 未找到（脚本只用标准库，装 Python 3.10+ 即可）')}`,
               `站点账号：${u.credentials ? `✓ 已配置（来源：${u.credentialsSource === 'file' ? '设置页保存' : '环境变量'}）${u.identifier ? ` · ${u.identifier}` : ''}` : '✗ 未配置'}`,
               '',
               u.credentials ? '' : [

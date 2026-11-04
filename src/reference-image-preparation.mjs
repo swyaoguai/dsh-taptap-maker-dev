@@ -234,6 +234,14 @@ function assertProcessAllowed(result) {
   }
 }
 const probeCache = new Map()
+/**
+ * 上一次探测是不是**超时**（而不是「这不是 Pillow / 没装」）。
+ * probe() 只回 null 的话，上层只能笼统说「未找到 Pillow」——机器正忙时
+ * （编译、跑构建、开着浏览器）python 冷启动 + import PIL 会超过几秒，
+ * 用户照提示去装 Pillow 才发现早就装了。2026-11 实测：同一台机器 spawn 从
+ * <100ms 涨到 3~5s，这类误报会随机出现。
+ */
+let lastProbeTimedOut = false
 async function probe(bin, kind, deadline) {
   const key = `${kind}:${bin}`
   const hit = probeCache.get(key)
@@ -241,8 +249,10 @@ async function probe(bin, kind, deadline) {
   const args = kind === 'pillow'
     ? ['-c', 'import json,PIL; from PIL import Image,features; Image.init(); supported=features.get_supported(); needs={"PNG":"zlib","JPEG":"jpg","WEBP":"webp"}; formats=[name for name in ("PNG","JPEG","WEBP","GIF","BMP","AVIF") if name in Image.OPEN and (name not in needs or needs[name] in supported)]; print(json.dumps({"version":PIL.__version__,"webp":features.check("webp"),"resampling":hasattr(Image,"Resampling"),"formats":formats}))']
     : ['-version']
-  const r = await runProcess(bin, args, { timeoutMs: Math.min(4000, remaining(deadline)) })
+  // 8 秒而不是 4 秒：忙机器上 python + import PIL 冷启动实测可到 4~5 秒。
+  const r = await runProcess(bin, args, { timeoutMs: Math.min(8000, remaining(deadline)) })
   assertProcessAllowed(r)
+  if (r.stopped) lastProbeTimedOut = true
   let value = null
   if (r.status === 0 && !r.stopped) {
     if (kind === 'pillow') {
@@ -253,7 +263,8 @@ async function probe(bin, kind, deadline) {
     }
   }
   // A just-installed/fixed tool is discoverable without restarting the host.
-  probeCache.set(key, { value, expires: Date.now() + (value ? 60000 : 2000) })
+  // 超时失败**不缓存**：立刻重试一次应该真的重新探测，而不是撞上负缓存又失败。
+  probeCache.set(key, { value, expires: Date.now() + (value ? 60000 : (r.stopped ? 0 : 2000)) })
   return value
 }
 function candidates(configured, defaults) {
@@ -264,6 +275,7 @@ function candidates(configured, defaults) {
   return [...new Set(values)]
 }
 async function selectProcessor(options, policy, deadline, inputMime) {
+  lastProbeTimedOut = false
   const inputFormat = inputMime === 'image/jpeg' ? 'JPEG' : inputMime?.slice(6).toUpperCase()
   const python = candidates(options.pythonBins, [envValue('TAPTAP_PY'), envValue('PYTHON'), 'python', 'python3', 'py'].filter(Boolean))
   for (const bin of python) {
@@ -273,7 +285,15 @@ async function selectProcessor(options, policy, deadline, inputMime) {
   // On Windows, convert.exe is a disk utility, not ImageMagick.
   const magick = candidates(options.imageMagickBins, [envValue('TAPTAP_IMAGE_MAGICK'), 'magick', ...(process.platform === 'win32' ? [] : ['convert'])].filter(Boolean))
   for (const bin of magick) { const tool = await probe(bin, 'magick', deadline); if (tool) return tool }
-  throw preflightError('reference_preprocess_unavailable', '参考图需要本地解码校验，但未找到可用的 Python Pillow / ImageMagick。请配置现有处理器后重试；未安装依赖、未提交生成。')
+  // 这句话也会在「机器忙、python 探测超时」时出现 —— 那种情况根本不是没装依赖，
+  // 所以不能只叫人去装 Pillow（用户照做会发现早就装了）。2026-11 实测过。
+  if (lastProbeTimedOut) {
+    // 探测超时 ≠ 没装依赖：说明白，别让人白装一遍。
+    throw preflightError('reference_preprocess_timeout', '本地参考图处理器**探测超时**（不是「没装 Pillow / ImageMagick」）：'
+      + '机器正忙时 python 冷启动 + import PIL 可能超过 8 秒。请稍后重试一次；反复出现再检查处理器。未提交生成。')
+  }
+  throw preflightError('reference_preprocess_unavailable', '参考图需要本地解码校验，但未找到可用的 Python Pillow / ImageMagick。'
+    + '请配置现有处理器后重试；未安装依赖、未提交生成。')
 }
 function assertWorkerResult(result) {
   assertProcessAllowed(result)

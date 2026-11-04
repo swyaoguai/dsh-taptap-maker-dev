@@ -71,6 +71,21 @@ export function zaiduyuCredentialsReady(dshHome) {
  * ------------------------------------------------------------------------- */
 
 let pyCache
+/** 上一次探测里有没有「python 存在、但启动超过超时时间」——机器忙时很常见。 */
+let pyProbeTimedOut = false
+
+/**
+ * 探测是否因为**超时**而失败（区别于「根本没装」）。
+ *
+ * 为什么要分：`findPlainPython()` 只回 null，上层就只能说「未找到可用的 Python 3，
+ * 装个 3.10+ 即可」——可机器正忙（编译、跑构建、开着一堆浏览器）时 python 冷启动
+ * 要 3~5 秒，5 秒超时就会把"有 python"误报成"没装"，用户按提示去装才发现早就装了。
+ * 2026-11 实测：同一台机器上 spawn 耗时从 <100ms 涨到 ~4s，生图/生音效开始随机报这个。
+ */
+export function pythonProbeTimedOut() {
+  return pyProbeTimedOut
+}
+
 /**
  * 找一个能跑标准库脚本的 python。
  * ⚠️ Windows 上 `python` 可能解析到 Microsoft Store 的 stub（非交互时弹商店、
@@ -78,18 +93,29 @@ let pyCache
  */
 export function findPlainPython() {
   if (pyCache !== undefined) return pyCache
+  pyProbeTimedOut = false
   for (const bin of ['python', 'python3', 'py']) {
     try {
       const r = spawnSync(bin, ['-c', 'import sys; print(sys.version_info[0])'], {
-        // 探测超时给短一点：这个函数会被设置页 GET /lanes 的 readiness 同步调用，
-        // 没有 python 的机器上三个候选要快速失败，不能各等 15 秒卡住路由。
-        encoding: 'utf8', timeout: 5000, windowsHide: true,
+        // 探测超时要短：设置页 GET /lanes 的 readiness 是同步路由，不能卡住。
+        // （那条路由现在传 probe:false，根本不会走到这里；真探测只发生在命令层。）
+        // 8 秒而不是 5 秒：忙机器上 python 冷启动到 4 秒是实测过的。
+        encoding: 'utf8', timeout: 8000, windowsHide: true,
       })
       if (r.status === 0 && (r.stdout ?? '').trim() === '3') { pyCache = bin; return bin }
+      if (r.error?.code === 'ETIMEDOUT') pyProbeTimedOut = true
     } catch { /* try next */ }
   }
   pyCache = null
   return null
+}
+
+/** 「没有 python」这句话该怎么说 —— 超时就别叫人去装。 */
+export function pythonMissingMessage(extra = '') {
+  const base = pyProbeTimedOut
+    ? 'Python 3 探测超时（不是没装：机器忙时 python 冷启动可能超过 8 秒）。稍后重试一次；反复出现再检查 PATH。'
+    : '未找到可用的 Python 3（脚本只用标准库，装一个 python 3.10+ 即可）。'
+  return `${base}${extra}`
 }
 
 /**
@@ -159,7 +185,7 @@ export function expandUser(raw) {
 export function runZaiduyu(argv, { timeoutMs = 3600000, cwd, dshHome, env, credentials } = {}) {
   const py = findPlainPython()
   if (py === null) {
-    return Promise.resolve({ code: -1, stdout: '', stderr: '未找到可用的 Python 3（脚本只用标准库，装一个 python 3.10+ 即可）。' })
+    return Promise.resolve({ code: -1, stdout: '', stderr: pythonMissingMessage() })
   }
   if (!zaiduyuScriptExists()) {
     return Promise.resolve({ code: -1, stdout: '', stderr: `找不到脚本：${zaiduyuScriptPath()}` })
@@ -274,7 +300,7 @@ export function classifyZaiduyuFailure(text) {
   if (/网络请求失败|网络连接中断|超时|timed? ?out|unreachable|getaddrinfo|Connection/i.test(message)) {
     return { ...result, code: 'network_error', kind: 'network' }
   }
-  if (/缺少账号配置|Traceback|ImportError|未找到可用的 Python|脚本缺失|找不到脚本/.test(message)) {
+  if (/缺少账号配置|Traceback|ImportError|未找到可用的 Python|Python 3 探测超时|脚本缺失|找不到脚本/.test(message)) {
     return { ...result, code: 'environment_error', kind: 'environment', phase: 'preflight', submitted: false }
   }
   if (/未找到模型|没有(?:这个|该|可用).*模型|模型.*(?:已停用|不存在|不唯一)|未指定生图模型/.test(message)) {
@@ -348,7 +374,7 @@ export async function generate(dshHome, prompt, {
     // 「请先登录」）。用户已经选定模型时这里什么都不会发生。
     const status = zaiduyuLaneUsable({ dshHome })
     if (!status.script) throw new Error(`章鱼生图脚本缺失：${zaiduyuScriptPath()}`)
-    if (status.python === null) throw new Error('未找到可用的 Python 3，章鱼生图通道不可用（脚本只用标准库，装 python 3.10+ 即可）')
+    if (status.python === null) { const e = new Error(pythonMissingMessage('章鱼生图通道不可用。')); e.code = 'environment_error'; e.phase = 'preflight'; e.submitted = false; throw e }
     if (!status.credentials) {
       const e = new Error('章鱼生图缺少站点账号：请在设置页「章鱼生图（积分站）」卡里填写账号密码，点「登录并保存」验证通过后即可使用。')
       e.code = 'no_credentials'
@@ -462,7 +488,7 @@ export async function loginProbe(identifier, password) {
     return { ok: false, kind: 'environment', error: `脚本缺失：${zaiduyuScriptPath()}` }
   }
   if (findPlainPython() === null) {
-    return { ok: false, kind: 'environment', error: '本机未找到可用的 Python 3（该通道需要它跑站点脚本；只用标准库，无需第三方包）' }
+    return { ok: false, kind: 'environment', error: pythonMissingMessage('该通道需要它跑站点脚本；只用标准库，无需第三方包。') }
   }
   const r = await runZaiduyu(['--balance'], {
     timeoutMs: 90000,

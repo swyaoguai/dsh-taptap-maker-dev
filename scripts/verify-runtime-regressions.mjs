@@ -575,5 +575,19 @@ try {
   syncBuiltinESMExports()
 }
 
+console.log('\n[5] 注入给 Python 的片段：换行转义必须是双反斜杠')
+await check('py 模板里的 split 用双反斜杠（单反斜杠会让每次网页生图都 SyntaxError）', async () => {
+  // 2026-11 实测：`keyboard.type(...)` 那段写在 JS 模板字面量里，`split("\n")` 只在
+  // 源码里写了一个反斜杠 —— JS 先把 `\n` 变成**真换行**，生成的 python 就成了
+  // 跨行字符串字面量，runBrowser 直接 SyntaxError，连浏览器都没打开。
+  // 这类错误 node --check 看不出来（对 JS 而言语法是好的），必须在源码层锁死。
+  const singleBackslash = String.raw`split("\n")`   // 源码里的错误写法（一个反斜杠 + n）
+  const doubleBackslash = String.raw`split("\\n")`  // 正确写法（两个反斜杠 + n）
+  assert.ok(gptSource.includes(doubleBackslash), '存在正确写法 split("\\\\n")')
+  assert.ok(!gptSource.includes(singleBackslash), '不存在会把换行提前吃掉的单反斜杠写法')
+  // 注释里要写明为什么（下一个人改这段时别又改回单反斜杠）
+  assert.match(gptSource, /换行转义必须写双反斜杠/)
+})
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`)
 process.exitCode = failed === 0 ? 0 : 1
