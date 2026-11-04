@@ -1,6 +1,6 @@
 {
   "name": "dsh-game-forge",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "description": "游戏工坊 / Game Forge —— 通用游戏开发工作流插件 (DSH bundle)：按项目进度与需求挑 skill（立项→原型→内容→美术音频→手感→测试→上线），零额度产出图片 / 音效 / BGM / 动作帧素材，并守住「非用户主动不消耗 Maker MCP 内置额度」的红线。TapTap Maker (UrhoX + Lua) 只是支持的引擎之一，Godot / Unity / Unreal / 网页项目同样适用。",
@@ -28,6 +28,7 @@
     "docs",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "THIRD-PARTY-NOTICES.md",
     "third_party/GameFactory-3A/LICENSE"
   ],
