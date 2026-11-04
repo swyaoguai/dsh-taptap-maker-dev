@@ -443,11 +443,16 @@ python -B scripts/verify-reference-image-diagnostics.py
 ## 命令行
 
 ```sh
+# 生图通道：看顺序 / 开关 / 就绪 / 回退，以及改顺序（改要带 --yes，等同用户点头）
+/game-image lanes
+/game-image lanes --order zaiduyu,gptWeb,relayImage --yes
+/game-image lanes --on gptWeb --off relayImage --fallback on --yes
+
 # 视频通道：查看 / 调整顺序、开关、额度不足是否自动换
 /game-video lanes
 /game-video lanes --order minimax,relay --off local --fallback on
 
-# 生图首选：ChatGPT 网页（首次登录一次）
+# 生图：按上面排的顺序自动选通道（默认 章鱼 → 网页 → 中转）
 node <plugin-dir>/src/game-image-web.mjs login
 node <plugin-dir>/src/game-image-web.mjs gen --prompt "蓝色盾牌图标，扁平，居中留白" --out icon.png --downscale 128x128
 
@@ -456,7 +461,7 @@ node <plugin-dir>/src/game-image-web.mjs pending   # 有没有待抓取的对话
 node <plugin-dir>/src/game-image-web.mjs grab      # 抓 pending 那个对话
 node <plugin-dir>/src/game-image-web.mjs grab --url https://chatgpt.com/c/xxxx
 
-# 网页生图总开关（关掉后改走中转站）
+# 网页通道总开关（关掉后这条会被跳过，图片按顺序走其它通道）
 node <plugin-dir>/src/game-image-web.mjs lane status
 node <plugin-dir>/src/game-image-web.mjs lane off
 

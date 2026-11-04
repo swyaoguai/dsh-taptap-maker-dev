@@ -69,7 +69,7 @@ export const USER_OWNED_SETTINGS = {
   model: '视频模型',
   'lanes.order': '通道使用顺序',
   'lanes.enabled': '通道开关',
-  'lanes.autoFallback': '额度不足自动换通道',
+  'lanes.autoFallback': '通道「按顺序自动回退」开关',
   'image.downloadDir': '图片保存目录',
   'video.downloadDir': '视频保存目录',
   'bgm.downloadDir': 'BGM 保存目录',

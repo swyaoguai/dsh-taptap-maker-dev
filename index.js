@@ -2147,8 +2147,8 @@ export function apply(ctx, config = {}) {
 
     scoped.commands.register({
       name: 'game-image',
-      description: 'ChatGPT 网页生图：<描述> 生成 / lane on|off 总开关 / login 登录 / pool 账号池 / status',
-      input: { hint: '<图片描述> | lane on|off | login [--account <名>] | pool list | logout | status' },
+      description: '生图（按设置页排的顺序自动选通道）：<描述> 生成 / lanes 看/改顺序 / lane on|off / login / pool / status',
+      input: { hint: '<图片描述> | lanes [--order a,b,c] [--on <id>] [--off <id>] [--fallback on|off] | lane on|off | login | pool list | status' },
       handler: async (invocation) => {
         const raw = (invocation?.rawInput ?? '').trim()
         const low = raw.toLowerCase()
@@ -2250,7 +2250,7 @@ export function apply(ctx, config = {}) {
                 `网页生图总开关：${readGptLaneEnabled(home) ? '开' : '关'}`,
                 '',
                 '打开：/game-image lane on',
-                '关闭：/game-image lane off（关闭后模型改走中转站）',
+                '关闭：/game-image lane off（关掉后网页这条会被跳过，图片按顺序走其它通道）',
               ].join('\n'),
             }
           }
@@ -2258,8 +2258,97 @@ export function apply(ctx, config = {}) {
           return {
             kind: 'success',
             text: on
-              ? '已打开网页生图：模型会默认走 ChatGPT 网页通道。'
-              : '已关闭网页生图：模型不会尝试网页通道，图片改走中转站 /game-image-relay。随时可以 /game-image lane on 打开。',
+              ? '已打开网页生图：它会重新参与生图顺序（按你排的位置用）。'
+              : '已关闭网页生图：这条会被跳过，图片按顺序走其它通道。随时可以 /game-image lane on 打开。',
+          }
+        }
+        // 生图通道顺序（与设置页「图片 → 生图通道优先级」同一份配置）
+        //   /game-image lanes                                    看顺序 / 开关 / 就绪 / 回退
+        //   /game-image lanes --order zaiduyu,gptWeb,relayImage  改顺序（需要用户点头）
+        //   /game-image lanes --on gptWeb --off relayImage       开关某条
+        //   /game-image lanes --fallback on|off                  生图这类的「按顺序自动回退」
+        // 顺序就是使用顺序：不可用的会被跳过，全都不可用才提示用户补配置。
+        if (low === 'lanes' || low.startsWith('lanes ') || raw === '通道' || raw === '顺序') {
+          const labelOf = { zaiduyu: '章鱼生图', gptWeb: 'ChatGPT 网页生图', relayImage: '中转站生图' }
+          const idOf = (name) => Object.keys(labelOf).find((id) => id === name || labelOf[id] === name)
+          const before = readLanes(home).groups.image
+          const orderMatch = /--order\s+"([^"]+)"|--order\s+(\S+)/.exec(raw) ?? []
+          const orderRaw = String(orderMatch[1] ?? orderMatch[2] ?? '').trim()
+          const onArg = /--on\s+(\S+)/.exec(raw)?.[1]
+          const offArg = /--off\s+(\S+)/.exec(raw)?.[1]
+          const fbArg = /--fallback\s+(\S+)/.exec(raw)?.[1]
+          const changed = Boolean(orderRaw || onArg || offArg || fbArg)
+
+          if (!changed) {
+            // 「现在会怎么走」——把跳过项与回退状态一起说清楚，用户不用自己推。
+            const readyOf = (id) => {
+              try {
+                if (id === 'gptWeb') return gptWebLaneReady(home)
+                if (id === 'zaiduyu') return zaiduyuUsableForApi(home)
+                const c = readImageConfigRaw(home)
+                return Boolean(c.baseURL && c.apiKey && c.model)
+              } catch { return false }
+            }
+            const rows = before.order.map((id, i) => {
+              const on = before.enabled[id]
+              const ready = readyOf(id)
+              const mark = !on ? '·' : ready ? '✓' : '!'
+              const note = !on ? '（已关闭）' : ready ? '' : '（还没配好，会被跳过）'
+              return `  ${mark} ${i + 1}. ${labelOf[id] ?? id}${note}`
+            })
+            const usable = before.order.filter((id) => before.enabled[id] && readyOf(id))
+            return {
+              kind: 'success',
+              text: [
+                '生图通道（顺序就是使用顺序；设置页「图片」页同样可改）：',
+                ...rows,
+                '',
+                `按顺序自动回退：${before.autoFallback ? '开' : '关'}`,
+                `现在会走：${before.autoFallback
+                  ? (usable.map((id) => labelOf[id] ?? id).join(' → ') || '（没有一条配好的）')
+                  : (usable.length > 0 ? `${labelOf[usable[0]] ?? usable[0]}（回退关着，只试第一条）` : '（没有一条配好的）')}`,
+                '',
+                '改顺序：/game-image lanes --order zaiduyu,gptWeb,relayImage',
+                '开关某条：/game-image lanes --on gptWeb --off relayImage',
+                '回退开关：/game-image lanes --fallback on|off',
+              ].join('\n'),
+            }
+          }
+
+          const asked = [orderRaw, onArg, offArg].filter(Boolean)
+            .flatMap((v) => String(v).split(',').map((s) => s.trim()).filter(Boolean))
+          const unknown = asked.filter((name) => !idOf(name))
+          if (unknown.length > 0) {
+            return {
+              kind: 'error',
+              text: `未知通道：${unknown.join('、')}。可选：zaiduyu（章鱼生图）/ gptWeb（ChatGPT 网页生图）/ relayImage（中转站生图）`,
+            }
+          }
+          const patch = { groups: { image: {} } }
+          if (orderRaw) patch.groups.image.order = orderRaw.split(',').map((s) => idOf(s.trim())).filter(Boolean)
+          if (onArg) patch.groups.image.enabled = { ...(patch.groups.image.enabled ?? {}), [idOf(onArg)]: true }
+          if (offArg) patch.groups.image.enabled = { ...(patch.groups.image.enabled ?? {}), [idOf(offArg)]: false }
+          if (fbArg) patch.groups.image.autoFallback = !/^(off|false|关|0|no)$/i.test(fbArg)
+          // 顺序 / 开关 / 回退都是用户亲手定的：换掉它们等于替用户决定下次走哪条
+          // （可能从免费通道换到要花钱的通道）—— 必须用户自己点头。
+          const gate = guardUserSetting(
+            (orderRaw || onArg || offArg) ? 'lanes.order' : 'lanes.autoFallback',
+            {
+              rawInput: raw,
+              from: `${before.order.filter((id) => before.enabled[id]).map((id) => labelOf[id] ?? id).join(' → ')}｜回退${before.autoFallback ? '开' : '关'}`,
+              to: `${(patch.groups.image.order ?? before.order.filter((id) => before.enabled[id])).map((id) => labelOf[id] ?? id).join(' → ')}`
+                + `${fbArg ? `｜回退${patch.groups.image.autoFallback ? '开' : '关'}` : ''}`
+                + `${onArg ? `｜打开 ${labelOf[idOf(onArg)]}` : ''}${offArg ? `｜关闭 ${labelOf[idOf(offArg)]}` : ''}`,
+            },
+          )
+          if (!gate.ok) return { kind: 'error', text: gate.text }
+          const saved = writeLanes(home, patch).groups.image
+          return {
+            kind: 'success',
+            text: [
+              `已更新生图通道：${saved.order.filter((id) => saved.enabled[id]).map((id) => labelOf[id] ?? id).join(' → ') || '（没有启用的通道）'}`,
+              `按顺序自动回退：${saved.autoFallback ? '开' : '关'}`,
+            ].join('\n'),
           }
         }
         // 账号池：list / add / remove / ban / unban / rotate
@@ -2284,6 +2373,13 @@ export function apply(ctx, config = {}) {
               ...p.accounts.map((a) => `  - ${a.id}${a.label !== a.id ? `（${a.label}）` : ''} ${a.loggedIn ? '已登录' : '未登录'}`
                 + `${a.status === 'banned' ? ' 〔已封禁〕' : a.status === 'cooling' ? ' 〔冷却中〕' : ''}`),
             ]
+          // 生图现在的顺序（顺序即使用顺序），别再说「默认走网页」——
+          // 那是旧版写死的行为，现在由用户排。
+          const imgLane = readLanes(home).groups.image
+          const imgOrderText = imgLane.order
+            .filter((id) => imgLane.enabled[id])
+            .map((id) => (id === 'zaiduyu' ? '章鱼生图' : id === 'relayImage' ? '中转站生图' : 'ChatGPT 网页生图'))
+            .join(' → ')
           const lines = [
             `ChatGPT 登录状态：${st.loggedIn ? '已登录' : '未登录'}`,
             `  profile: ${st.profile}`,
@@ -2291,10 +2387,11 @@ export function apply(ctx, config = {}) {
             '',
             ...poolLines,
             '',
+            `生图顺序：${imgOrderText || '（没有启用的通道）'}`,
             st.laneEnabled === false
-              ? '总开关已关闭：不会走网页生图（/game-image lane on 可打开）。'
+              ? '总开关已关闭：网页这条不会被尝试（/game-image lane on 可打开）。'
               : (st.loggedIn || p.loggedIn > 0
-                ? '可以直接说「生成一个蓝色盾牌图标」，默认走这条网页通道。'
+                ? '可以直接说「生成一个蓝色盾牌图标」，会按上面的顺序挑一条能用的。'
                 : '先登录：/game-image login（只需一次）'),
           ]
           return { kind: 'success', text: lines.join('\n') }
@@ -2307,7 +2404,7 @@ export function apply(ctx, config = {}) {
           return {
             kind: 'success',
             text: [
-              'ChatGPT 网页生图是首选通道。直接说：/game-image 一只橙色小猫，扁平矢量风格',
+              '生图会按你在设置页「图片 → 生图通道优先级」里排的顺序来（默认 章鱼生图 → 网页生图 → 中转站），不可用就自动换下一条。直接说：/game-image 一只橙色小猫，扁平矢量风格',
               '',
               `当前：${st.loggedIn || st.pool.loggedIn > 0 ? '已登录，可直接生成' : '未登录'}`,
               st.loggedIn || st.pool.loggedIn > 0 ? '' : '先登录：/game-image login（只需一次）',
@@ -2504,12 +2601,12 @@ export function apply(ctx, config = {}) {
           return {
             kind: 'error',
             text: [
-              '中转站（回退通道）还没配置，且它已不是首选——图片默认走 ChatGPT 网页生图。',
+              '中转站生图还没配置（设置页「图片」→「中转站生图」）。它仍会留在生图顺序里，配好之后按排到的位置参与。',
               '',
-              `配置文件：${imageFile}（或设置页「中转站生图」卡）`,
+              `配置文件：${imageFile}（或设置页「图片」→「中转站生图」卡）`,
               '',
-              '网页通道：/game-image login 登录一次即可用（默认走这条）。',
-              '确实要用中转站：填好 baseURL / apiKey / model 再回来。',
+              '网页通道：/game-image login 登录一次即可用（顺序里排在它前面就会先用网页）。',
+              '确实要用中转站：填好 baseURL / apiKey / model 再回来，按顺序轮到它就会用。',
             ].join('\n'),
           }
         }
@@ -2552,7 +2649,7 @@ export function apply(ctx, config = {}) {
           return {
             kind: 'success',
             text: [
-              '中转站生图（回退通道，首选是 /game-image）：',
+              '中转站生图（也可以只走这一条；统一入口 /game-image 按生图顺序自动选）：',
               '',
               `  node "${cli}" --prompt "<描述>" --out D:\\tmp\\out.png --size 1024x1024`,
               `  node "${cli}" --prompt "蓝色盾牌图标，扁平，居中留白" --out D:\\tmp\\icon.png --transparent --downscale 128x128`,
