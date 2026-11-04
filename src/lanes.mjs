@@ -8,20 +8,27 @@
  *
  * 落盘：$DSH_HOME/game-forge/lanes.json
  *   {
- *     "autoFallback": true,          // 全局：额度不足时是否自动换下一条通道
+ *     "v": 2,                          // 配置版本（见 normalizeConfig 的迁移逻辑）
  *     "groups": {
- *       "image":  { "order": ["gptWeb", "relayImage"], "enabled": { ... } },
- *       "video":  { "order": ["relay", "minimax", "local"], "enabled": { ... } },
- *       "audio":  { "order": ["bgmWeb"],        "enabled": { ... } }
+ *       "image":  { "order": ["zaiduyu", "gptWeb", "relayImage"], "enabled": { ... }, "autoFallback": true  },
+ *       "video":  { "order": ["relay", "minimax", "local"],       "enabled": { ... }, "autoFallback": false },
+ *       "audio":  { "order": ["bgmWeb"],                          "enabled": { ... }, "autoFallback": false }
  *     }
  *   }
  *
- * ⚠️ 两条重要不变量：
+ * 「按顺序回退」是**每个模块各自一个开关**（2026-11 用户要求）：生图一条顺序、
+ * 视频一条顺序、BGM 一条顺序，各自决定「不可用时要不要往下换」。旧版只有一个
+ * 全局 autoFallback，读旧文件时按 migrate 规则换算（见 readLanes）。
+ *
+ * ⚠️ 三条重要不变量：
  *  1. **local 通道永远可跑**（本地视频，零额度），但它是「用户主动挂文件」，
  *     不是「自动生成」——所以它参与排序、默认开启，却永远不会被自动回退选中
  *     （回退只处理额度/失败，不该把用户拖进一个需要手动挑文件的动作）。
  *  2. **开关永远不能把所有通道关成空集**：至少保留一个启用项，否则用户会
  *     把自己锁在「所有生图都不可用」的状态且界面很难看出原因。
+ *  3. **顺序 = 使用顺序**。不可用（没配置 / 没账号 / 额度不足 / 跑不起来）就往
+ *     下一条走；全部不可用才提示用户去补配置 —— 提示只在「退无可退」时出现，
+ *     不要每走一步都问一遍。
  *
  * @module src/lanes.mjs
  */
@@ -39,21 +46,29 @@ import { dataDir, readJson, writeJson } from './paths.js'
  *  - kind:   'web' = 走真实浏览器/网页登录态；'api' = 走 HTTP 接口；'local' = 本地文件
  *  - zeroCost: 真·零成本（不需要任何额度），用于界面提示
  *  - ready:  判断该通道**当前**能不能用（配置齐不齐），由调用方注入以避免循环依赖
+ *
+ * `lanes` 里的**数组顺序就是默认使用顺序**（defaultOrder 直接取它）。
+ *  - 生图默认：章鱼生图 → ChatGPT 网页 → 中转站（用户在 2026-11 明确要求的顺序）。
+ *  - autoFallbackDefault：该组「不可用时是否自动换下一条」的默认值。
+ *    生图默认 **开**（用户明确要多优先级回退）；视频 / BGM 默认 **关** ——
+ *    视频按秒计费、BGM 花的是订阅额度，「少问一句就多花一次钱」不值得。
  */
 export const LANE_GROUPS = {
   image: {
     label: '生图',
+    autoFallbackDefault: true,
     lanes: [
+      // 章鱼生图：pai.zaiduyu.top 积分制多模型站（第三方 skill 整合）。
+      // 积分是**预付的**（花钱买的），所以它在顺序里排第一是用户的明确选择，
+      // 不是插件替他做的决定：界面上写着「顺序 = 使用顺序」，随时可拖。
+      { id: 'zaiduyu', label: '章鱼生图（积分站）', kind: 'api', note: 'pai.zaiduyu.top 多模型，积分制，需站点账号' },
       { id: 'gptWeb', label: 'ChatGPT 网页生图', kind: 'web', note: '真实浏览器通道，多账号轮换' },
       { id: 'relayImage', label: '中转站生图', kind: 'api', note: 'OpenAI 兼容 /images' },
-      // 章鱼生图：pai.zaiduyu.top 积分制多模型站（第三方 skill 整合）。
-      // 积分是**预付的**（花钱买的），所以它是付费通道：autoFallback 默认关时
-      // 不会自动切到这里，和「不要替用户动用付费通道」的不变量一致。
-      { id: 'zaiduyu', label: '章鱼生图（积分站）', kind: 'api', note: 'pai.zaiduyu.top 多模型，积分制，需站点账号' },
     ],
   },
   video: {
     label: '视频',
+    autoFallbackDefault: false,
     lanes: [
       { id: 'relay', label: '视频中转站', kind: 'api', note: '你自己的地址 / Key / 模型' },
       { id: 'minimax', label: 'MiniMax 官方', kind: 'api', note: '订阅 Key 或按量 Key' },
@@ -62,6 +77,7 @@ export const LANE_GROUPS = {
   },
   audio: {
     label: '背景音乐',
+    autoFallbackDefault: false,
     lanes: [
       { id: 'bgmWeb', label: 'MiniMax 网页 BGM', kind: 'web', note: '需登录，多账号轮换' },
     ],
@@ -96,22 +112,14 @@ export function lanesConfigPath(dshHome) {
 //    readRaw 又把异常吞掉返回 {}，表现为「用户排的通道顺序悄悄变回默认」。
 //  - 读失败会另存 .corrupt-<时间戳> 留现场，事后能找回用户亲手排的顺序。
 
-/**
- * 默认值 —— 刻意**沿用改造前的实际行为**，这样升级后行为不突变：
- *  - 视频顺序 relay > minimax（旧的 resolveBackend 就是这个优先级）
- *  - 生图网页优先（2026-10 的主通道改动）
- *  - autoFallback 默认 **false**：自动切换会动用付费通道，不该替用户默认打开
+/** 配置版本：2 = 「按顺序回退」从全局开关改成每组一个开关（2026-11）。 */
+export const CONFIG_VERSION = 2
+
+/*
+ * 默认值不单独存一份：`normalizeGroup` 在「没写过」时就地取 lanes 数组顺序 +
+ * 该组 autoFallbackDefault。曾经这里有一个 defaults()，但它和归一化逻辑各写
+ * 一遍默认值，改顺序时要改两处（漏一处就是"界面显示新顺序、执行还是老顺序"）。
  */
-function defaults() {
-  return {
-    autoFallback: false,
-    groups: {
-      image: { order: defaultOrder('image'), enabled: { gptWeb: true, relayImage: true, zaiduyu: true } },
-      video: { order: defaultOrder('video'), enabled: { relay: true, minimax: true, local: true } },
-      audio: { order: defaultOrder('audio'), enabled: { bgmWeb: true } },
-    },
-  }
-}
 
 /**
  * 归一化：任何外部输入（磁盘上的旧文件、POST 来的脏数据）都要过这里。
@@ -140,34 +148,58 @@ function normalizeGroup(group, raw) {
   // 不变量 2：绝不允许全关
   if (!order.some((id) => enabled[id])) enabled[order[0]] = true
 
-  return { order, enabled }
+  // 每组的「按顺序回退」开关。规则（老文件也能得到合理行为）：
+  //  1) 该组自己写了布尔值 → 用它（v2 之后的正常路径）；
+  //  2) 旧版文件（无 v 字段）里全局 autoFallback === true → 三类都算开
+  //     （用户当时的选择是"要自动换"，不该被这次改版悄悄收回）；
+  //  3) 其余情况 → 用该组的默认值（生图开、视频/BGM 关）。
+  // 注意 2) 与 3) 的顺序：旧文件里全局是 **false** 时，生图仍按新默认开 ——
+  // 因为"生图要按顺序回退"是用户在 2026-11 明确提出的需求，界面上也会直接
+  // 显示这个开关的状态，用户可以一键关掉。
+  const fallbackDefault = LANE_GROUPS[group].autoFallbackDefault === true
+  let autoFallback = fallbackDefault
+  if (typeof raw?.autoFallback === 'boolean') autoFallback = raw.autoFallback
+  else if (raw?.legacyGlobalFallback === true) autoFallback = true
+
+  return { order, enabled, autoFallback }
 }
 
 /**
  * 读取完整配置（已归一化）。
+ *
  * @param {string} dshHome
- * @returns {{autoFallback: boolean, groups: Record<string, {order: string[], enabled: Record<string, boolean>}>}}
+ * @returns {{v: number, autoFallback: boolean,
+ *   groups: Record<string, {order: string[], enabled: Record<string, boolean>, autoFallback: boolean}>}}
+ *   `autoFallback`（顶层）是**兼容用的镜像**：只有三类全开才为 true，
+ *   语义以 groups[*].autoFallback 为准。
  */
 export function readLanes(dshHome) {
   const raw = readJson(lanesConfigPath(dshHome)) ?? {}
-  // 只有显式写了 true 才算开启「额度不足自动换通道」—— 默认不动用户的付费通道。
-  const out = { autoFallback: raw.autoFallback === true, groups: {} }
+  // 旧版（无 v）只有一个全局 autoFallback：把它当作"用户意图"传给各组，
+  // 但每组自己的值优先（见 normalizeGroup 的规则）。
+  const legacyGlobalFallback = Number(raw.v) === CONFIG_VERSION ? undefined : raw.autoFallback === true
+  const out = { v: CONFIG_VERSION, autoFallback: false, groups: {} }
   for (const group of GROUPS) {
-    out.groups[group] = normalizeGroup(group, raw?.groups?.[group])
+    const gRaw = raw?.groups?.[group]
+    out.groups[group] = normalizeGroup(group, { ...(gRaw ?? {}), legacyGlobalFallback })
   }
+  out.autoFallback = GROUPS.every((g) => out.groups[g].autoFallback === true)
   return out
 }
 
 /**
- * 写入（partial patch）。开启状态支持两种写法：
+ * 写入（partial patch）。支持：
  *   { enabled: { relay: false } }              —— 只改这几条，其余保持
  *   { order: ['minimax', 'relay'] }            —— 直接给定顺序
+ *   { autoFallback: true }                     —— 只改该组「按顺序回退」
+ *   { autoFallback: true }（顶层，旧写法）      —— 三类一起改（保留给老调用方）
  * 返回归一化后的完整配置。
  */
 export function writeLanes(dshHome, patch = {}) {
   const current = readLanes(dshHome)
-  const next = { autoFallback: current.autoFallback, groups: {} }
-  if (typeof patch.autoFallback === 'boolean') next.autoFallback = patch.autoFallback
+  const next = { v: CONFIG_VERSION, groups: {} }
+  // 旧的顶层 autoFallback 继续可用：含义是"三类都设成这个值"。
+  const globalPatch = typeof patch.autoFallback === 'boolean' ? patch.autoFallback : undefined
 
   for (const group of GROUPS) {
     const gPatch = patch.groups?.[group] ?? patch[group] ?? {}
@@ -180,10 +212,18 @@ export function writeLanes(dshHome, patch = {}) {
         if (typeof v === 'boolean' && laneTable(group).has(id)) enabled[id] = v
       }
     }
-    next.groups[group] = normalizeGroup(group, { order, enabled })
+    let autoFallback = cur.autoFallback
+    if (typeof gPatch.autoFallback === 'boolean') autoFallback = gPatch.autoFallback
+    else if (globalPatch !== undefined) autoFallback = globalPatch
+    next.groups[group] = normalizeGroup(group, { order, enabled, autoFallback })
   }
+  const mirror = GROUPS.every((g) => next.groups[g].autoFallback === true)
+  // 顶层 autoFallback 是**兼容镜像**：v2 之前的宿主进程只认这一个字段。
+  // 升级后宿主没重启的那段时间里，旧代码仍能读到"三类都开着"这个事实，
+  // 而不是因为字段消失就把回退全关掉。新代码完全不依赖它（各组自己的值优先）。
+  next.autoFallback = mirror
   writeJson(lanesConfigPath(dshHome), next)
-  return next
+  return { ...next, autoFallback: mirror }
 }
 
 /* ------------------------------------------------------------------------- *
@@ -214,12 +254,57 @@ export function laneEnabled(dshHome, group, laneId) {
  * 全部失败后由调用方汇总报错（把每条通道的失败原因带上）。
  */
 export function fallbackCandidates(dshHome, group, readyFn = () => true) {
-  if (!readLanes(dshHome).autoFallback) return []
-  return laneOrder(dshHome, group)
+  const cfg = readLanes(dshHome).groups[group]
+  if (!cfg || cfg.autoFallback !== true) return []
+  return cfg.order
+    .filter((id) => cfg.enabled[id])
     .filter((id) => autoFallbackEligible(group, id))
     .filter((id) => {
       try { return readyFn(id) } catch { return false }
     })
+}
+
+/**
+ * 一次生成该按什么顺序试哪几条通道 —— 三条链路共用的**唯一**决策函数。
+ *
+ * 与 fallbackCandidates 的区别：这个函数把「顺序 / 开关 / 就绪 / 是否自动回退」
+ * 一次性解开，并且**永远保留第一条可用的通道**。这样调用方拿到的语义是确定的：
+ *
+ *   attempts  按顺序真正要试的通道（至少 1 条，除非一条都用不了）
+ *   ready     顺序里配好了的通道（用于告诉用户"其实还有 X 可以用"）
+ *   unready   顺序里没配好的通道（跳过它们不算失败，也不必打扰用户）
+ *   deferred  「自动回退」关着时被压在后面的可用通道（失败后要怎么提示用户）
+ *
+ * @param {string} dshHome
+ * @param {'image'|'video'|'audio'} group
+ * @param {(laneId: string) => boolean} readyFn 该通道此刻能不能用
+ */
+export function resolveLanePlan(dshHome, group, readyFn = () => true) {
+  const cfg = readLanes(dshHome).groups[group]
+  const isReady = (id) => {
+    try { return Boolean(readyFn(id)) } catch { return false }
+  }
+  const empty = { group, autoFallback: false, order: [], enabled: [], ready: [], unready: [], attempts: [], deferred: [] }
+  if (!cfg) return empty
+
+  const enabled = cfg.order.filter((id) => cfg.enabled[id])
+  const ready = enabled.filter((id) => isReady(id))
+  const unready = enabled.filter((id) => !isReady(id))
+  // 本地文件通道（挂 mp4）不算"自动生成"的候选（不变量 1），但用户手排的顺序里
+  // 它仍然是一条通道 —— 顺序里它是第一条时也不该被静默丢弃，所以只在
+  // 「自动回退」生效时才把它排除。
+  const usable = cfg.autoFallback ? ready.filter((id) => autoFallbackEligible(group, id)) : ready
+  const attempts = cfg.autoFallback ? usable : usable.slice(0, 1)
+  return {
+    group,
+    autoFallback: cfg.autoFallback === true,
+    order: cfg.order,
+    enabled,
+    ready: usable,
+    unready,
+    attempts,
+    deferred: usable.slice(attempts.length),
+  }
 }
 
 /**

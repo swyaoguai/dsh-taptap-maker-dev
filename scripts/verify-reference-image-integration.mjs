@@ -216,8 +216,13 @@ function rotation({ gen, grab = async () => ({ ok: false }), accounts = [], pend
 }
 function unified({ order = ['relayImage'], relayEdit, relayGenerate, zaiduyuGenerate, generateWithRotation } = {}) {
   return load('gpt', ['generateImage'], {
-    laneOrder: () => order, readGptLaneEnabled: () => true,
-    readLanes: () => ({ autoFallback: true }), runWithFallback,
+    readGptLaneEnabled: () => true, gptWebLaneReady: () => true,
+    // 顺序路由现在由 resolveLanePlan 给出（读了磁盘配置）；这里固定成用例给定的顺序，
+    // 语义与真实现一致：ready 过滤 + 回退开着时全部进 attempts。
+    resolveLanePlan: (_home, group, readyFn = () => true) => {
+      const ready = order.filter((id) => { try { return Boolean(readyFn(id)) } catch { return false } })
+      return { group, autoFallback: true, order, enabled: order, ready, unready: [], attempts: ready, deferred: [] }
+    },
     relayEdit, relayGenerate, zaiduyuGenerate, generateWithRotation,
   }).generateImage
 }

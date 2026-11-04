@@ -232,13 +232,18 @@ console.log('\n[4] 通道优先级 / 开关路由')
   ok(junk2.json.groups.video.lanes.some((l) => l.enabled), '不会全关（保留一条，避免锁死）')
   ok(Array.isArray(junk2.json.groups.image.lanes) && junk2.json.groups.image.lanes.length === 3, 'image 组为 null 时回落到默认（含章鱼通道）', junk2.json.groups.image.lanes.map((l) => l.id).join(','))
 
-  // 章鱼生图（积分站）通道：默认排最后、没配凭据时状态点为「未配置」并给出可执行指引。
+  // 章鱼生图（积分站）通道：默认排第一（用户 2026-11 定的优先级），没配凭据时
+  // 状态点为「未配置」并给出可执行指引 —— 顺序交给用户，就绪状态如实显示。
   const img = (await req('GET', 'lanes')).json.groups.image.lanes
   const za = img.find((l) => l.id === 'zaiduyu')
   ok(Boolean(za), 'image 组含 zaiduyu 通道')
-  ok(img[img.length - 1].id === 'zaiduyu', '章鱼通道默认在最后（不抢网页/中转站的优先位）', img.map((l) => l.id).join('>'))
+  ok(img[0].id === 'zaiduyu', '生图顺序默认 = 章鱼 → 网页 → 中转站（顺序即使用顺序）', img.map((l) => l.id).join('>'))
+  ok(img.map((l) => l.id).join('>') === 'zaiduyu>gptWeb>relayImage', '三条通道顺序固定为 章鱼>网页>中转站', img.map((l) => l.id).join('>'))
   ok(za.ready === false, '未配站点凭据时 zaiduyu 状态点为「未配置」')
   ok(/章鱼生图|登录并保存/.test(za.reason || ''), '未配置时指引去设置页填账号并登录保存')
+  ok(typeof za.autoFallback === 'undefined', '通道对象本身不携带回退开关（回退是组级设置）')
+  ok((await req('GET', 'lanes')).json.groups.image.autoFallback === true, '生图组默认开「按顺序自动回退」')
+  ok((await req('GET', 'lanes')).json.groups.video.autoFallback === false, '视频组默认关（不连续花钱）')
 }
 
 console.log('\n[5] 素材落点随项目（GET /lanes 与 /asset-dirs 都返回真实路径）')

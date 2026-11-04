@@ -74,7 +74,7 @@ const writeLanesForApi = writeLanes
 const lanesConfigPathForApi = lanesConfigPath
 const LANE_GROUPS_FOR_API = LANE_GROUPS
 const relayReadyForApi = relayReady
-/** 「生成通道」卡里 relayImage 逐条开关是否开着（/game-image-relay 入口用）。 */
+/** 「生图通道优先级」卡里 relayImage 逐条开关是否开着（/game-image-relay 入口用）。 */
 const relayImageLaneEnabled = (home) => {
   try { return isLaneEnabledFor(home, 'image', 'relayImage') } catch { return true }
 }
@@ -109,7 +109,7 @@ const LANE_UNREADY_REASON = {
 import { convertFile as ffmpegConvert, probeDuration as ffprobeDuration, probeDurationAsync as ffprobeDurationAsync } from './src/game-audio-convert.mjs'
 import { installFile as installAudioAsset } from './src/game-audio.mjs'
 import os from 'node:os'
-import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile, parseSlashGenArgs } from './src/game-image-web.mjs'
+import { status as gptStatus, login as gptLogin, logout as gptLogout, generateWithRotation as gptGenerateWithRotation, generateImage as gptGenerateImage, grab as gptGrab, resolveDownloadDir, gptAccountProfileDir, releaseProfile as gptReleaseProfile, parseSlashGenArgs, gptWebLaneReady } from './src/game-image-web.mjs'
 import { zaiduyuLaneUsable, generate as zaiduyuGenerate, models as zaiduyuModels, balance as zaiduyuBalance, zaiduyuQuotaHit, loginProbe, parseModelsText, extractGenArgs } from './src/game-zaiduyu.mjs'
 import { checkHardwareAsync as sfxCheckHardware, parseGenArgs as splitSfxGenArgs } from './src/game-sfx.mjs'
 // /game-image-relay 命令层的参数解析用通用消费器（见 src/tokens.mjs）。
@@ -1204,7 +1204,10 @@ export function apply(ctx, config = {}) {
             dirs[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
           }
           const readiness = {
-            gptWeb: () => readGptLaneEnabled(home),
+            // 生图的网页通道：总开关 + 逐条开关 + **至少一个已登录账号**。
+            // 只看开关会把「开着但没账号」画成可用，用户排好的顺序就会为了一个
+            // 必然失败的通道白等一轮（顺序路由的前提是"不可用就别试"）。
+            gptWeb: () => gptWebLaneReady(home),
             relayImage: () => Boolean(imageCfg.baseURL && imageCfg.apiKey && imageCfg.model),
             zaiduyu: () => zaiduyuUsableForApi(home),
             relay: () => relayReadyForApi(relayCfg),
@@ -1218,6 +1221,8 @@ export function apply(ctx, config = {}) {
             const saved = cfg.groups[group]
             groups[group] = {
               label: def.label,
+              // 每类各自的「按顺序回退」开关（生图默认开，视频/BGM 默认关）。
+              autoFallback: saved.autoFallback === true,
               lanes: saved.order.map((id) => {
                 const lane = def.lanes.find((l) => l.id === id)
                 let ready = false
@@ -1266,7 +1271,7 @@ export function apply(ctx, config = {}) {
             dirs2[kind] = { dir: r.dir, source: r.source, insideProject: r.insideProject }
           }
           const readiness2 = {
-            gptWeb: () => readGptLaneEnabled(home),
+            gptWeb: () => gptWebLaneReady(home),
             // ⚠️ 必须用 imageCfg2（POST 分支里刚读的那份）：这里曾误引用 GET 分支的
             // imageCfg，而 POST 分支从未定义它 → 保存即 ReferenceError → 500。
             // 用户看到的就是「点了保存没反应」，属于最典型的「设置不生效」。
@@ -1282,6 +1287,7 @@ export function apply(ctx, config = {}) {
             const s2 = saved.groups[group]
             groupsOut[group] = {
               label: def.label,
+              autoFallback: s2.autoFallback === true,
               lanes: s2.order.map((id) => {
                 const lane = def.lanes.find((l) => l.id === id)
                 let ready = false
@@ -2339,9 +2345,10 @@ export function apply(ctx, config = {}) {
             text: '请给一句图片描述。图生图：/game-image 把这个角色改成水彩风 --ref 角色.png',
           }
         }
-        // 走统一入口 generateImage：它按「生成通道」卡的顺序/开关/autoFallback
-        // 决定先走谁、额度不足要不要换下一条。旧写法直接调 generateWithRotation，
-        // 用户打开「额度不足自动换通道」后生图也永远不会切到中转站（入口没人接）。
+        // 走统一入口 generateImage：**顺序就是使用顺序**（设置页「生图通道优先级」
+        // 里排的那张表）。不可用（没配好 / 没账号 / 额度不足）就换下一条，一条都
+        // 用不了才回来找用户补配置。旧写法直接调 generateWithRotation，用户排的
+        // 顺序根本没人执行。
         const imageCfgNow = readImageConfigRaw(home)
         const relayOut = path.join(resolveDownloadDir(home, {}).dir, `relay-${Date.now()}.png`)
         const r = await gptGenerateImage(home, prompt, {
@@ -2366,15 +2373,52 @@ export function apply(ctx, config = {}) {
             ...(refs.length > 0 ? { references: refs } : {}),
           },
           zaiduyuReady: () => zaiduyuUsableForApi(home) && zaiduyuLaneEnabled(home),
+          // 「这条通道没配好」的说辞跟设置页里那张卡对得上，用户才知道去哪补。
+          laneNeed: LANE_UNREADY_REASON,
         })
+        const laneName = (id) => (id === 'zaiduyu' ? '章鱼生图' : id === 'relayImage' ? '中转站生图' : id === 'gptWeb' ? 'ChatGPT 网页生图' : id)
+        // 失败原因码 → 一句人话：用户要能据此决定下一步，而不是看 code。
+        const LANE_FAIL_TEXT = {
+          model_required: '还没选默认模型（设置页「图片」→「章鱼生图」里选一个）',
+          model_unavailable: '保存的模型在站点上不可用',
+          no_credentials: '还没填站点账号',
+          not_logged_in: '账号还没登录',
+          authentication_failed: '账号验证没过',
+          environment_error: '本机缺 Python 3',
+          quota_exhausted: '积分/额度用完',
+          insufficient_balance: '余额不足',
+          lane_disabled: '通道被关掉了',
+          cloudflare_challenge: '被 Cloudflare 人机验证拦住',
+          pending_request: '上一次的图还没抓回来',
+          result_unknown: '结果未知（可能仍在生成）',
+        }
+        const why = (code) => LANE_FAIL_TEXT[String(code ?? '')] ?? String(code ?? '未知原因')
         if (!r.ok) {
           const triedList = Array.isArray(r.failures) ? r.failures.map((f) => `  ${f.account ?? '(默认)'}: ${f.error}`).join('\n') : ''
-          const isQuota = r.phase !== 'preflight' && r.kind !== 'input' && String(r.error ?? '').startsWith('quota:')
+          const isQuota = r.phase !== 'preflight' && r.kind !== 'input'
+            && (String(r.error ?? '').startsWith('quota:') || r.error === 'quota_exhausted')
           const isChallenge = r.error === 'cloudflare_challenge'
+          // 「退无可退」时才提醒用户去补配置（其他情况都只是报告一条通道失败）。
+          const unreadyText = Array.isArray(r.unready) && r.unready.length > 0
+            ? `还没配好（已跳过）：\n${r.unready.map((id) => `  ${laneName(id)}：${LANE_UNREADY_REASON[id] ?? '尚未配置'}`).join('\n')}`
+            : ''
+          const deferredText = Array.isArray(r.deferred) && r.deferred.length > 0
+            ? `顺序里后面还有 ${r.deferred.map(laneName).join('、')} 可用，但「按顺序自动回退」是关着的 —— `
+              + '想让它自动换：设置页「生图通道优先级」→ 生图 → 打开「按顺序自动回退」。'
+            : ''
           return {
             kind: 'error',
             text: [
-              `${r.lane === 'zaiduyu' ? '章鱼生图' : r.lane === 'relayImage' ? '中转站生图' : '网页生图'}失败：${r.error}`,
+              r.error === 'no_lane_ready'
+                ? '按你排的顺序，没有一条生图通道是配好的（没有提交任何生成）：'
+                : r.error === 'no_lane_enabled'
+                  ? '生图通道都被关掉了：设置页「生图通道优先级」→ 生图，把至少一条打开。'
+                  : `${laneName(r.lane)}失败：${r.error}`,
+              r.stoppedAt && r.error !== 'no_lane_ready'
+                ? `这一条失败后没有再往下换（换通道也一样失败，或可能重复扣费）：${why(r.stopReason ?? r.error)}`
+                : '',
+              unreadyText,
+              deferredText,
               r.rotated ? `已自动轮换过账号：${(r.tried ?? []).join(' → ')}` : '',
               triedList,
               ...(r.notes ?? []),
@@ -2383,20 +2427,31 @@ export function apply(ctx, config = {}) {
                 ? '这是 **Cloudflare 人机验证**（页面显示「请验证您是真人」），不是选择器失效。'
                   + '再跑一次时，在弹出的浏览器窗口里手动勾选那个验证框，勾完它会自动继续。'
                 : isQuota
-                  ? '所有可用账号都触到配额了。可以：登录/恢复更多账号（/game-image pool list、pool unban），或回退到中转站 /game-image-relay。'
-                    + '（若想以后额度用完时自动切到中转站：设置页「生成通道」→ 打开「额度不足时自动换下一条通道」，默认是关的。）'
+                  ? '这条通道的可用账号/积分都用完了。按顺序回退开着的话会自动换下一条；都换完了就补额度/账号：/game-image pool list、pool unban。'
                   : r.pendingUrl
                     ? `图可能还在生成（网页出图常要 1-3 分钟）。**不要重新生成**——过 1-2 分钟用 /game-image grab 抓同一个对话即可：${r.pendingUrl}`
-                    : (r.hint ?? '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可回退到中转站：/game-image-relay。'),
+                    : (r.hint ?? '可能是 ChatGPT 界面改版导致选择器失效（如实报告，不假装成功）。可在设置页调整通道顺序，或 /game-image-relay 直接走中转站。'),
             ].filter(Boolean).join('\n'),
           }
         }
+        // 顺序里被跳过/被换掉的通道要如实说出来，否则用户以为"设的顺序没生效"。
+        const skippedText = Array.isArray(r.skippedUnready) && r.skippedUnready.length > 0
+          ? `（顺序里 ${r.skippedUnready.map(laneName).join('、')} 没配好，已跳过）`
+          : ''
         return {
           kind: 'success',
           text: [
             r.resumed ? `已取回上一次生成好的图（没有重新生成）：${r.saved}` : `已生成：${r.saved}`,
-            r.lane === 'relayImage' ? '（网页通道额度不足，已自动切换到中转站出图）' : '',
-            r.lane === 'zaiduyu' ? '（本次由章鱼生图积分站出图，见下方积分预检）' : '',
+            `（本次由 ${laneName(r.lane)} 出图${Array.isArray(r.laneOrder) && r.laneOrder.length > 1 ? `；顺序：${r.laneOrder.map(laneName).join(' → ')}` : ''}）`,
+              Array.isArray(r.laneFailures) && r.laneFailures.length > 0
+              ? `（前面 ${r.laneFailures.map((f) => `${laneName(f.lane)} 不可用：${why(f.reason)}`).join('；')}，已按顺序往下换）`
+              : '',
+            skippedText,
+            // 「跳过了但值得你补一下」的通道单独提一句：否则用户永远不知道
+            // 章鱼为什么没被用上（顺序明明排在第一）。
+            Array.isArray(r.laneFailures) && r.laneFailures.some((f) => f.reason === 'model_required' || f.reason === 'no_credentials')
+              ? '想让章鱼生图优先出图：设置页「图片」→「章鱼生图（积分站）」把账号和默认模型都填好（现在它被跳过了）。'
+              : '',
             r.lane === 'zaiduyu' && r.preflight ? `积分预检：${r.preflight.model ?? '?'} 单张 ${r.preflight.creditPerImage ?? '?'}｜余额 ${r.preflight.balance ?? '?'}${r.preflight.remaining ? `｜预计剩余 ${r.preflight.remaining}` : ''}` : '',
             r.rotated ? `（自动轮换账号：${(r.tried ?? []).join(' → ')}）` : '',
             ...(r.notes ?? []),
@@ -2430,13 +2485,13 @@ export function apply(ctx, config = {}) {
           }
         }
 
-        // 「生成通道」卡里的逐条开关必须算数：关掉 relayImage 后本命令直接拒绝，
+        // 「生图通道优先级」卡里的逐条开关必须算数：关掉 relayImage 后本命令直接拒绝，
         // 不再往下走配置检查/生图（开关与行为脱节就是「设置不生效」）。
         if (!relayImageLaneEnabled(home)) {
           return {
             kind: 'error',
             text: [
-              '「中转站生图」通道已在设置页「生成通道」卡里关闭，不会走这条通道。',
+              '「中转站生图」通道已在设置页「生图通道优先级」卡里关闭，不会走这条通道。',
               '',
               '要用图片就打开它，或走网页通道 /game-image <描述>。',
             ].join('\n'),
@@ -2596,7 +2651,7 @@ export function apply(ctx, config = {}) {
               `站点账号：${u.credentials ? `✓ 已配置（来源：${u.credentialsSource === 'file' ? '设置页保存' : '环境变量'}）${u.identifier ? ` · ${u.identifier}` : ''}` : '✗ 未配置'}`,
               '',
               u.credentials ? '' : [
-                '配置方法：设置页 →「生成通道」→「章鱼生图（积分站）」卡，填账号密码点「登录并保存」',
+                '配置方法：设置页 →「图片」→「章鱼生图（积分站）」卡，填账号密码点「登录并保存」',
                 '（会先连站点验证，通过才保存；即时生效，无需重开宿主）。',
                 '没有账号：https://pai.zaiduyu.top/#/auth?ref=B7F529987DBF（邀请码 +50 张额度）',
                 '⚠️ 不要让用户把密码贴进对话 —— 界面输入框只走本地服务，代填会落进日志。',
@@ -2606,7 +2661,7 @@ export function apply(ctx, config = {}) {
               '  /game-zaiduyu models              模型清单 + 单张积分 + 当前余额（生图前必看）',
               '  /game-zaiduyu gen "小猫赏月" --model gpt-image-2 --ratio 16:9',
               '  /game-zaiduyu balance             查积分（限时积分当天过期，别跨天规划）',
-              '也可作为统一生图链路的一条通道（设置页「生成通道」可排序/开关）。',
+              '也可作为统一生图链路的一条通道（设置页「生图通道优先级」可排序/开关）。',
             ].join('\n'),
           }
         }
@@ -2662,7 +2717,7 @@ export function apply(ctx, config = {}) {
           }
         }
         if (!zaiduyuLaneEnabled(home)) {
-          return { kind: 'error', text: '「章鱼生图」通道已在设置页「生成通道」卡里关闭。要用就先打开它。' }
+          return { kind: 'error', text: '「章鱼生图」通道已在设置页「生图通道优先级」卡里关闭。要用就先打开它。' }
         }
         try {
           const r = await zaiduyuGenerate(home, gen.prompt, {
@@ -2694,7 +2749,7 @@ export function apply(ctx, config = {}) {
             text: [
               `章鱼生图失败：${err?.message ?? err}`,
               err?.code === 'no_credentials'
-                ? '请到设置页「生成通道」→「章鱼生图（积分站）」卡填账号密码并点「登录并保存」（即时生效）。不要让用户把密码贴进对话。'
+                ? '请到设置页「图片」→「章鱼生图（积分站）」卡填账号密码并点「登录并保存」（即时生效）。不要让用户把密码贴进对话。'
                 : '',
               ...(err?.notes ?? []),
               err?.phase !== 'preflight' && err?.kind !== 'input' && zaiduyuQuotaHit(err?.message ?? '') ? '这是积分不足：等积分恢复、去站点充值，或换其它生图通道（/game-image、/game-image-relay）。' : '',
@@ -3393,7 +3448,7 @@ async function videoCommand(home, rawInput) {
           const on = cfg.groups.video.enabled[id]
           lines.push(`  ${on ? '✓' : '·'} ${labelOf[id] ?? id}${on ? '' : '（已关闭）'}`)
         }
-        lines.push(`  额度不足自动换通道：${cfg.autoFallback ? '开' : '关'}`)
+        lines.push(`  额度不足自动换下一条：${cfg.groups.video.autoFallback ? '开' : '关'}（视频默认关；修改要用户自己同意）`)
         lines.push('', '改法：/game-video lanes --order minimax,relay --on local --off relay --fallback on')
         return { kind: 'success', text: lines.join('\n') }
       }
@@ -3401,7 +3456,8 @@ async function videoCommand(home, rawInput) {
       if (flags.order) patch.groups.video.order = String(flags.order).split(',').map((s) => s.trim()).filter(Boolean)
       if (flags.off) patch.groups.video.enabled = { [String(flags.off)]: false }
       if (flags.on) patch.groups.video.enabled = { ...(patch.groups.video.enabled ?? {}), [String(flags.on)]: true }
-      if ('fallback' in flags) patch.autoFallback = String(flags.fallback) !== 'false' && String(flags.fallback) !== 'off'
+      // 只影响「视频」这一组：生图/BGM 的开关各归各（每组一个，互不牵连）。
+      if ('fallback' in flags) patch.groups.video.autoFallback = String(flags.fallback) !== 'false' && String(flags.fallback) !== 'off'
       const before = readLanes(home)
       // 通道顺序与开关是用户亲手排的：换通道 = 可能走到另一条要花钱的通道。
       // 必须用户自己点头，AI 不得自行调整。
@@ -3420,7 +3476,7 @@ async function videoCommand(home, rawInput) {
         kind: 'success',
         text: [
           `已更新视频通道：${v.order.filter((id) => v.enabled[id]).map((id) => labelOf[id] ?? id).join(' → ') || '（没有启用的通道）'}`,
-          `额度不足自动换通道：${saved.autoFallback ? '开' : '关'}`,
+          `额度不足自动换下一条：${v.autoFallback ? '开' : '关'}`,
         ].join('\n'),
       }
     }
@@ -3449,7 +3505,7 @@ async function videoCommand(home, rawInput) {
         const usable = active.filter((id) => (id === 'relay' ? d.backends.relay : id === 'minimax' ? d.backends.minimax : true))
         lines.push('', `  通道顺序（设置页）：${active.map((id) => labelOf[id] ?? id).join(' → ')}`)
         lines.push(`  auto 会走：${usable.length ? (labelOf[usable[0]] ?? usable[0]) : '（没有可提交的通道）'}`)
-        lines.push(`  额度不足自动换通道：${laneCfg.autoFallback ? '开' : '关（只在设置页改）'}`)
+        lines.push(`  额度不足自动换下一条：${laneCfg.groups.video.autoFallback ? `开（会按上面顺序一直换到「${labelOf[usable[usable.length - 1]] ?? usable[usable.length - 1]}」）` : '关（只用第一条；要换请在设置页打开）'}`)
       }
       lines.push('', `  当前默认模型：${d.model}`)
       // 环境变量里有 Key 但文件里没有 → 明确警告：这个 Key 不在设置页里，

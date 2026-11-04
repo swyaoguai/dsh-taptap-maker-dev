@@ -49,7 +49,7 @@ import { dataDir, readGptPool, writeGptPool, touchGptAccount, pickGptAccount, re
 import { downscaleFile, generateImage as relayGenerate, editImage as relayEdit } from './game-image-relay.mjs'
 import { flagOf, looksLikeFlag, splitTokens } from './tokens.mjs'
 import { generate as zaiduyuGenerate, zaiduyuLaneUsable } from './game-zaiduyu.mjs'
-import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback } from './lanes.mjs'
+import { laneOrder, laneEnabled as isLaneEnabled, readLanes, runWithFallback, resolveLanePlan } from './lanes.mjs'
 import { resolveAssetDir } from './assets.mjs'
 import { countProcessesContaining, killProcessesContaining } from './win-proc.mjs'
 import { focusBrowserWindow } from './win-focus.mjs'
@@ -872,10 +872,12 @@ if REFS:
 try:
     box.click(force=True)
     pg.wait_for_timeout(500)
-    # keyboard.type 会把 "\n" 当成 Enter，而 Enter 在 ChatGPT 输入框里 = 发送：
+    # 注意：本片段是 JS 模板字面量，换行转义必须写双反斜杠；写单反斜杠会被 JS
+    # 先吃成真换行，生成的 python 就变成跨行的字符串字面量（SyntaxError）。
+    # keyboard.type 会把换行转义当成 Enter，而 Enter 在 ChatGPT 输入框里 = 发送：
     # 多行提示词会被拆成好几条消息（截断提示词、可能重复扣额度）。
     # 逐行输入，行间用 Shift+Enter 换行。
-    for _i, _line in enumerate(${pyStr(String(prompt).replace(/\r\n?/g, '\n'))}.split("\n")):
+    for _i, _line in enumerate(${pyStr(String(prompt).replace(/\r\n?/g, '\n'))}.split("\\n")):
         if _i > 0:
             pg.keyboard.press("Shift+Enter")
         if _line:
@@ -1188,7 +1190,7 @@ export async function generateWithRotation(dshHome, prompt, {
       failures: [],
     }
   }
-  // 设置页「生成通道」卡里的**逐条开关**（lanes.json image/gptWeb）也必须算数：
+  // 设置页「生图通道优先级」卡里的**逐条开关**（lanes.json image/gptWeb）也必须算数：
   // 只查上面的总开关（imageLane.json）时，用户在通道卡里单独关掉网页通道后，
   // 斜杠命令照样弹浏览器烧配额 —— 两套开关脱节（2026-10-24 实测）。CLI 的
   // gen 子命令已查（isLaneEnabled），这里给所有调用方（含 /game-image）补上。
@@ -1196,7 +1198,7 @@ export async function generateWithRotation(dshHome, prompt, {
     return {
       ok: false,
       error: 'lane_disabled',
-      hint: '「ChatGPT 网页生图」通道已在设置页「生成通道」卡里关闭；打开它，或改用中转站 /game-image-relay。',
+      hint: '「ChatGPT 网页生图」通道已在设置页「生图通道优先级」卡里关闭；打开它，或改用中转站 /game-image-relay。',
       rotated: false,
       tried: [],
       failures: [],
@@ -1328,83 +1330,150 @@ export async function generateWithRotation(dshHome, prompt, {
   }
 }
 
+/* ------------------------------------------------------------------------- *
+ * 统一生图入口：**顺序就是使用顺序**
+ * ------------------------------------------------------------------------- */
+
 /**
- * 生图的统一入口：按设置页排好的通道顺序 + 开关决定走哪条，额度不足时按开关
- * 决定要不要换下一条。
+ * 网页通道此刻能不能用：总开关 + 逐条开关 + **至少一个已登录的账号**。
+ *
+ * 只看开关是不够的：「开着但没账号」会在每次生图时白弹一次浏览器、白等一轮
+ * 才会失败。既然排队的意义是"不可用就往下一格"，那"没账号"必须在**开跑前**
+ * 就判成不可用，否则用户看到的就是"明明设了顺序，还是要等网页失败一遍"。
+ */
+export function gptWebLaneReady(dshHome) {
+  try {
+    if (!readGptLaneEnabled(dshHome)) return false
+    let pool = { accounts: [] }
+    try { pool = readGptPool(dshHome) } catch { /* no pool yet */ }
+    const list = Array.isArray(pool?.accounts) ? pool.accounts : []
+    if (list.length === 0) return statusFor(dshHome).loggedIn === true
+    return list.some((a) => {
+      try { return statusFor(dshHome, a.id).loggedIn === true } catch { return false }
+    })
+  } catch { return false }
+}
+
+/**
+ * 生图的统一入口：**按设置页排好的顺序**从上往下用，不可用就换下一条。
  *
  * 为什么不让调用方自己挑：`game-image gen`（网页）和 `game-image-relay`（中转站）
- * 过去是两个独立命令，用户要自己判断该用哪个。现在「网页优先、中转站兜底」
- * 这条策略变成了**可排序、可关掉的显式配置**，由这一个函数统一执行。
+ * 过去是两个独立命令，用户要自己判断该用哪个。现在顺序、开关、每组是否自动
+ * 回退都是显式配置（src/lanes.mjs），由这一个函数统一执行。
  *
- * 返回值形状与各通道自己的返回值一致（都带 ok/error/hint），额外加 `lane`
- * 说明最终是谁出的图 —— 界面与对话里都要如实告诉用户。
+ * 「提醒用户」只在**退无可退**时发生：
+ *  - 顺序里还有一条能用的 → 直接用，不打扰；
+ *  - 顺序里没配好的那条 → 跳过，不报错（但会在结果里如实说跳过的是谁）；
+ *  - 一条能用的都没有 → 才列清单告诉用户每条缺什么。
  *
  * @param {object} relayOpts 传给中转站通道的参数（baseURL/apiKey/prompt/…）
+ * @param {object} laneNeed   可选：覆盖「某条通道没配好」时的提示文案
  */
-export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts = {}, relayReady: relayOk = () => false, zaiduyuOpts = {}, zaiduyuReady: zaiduyuOk = () => false } = {}) {
-  const enabled = laneOrder(dshHome, 'image')
+export async function generateImage(dshHome, prompt, {
+  gptOpts = {}, relayOpts = {}, relayReady: relayOk, zaiduyuOpts = {},
+  zaiduyuReady: zaiduyuOk = () => false, gptReady, laneNeed = {},
+} = {}) {
   const ready = {
-    gptWeb: () => readGptLaneEnabled(dshHome),
+    gptWeb: () => (typeof gptReady === 'function' ? Boolean(gptReady()) : gptWebLaneReady(dshHome)),
     relayImage: () => (typeof relayOk === 'function' ? Boolean(relayOk()) : false),
     zaiduyu: () => (typeof zaiduyuOk === 'function' ? Boolean(zaiduyuOk()) : false),
   }
-  const usable = enabled.filter((id) => {
-    try { return ready[id]?.() } catch { return false }
-  })
-  if (usable.length === 0) {
+  const plan = resolveLanePlan(dshHome, 'image', (id) => (ready[id] ? ready[id]() : false))
+  // 对话里要说得像人话：本地常量（不放模块顶层）是为了让这份函数能脱离模块
+  // 单独跑 —— 自测脚本会把它抠出来在沙箱里执行。
+  const LABELS = { zaiduyu: '章鱼生图', gptWeb: 'ChatGPT 网页生图', relayImage: '中转站生图' }
+  const NEEDS = {
+    zaiduyu: '去设置页「章鱼生图（积分站）」填站点账号并点「登录并保存」',
+    gptWeb: '去设置页「ChatGPT 网页生图」点登录加一个账号（或 /game-image login）',
+    relayImage: '去设置页「中转站生图」填 baseURL / Key / 模型',
+  }
+  const laneLabel = (id) => LABELS[id] ?? id
+  const needOf = (id) => laneNeed[id] ?? NEEDS[id] ?? '尚未配置'
+  const orderText = plan.order.length > 0 ? plan.order.map(laneLabel).join(' → ') : '（空）'
+
+  if (plan.enabled.length === 0) {
     return {
       ok: false,
       error: 'no_lane_enabled',
-      hint: '生图通道都被关掉了：设置页 → 生成通道 → 生图，把至少一条打开。',
+      lane: null,
+      plan,
+      hint: '三条生图通道都被关掉了：设置页 →「生图通道优先级」把至少一条打开。',
+    }
+  }
+  if (plan.attempts.length === 0) {
+    // ── 唯一该「提醒用户」的时刻：按顺序一条都用不了 ──
+    const detail = plan.unready.map((id) => `  ${laneLabel(id)}：${needOf(id)}`).join('\n')
+    return {
+      ok: false,
+      error: 'no_lane_ready',
+      lane: null,
+      plan,
+      unready: plan.unready,
+      need: plan.unready.map((id) => ({ lane: id, need: needOf(id) })),
+      hint: [
+        `按当前顺序（${orderText}）一条通道都用不了，所以停在这里等你补配置（没有提交任何生成）。`,
+        detail,
+        '',
+        '配好任意一条就能出图；也可以把顺序里已经能用的那条往上拖。',
+      ].filter(Boolean).join('\n'),
     }
   }
 
-  // 只有开了「额度不足自动换通道」才回退；否则就用第一条可用的。
-  const chain = readLanes(dshHome).autoFallback ? usable : usable.slice(0, 1)
+  const chain = plan.attempts
   /**
-   * 这一次网页失败能不能换下一条通道？
+   * 这一次失败能不能换下一条通道？
    *
-   * 只允许「这条通道自己跑不起来」的情况（未登录、通道被关、选择器失效、额度），
-   * 因为换一条确实能出图。明确**不许换**的四类：
-   *  - `pendingUrl` / `submitted`：请求已经发出、图可能正在生成，换通道 = 再花一次钱；
-   *  - `result_unknown` / `pending_request`：结果未知，同上的钱更危险；
-   *  - `kind === 'input'`：坏参考图 / 空提示词，换通道也一样失败，白花一次；
-   *  - `cloudflare_challenge`：浏览器已经开着等人点验证，切走等于把可救的现场扔掉。
+   * 判据只有两类：
+   *  ①「这条通道自己跑不起来，换一条确实能出图」→ 换：没配好、没登录、通道被关、
+   *    额度/配额用完、缺 Python 之类的环境问题；
+   *  ②「换个通道要么一样失败、要么更花钱」→ 不换，停下来把原因说清楚：
+   *    - `pendingUrl` / `submitted`：请求已经发出、图可能正在生成，换通道 = 再花一次钱；
+   *    - `result_unknown` / `pending_request` / `server_allocation_required`：结果未知，同上；
+   *    - `cloudflare_challenge`：浏览器已经开着等人点验证，切走等于把可救的现场扔掉；
+   *    - `kind === 'input'` / 参数写错：换通道也一样报错，白花一次。
+   *      例外是「这条通道自己没配好」（没账号 / 没选模型 / 没装 Python）—— 那些
+   *      属于第 ① 类，会跳到下一条。
    */
+  const SWITCHABLE_CODES = new Set([
+    'no_credentials', 'not_logged_in', 'lane_disabled', 'authentication_failed',
+    'environment_error', 'environment', 'quota_exhausted', 'insufficient_balance',
+    // 「章鱼还没选默认模型 / 保存的模型在站点上失效」也算**这条通道没配好**：
+    // 换下一条是真能出图、而且不花钱的。这里只是"跳过"，绝不由插件替用户挑一个
+    // 模型 —— 那才是守则明令禁止的（挑模型 = 替用户决定花多少钱）。
+    'model_required', 'model_unavailable',
+  ])
+  const STOP_CODES = new Set([
+    'result_unknown', 'pending_request', 'server_allocation_required', 'network_error',
+    'cloudflare_challenge', 'model_lane_mismatch',
+  ])
   const laneFailureIsRotatable = (r) => {
     if (!r || typeof r !== 'object' || r.ok !== false) return false
+    const code = String(r.error ?? '')
+    // ① 先认「确认被拒」的额度错误：服务端明确没受理，换下一条不会重复花钱 ——
+    //    即使响应里带了对话链接也一样（那时图并没有生成）。
+    const quotaRejected = code.startsWith('quota:') || code === 'quota_exhausted'
+      || code === 'insufficient_balance' || r.quota === true
+    if (quotaRejected && r.phase !== 'preflight' && r.kind !== 'input') return true
+    // ② 已经提交 / 结果未知 → 一律不换（换 = 再花一次钱）。这条优先于一切。
     if (r.pendingUrl) return false
     if (r.submitted === true) return false
+    const text = `${code} ${String(r.hint ?? '')}`
+    // ③ 没有结构化字段时只能看文本：写着"结果未知 / 超时"的绝不重投。
+    if (/result[_ ]?unknown|结果未知|无法确认|可能仍在|timed? ?out|超时/i.test(text)) return false
+    if (SWITCHABLE_CODES.has(code)) return true
+    if (STOP_CODES.has(code)) return false
     if (r.kind === 'input') return false
     // 预检/输入类失败换通道也一样失败（配额字样的输入错误尤其不能当额度问题）。
     if (r.phase === 'preflight') return false
-    const code = String(r.error ?? '')
-    // 额度错误有自己的抛出口（上面那段），这里不重复处理。
-    if (code.startsWith('quota:')) return false
-    if (code === 'result_unknown' || code === 'pending_request' || code === 'cloudflare_challenge') return false
+    // 其余（选择器失效、站点 5xx 等）：确认还没提交 → 换下一条是有意义的。
     return true
   }
   const runLane = async (laneId) => {
     if (laneId === 'gptWeb') {
-      const r = await generateWithRotation(dshHome, prompt, gptOpts)
-      // 把「额度用光」翻译成统一信号，好让下一条通道知道自己该接手了。
-      if (!r.ok && r.phase !== 'preflight' && r.kind !== 'input'
-          && typeof r.error === 'string' && r.error.startsWith('quota:')) {
-        const e = new Error(`quota:${r.error.slice(6)}`)
-        e.laneError = r
-        throw e
-      }
-      // 网页通道「跑不起来」（未登录 / 通道被关 / 选择器失效）在用户开了自动
-      // 换通道时也该交给下一条 —— 以前只有配额错误会抛，其余都 return 回去被
-      // runWithFallback 当成「这条成功了」，于是自动换通道形同虚设，而守则里
-      // 却承诺了这几种情况会回退。链里还有别的通道才抛（否则保留详细结果给上层）。
-      if (!r.ok && chain.length > 1 && laneFailureIsRotatable(r)) {
-        const e = new Error(`lane_unavailable:${r.error ?? 'failed'}`)
-        e.laneError = r
-        e.laneRotate = true
-        throw e
-      }
-      return r
+      // 网页通道的失败**原样返回**（不抛）：能不能换下一条由调用方的
+      // laneFailureRotatable 统一判。以前这里自己决定要不要抛，于是
+      // runWithFallback 把「没抛」当成「这条成功了」，顺序路由形同虚设。
+      return generateWithRotation(dshHome, prompt, gptOpts)
     }
     // 章鱼生图（积分站）：包装第三方 generate.py，失败抛错进统一回退。
     // 预检信息（模型/积分/余额）随结果透传，界面与对话里都要如实告诉用户。
@@ -1428,8 +1497,6 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
   }
 
   let lastReferenceAudit = {}
-  /** 最近一次「因为这条通道跑不起来而换下一条」的原始失败，用来给用户留可执行提示。 */
-  let lastLaneFailure = null
   const safeRunLane = async (laneId) => {
     if (zaiduyuOpts.model !== undefined && laneId !== 'zaiduyu') {
       return { ok: false, error: 'model_lane_mismatch', kind: 'input', requiresLogin: false, phase: 'preflight', submitted: false,
@@ -1442,45 +1509,96 @@ export async function generateImage(dshHome, prompt, { gptOpts = {}, relayOpts =
       if (failure?.referencePreparation) {
         lastReferenceAudit = { referencePreparation: failure.referencePreparation, notes: failure.notes ?? [] }
       }
-      // Quota opt-in never authorizes retrying bad references or an uncertain
-      // submission. Preflight takes precedence over quota-looking input text.
-      if (failure?.phase !== 'preflight' && failure?.kind !== 'input'
-          && (error?.quota === true || error?.laneRotate === true
-            || String(error?.message ?? '').startsWith('quota:'))) {
-        if (error?.laneRotate === true) lastLaneFailure = failure
-        throw error
-      }
+      // 抛出来的错误一律归一成「这个通道失败了」的结果：换不换下一条由下面的
+      // laneFailureIsRotatable 判 —— 判定只留一处，三条通道语义才不会分叉。
       return {
         ok: false,
-        error: error?.code ?? 'lane_failed',
+        error: error?.code ?? failure?.code ?? 'lane_failed',
         hint: error?.message ?? String(error),
-        kind: error?.kind,
-        requiresLogin: error?.requiresLogin === true,
-        phase: error?.phase,
-        submitted: error?.submitted,
-        httpStatus: error?.httpStatus,
-        ...(error?.preflight ? { preflight: error.preflight } : {}),
+        kind: error?.kind ?? failure?.kind,
+        requiresLogin: (error?.requiresLogin ?? failure?.requiresLogin) === true,
+        phase: error?.phase ?? failure?.phase,
+        submitted: error?.submitted ?? failure?.submitted,
+        httpStatus: error?.httpStatus ?? failure?.httpStatus,
+        // 上游用 `error.quota === true` 标注「确认额度被拒」：不带上它，这类错误
+        // 会被当成普通失败（或反过来被当成结果未知），顺序路由就判错了。
+        ...(error?.quota === true || failure?.quota === true ? { quota: true } : {}),
+        ...(failure?.preflight ? { preflight: failure.preflight } : {}),
         ...(failure?.referencePreparation ? { referencePreparation: failure.referencePreparation } : {}),
         ...(failure?.notes ? { notes: failure.notes } : {}),
       }
     }
   }
-  const result = await runWithFallback(chain, safeRunLane, (err) => err?.message ?? String(err))
-  if (result.ok) return { ...result.value, lane: result.lane, rotatedLanes: result.attempts.length > 0 }
 
-  const summary = result.attempts.map((a) => `  ${a.lane}：${a.reason}`).join('\n')
+  // ── 按顺序逐条试。这里刻意不用 runWithFallback：那个执行器把「没有抛出」
+  //    当成成功，而各通道的失败是**返回值**（ok:false），于是"换下一条"从来没
+  //    真正发生过（付费通道一失败就整单结束）。顺序语义只保留一处，就是这里。
+  const attempted = []
+  const failures = []
+  for (const laneId of chain) {
+    const r = await safeRunLane(laneId)
+    attempted.push(laneId)
+    if (r && r.ok === true) {
+      return {
+        ...r,
+        lane: laneId,
+        laneOrder: chain,
+        attempted,
+        skippedUnready: plan.unready,
+        rotatedLanes: attempted.length > 1,
+        ...(failures.length > 0 ? { laneFailures: failures } : {}),
+        ...lastReferenceAudit,
+      }
+    }
+    const reason = String(r?.error ?? 'unknown')
+    // 参考图预检的审计信息可能挂在**返回值**上（不只是抛出的错误）：换到下一
+    // 条通道时不能把它丢掉，否则用户看不到「参考图被怎么处理了」。
+    if (r?.referencePreparation) {
+      lastReferenceAudit = { referencePreparation: r.referencePreparation, notes: r.notes ?? [] }
+    }
+    failures.push({ lane: laneId, reason, hint: r?.hint })
+    if (!laneFailureIsRotatable(r)) {
+      // 换下去要么一样失败、要么可能再花一次钱 → 就在这里停住并说清为什么。
+      return {
+        ...r,
+        ok: false,
+        lane: laneId,
+        stoppedAt: laneId,
+        stopReason: reason,
+        laneOrder: chain,
+        attempted,
+        deferred: chain.slice(attempted.length),
+        skippedUnready: plan.unready,
+        laneFailures: failures,
+        ...lastReferenceAudit,
+      }
+    }
+  }
+
+  // 顺序里能用的都试过了，全部失败。
+  const tried = failures.map((f) => `  ${laneLabel(f.lane)}：${f.reason}${f.hint ? ` — ${String(f.hint).slice(0, 200)}` : ''}`).join('\n')
+  const lastFailure = failures[failures.length - 1]
   return {
     ok: false,
     error: 'all_lanes_failed',
     lane: null,
+    laneOrder: chain,
+    attempted,
+    failures,
+    skippedUnready: plan.unready,
+    deferred: plan.deferred,
     hint: [
-      `所有生图通道都没成功：\n${summary}`,
-      lastLaneFailure?.hint ? `第一条通道的具体原因：${lastLaneFailure.hint}` : '',
-      '（可在设置页调整「生图通道优先级」与各通道开关）',
+      `按顺序试过的生图通道都没成功：\n${tried}`,
+      plan.deferred.length > 0
+        ? `「按顺序自动回退」关着，所以停在第一条；顺序里还有 ${plan.deferred.map(laneLabel).join('、')} 没试。`
+        : '',
+      plan.unready.length > 0
+        ? `顺序里这些还没配好（已跳过）：${plan.unready.map((id) => `${laneLabel(id)}（${needOf(id)}）`).join('；')}`
+        : '',
+      lastFailure?.hint ? `最后一条的具体原因：${lastFailure.hint}` : '',
+      '（顺序与开关在设置页「生图通道优先级」里改）',
     ].filter(Boolean).join('\n'),
-    attempts: result.attempts,
-    ...(lastLaneFailure ? { lastFailure: lastLaneFailure } : {}),
-    ...lastReferenceAudit,
+    ...(lastReferenceAudit.referencePreparation ? lastReferenceAudit : {}),
   }
 }
 

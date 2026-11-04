@@ -20,6 +20,14 @@ function command(name, result) {
     readImageConfigRaw: () => ({}), resolveDownloadDir: () => ({ dir: 'MEMORY-OUTPUT' }),
     zaiduyuLaneEnabled: () => true, zaiduyuGenerate: provide, gptGenerateImage: provide,
     zaiduyuQuotaHit: (message) => /quota/i.test(message),
+    // /game-image 现在把「每条通道缺什么」交给统一入口（顺序路由），这两个是
+    // 模块级依赖，抠出来的 handler 在沙箱里需要它们的替身。
+    gptWebLaneReady: () => false,
+    LANE_UNREADY_REASON: {
+      gptWeb: '需要先登录 ChatGPT 账号（/game-image login）',
+      relayImage: '需要在下面「中转站生图」填 baseURL / Key / 模型',
+      zaiduyu: '需要在下面「章鱼生图（积分站）」填站点账号并点「登录并保存」',
+    },
   }
   vm.runInNewContext(source.slice(start, end), context)
   return handler({ rawInput: 'offline icon' })

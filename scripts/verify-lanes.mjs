@@ -9,14 +9,14 @@
  *
  * 用法：node scripts/verify-lanes.mjs
  */
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
   GROUPS, LANE_GROUPS, fallbackCandidates, laneOrder, quotaSignal,
-  readLanes, runWithFallback, writeLanes,
+  readLanes, resolveLanePlan, runWithFallback, writeLanes,
 } from '../src/lanes.mjs'
 
 let passed = 0
@@ -30,12 +30,14 @@ const scratch = mkdtempSync(path.join(os.tmpdir(), 'dsh-lanes-'))
 console.log(`临时目录：${scratch}`)
 const home = path.join(scratch, 'home')
 
-console.log('\n[1] 默认值（必须与改造前的实际行为一致）')
+console.log('\n[1] 默认值（生图顺序 = 用户 2026-11 定的优先级）')
 {
   const cfg = readLanes(home)
-  ok(cfg.autoFallback === false, '自动回退默认关 —— 不擅自动用用户的付费通道')
+  ok(cfg.groups.image.order.join('>') === 'zaiduyu>gptWeb>relayImage', '生图默认顺序 章鱼 > 网页 > 中转站', cfg.groups.image.order.join('>'))
+  ok(cfg.groups.image.autoFallback === true, '生图默认开「按顺序自动回退」')
+  ok(cfg.groups.video.autoFallback === false, '视频默认关（按秒计费，不连续花钱）')
+  ok(cfg.groups.audio.autoFallback === false, 'BGM 默认关')
   ok(cfg.groups.video.order.join('>') === 'relay>minimax>local', '视频默认顺序 relay > minimax > local', cfg.groups.video.order.join('>'))
-  ok(cfg.groups.image.order.join('>') === 'gptWeb>relayImage>zaiduyu', '生图默认顺序 网页 > 中转站 > 章鱼', cfg.groups.image.order.join('>'))
   ok(GROUPS.every((g) => cfg.groups[g].order.length === LANE_GROUPS[g].lanes.length), '每组通道一个不少')
 }
 
@@ -65,7 +67,7 @@ console.log('\n[3] 脏数据归一化')
     },
   }), 'utf8')
   const cfg = readLanes(home)
-  ok(cfg.autoFallback === false, 'autoFallback 不是布尔值时按关处理')
+  ok(cfg.groups.video.autoFallback === false, 'autoFallback 不是布尔值时不乱开')
   ok(cfg.groups.video.order.length === new Set(cfg.groups.video.order).size, '重复 id 被去重')
   ok(!cfg.groups.video.order.includes('不存在的通道') && !cfg.groups.video.order.includes(42), '未知通道被丢弃')
   ok(cfg.groups.video.order.length === 3, '缺失的通道被补回', cfg.groups.video.order.join('>'))
@@ -74,6 +76,65 @@ console.log('\n[3] 脏数据归一化')
 
   writeFileSync(path.join(home, 'game-forge', 'lanes.json'), '{ 这不是 JSON', 'utf8')
   ok(readLanes(home).groups.video.order.length === 3, '文件损坏时不抛异常，退回默认')
+}
+
+console.log('\n[3b] 旧版（v1，单一全局 autoFallback）的迁移')
+{
+  const { writeFileSync } = await import('node:fs')
+  const legacyHome = path.join(scratch, 'legacy')
+  const f = path.join(legacyHome, 'game-forge', 'lanes.json')
+  mkdirSync(path.dirname(f), { recursive: true })
+  writeFileSync(f, JSON.stringify({
+    autoFallback: true,
+    groups: { image: { order: ['gptWeb', 'relayImage', 'zaiduyu'], enabled: {} } },
+  }), 'utf8')
+  const v1on = readLanes(legacyHome)
+  ok(v1on.groups.video.autoFallback === true, '旧文件全局开着 → 视频也保持开着（不悄悄收回用户的选择）')
+  ok(v1on.groups.image.autoFallback === true, '旧文件全局开着 → 生图开着')
+  ok(v1on.groups.image.order.join('>') === 'gptWeb>relayImage>zaiduyu', '旧文件里用户排过的顺序原样保留', v1on.groups.image.order.join('>'))
+
+  writeFileSync(f, JSON.stringify({
+    autoFallback: false,
+    groups: { image: { order: ['gptWeb', 'relayImage', 'zaiduyu'], enabled: {} } },
+  }), 'utf8')
+  const v1off = readLanes(legacyHome)
+  ok(v1off.groups.video.autoFallback === false, '旧文件全局关着 → 视频仍然关')
+  ok(v1off.groups.image.autoFallback === true, '旧文件全局关着 → 生图按新的「顺序即优先级」默认开')
+
+  // v2 文件里明文写着 false 时，必须尊重用户：不能被默认值盖回去。
+  writeLanes(legacyHome, { groups: { image: { autoFallback: false } } })
+  ok(readLanes(legacyHome).groups.image.autoFallback === false, 'v2 里用户手动关掉生图回退 → 读回来仍是关')
+
+  // 兼容镜像：宿主升级后没重启的那段时间，旧代码只认顶层 autoFallback。
+  // 文件里必须仍然带这个字段，否则「回退」会在旧进程里凭空变成关。
+  const onDisk = JSON.parse(readFileSync(path.join(legacyHome, 'game-forge', 'lanes.json'), 'utf8'))
+  ok(onDisk.v === 2, '落盘带版本号 v:2')
+  ok(typeof onDisk.autoFallback === 'boolean', '落盘保留顶层 autoFallback 兼容镜像', String(onDisk.autoFallback))
+  ok(onDisk.autoFallback === GROUPS.every((g) => onDisk.groups[g].autoFallback === true), '镜像 = 三类全开时为 true')
+}
+
+console.log('\n[3c] 顺序路由：resolveLanePlan')
+{
+  const p = path.join(scratch, 'plan')
+  const all = resolveLanePlan(p, 'image', () => true)
+  ok(all.attempts.join('>') === 'zaiduyu>gptWeb>relayImage', '都配好时按顺序全排上', all.attempts.join('>'))
+  ok(all.unready.length === 0 && all.deferred.length === 0, '没有跳过项、没有压在后面的项')
+
+  const noZaiduyu = resolveLanePlan(p, 'image', (id) => id !== 'zaiduyu')
+  ok(noZaiduyu.unready.join('>') === 'zaiduyu', '没配好的那条被记为「跳过」而不是失败', noZaiduyu.unready.join('>'))
+  ok(noZaiduyu.attempts.join('>') === 'gptWeb>relayImage', '直接从下一条接着用', noZaiduyu.attempts.join('>'))
+
+  const noneReady = resolveLanePlan(p, 'image', () => false)
+  ok(noneReady.attempts.length === 0 && noneReady.unready.length === 3, '一条都用不了 → attempts 为空（这时才该提醒用户）')
+
+  writeLanes(p, { groups: { image: { autoFallback: false } } })
+  const off = resolveLanePlan(p, 'image', () => true)
+  ok(off.attempts.join('>') === 'zaiduyu', '回退关着 → 只试第一条', off.attempts.join('>'))
+  ok(off.deferred.join('>') === 'gptWeb>relayImage', '后面的通道记为 deferred（用来告诉用户还能开回退）', off.deferred.join('>'))
+
+  // 只开一条时必须仍然可用（不变量 2 的另一面）
+  writeLanes(p, { groups: { image: { enabled: { zaiduyu: false, gptWeb: false, relayImage: true } } } })
+  ok(resolveLanePlan(p, 'image', () => true).attempts.join('>') === 'relayImage', '只剩一条开着 → 就是它')
 }
 
 console.log('\n[4] 额度错误识别（三条链路的原始文本）')
@@ -175,6 +236,39 @@ console.log('\n[7] 逐条开关被命令层尊重 + 统一入口已接线（源�
   ok(/laneId === 'zaiduyu'/.test(gpt), 'generateImage 的分派里有 zaiduyu 分支')
   ok(/zaiduyuReady/.test(idx) && /zaiduyuLaneEnabled\(home\)/.test(idx), '/game-image 入口传了 zaiduyu 就绪判断与逐条开关')
   ok(/zaiduyu: '需要在下面「章鱼生图/.test(idx), '未配置时给界面一句「去哪儿填账号」')
+}
+
+console.log('\n[8] 顺序即使用顺序（2026-11 的需求：章鱼 → 网页 → 中转）')
+{
+  const here = path.dirname(fileURLToPath(import.meta.url))
+  const gpt = readFileSync(path.join(here, '..', 'src', 'game-image-web.mjs'), 'utf8')
+  const start = gpt.indexOf('export async function generateImage')
+  const end = gpt.indexOf('export async function grab', start)
+  const body = start >= 0 && end > start ? gpt.slice(start, end) : ''
+  ok(body.length > 0, '解析出 generateImage 函数体')
+  // [Bug] 以前用 runWithFallback 执行：它把「没抛异常」当成成功，而各通道的失败
+  // 是返回值 ok:false —— 于是「换下一条」从来没真正发生过。顺序循环必须在
+  // generateImage 里，并且明确按 plan.attempts 走。
+  ok(/resolveLanePlan\(dshHome, 'image'/.test(body), '顺序来自 resolveLanePlan（顺序 / 开关 / 就绪 / 回退一次解开）')
+  ok(/for \(const laneId of chain\)/.test(body), '按顺序逐条试（不再依赖 runWithFallback）')
+  ok(!/runWithFallback\(chain/.test(body), 'generateImage 不再用 runWithFallback 执行通道')
+  ok(/laneFailureIsRotatable/.test(body) && /STOP_CODES/.test(body), '有明确的「能换 / 不能换」判据')
+  ok(/pendingUrl/.test(body) && /submitted === true/.test(body), '结果未知 / 已提交 一律不换通道（不重复花钱）')
+  ok(/no_lane_ready/.test(body), '一条都用不了时给出独立的错误码（这才是提醒用户的时机）')
+  ok(/skippedUnready|laneFailures/.test(body), '被跳过 / 被换掉的通道如实回报给调用方')
+  // 网页通道"有没有账号"必须在开跑前判掉，否则每次都白弹一次浏览器。
+  ok(/export function gptWebLaneReady/.test(gpt) && /loggedIn/.test(gpt), '网页通道就绪 = 开关 + 至少一个已登录账号')
+  const idx = readFileSync(path.join(here, '..', 'index.js'), 'utf8')
+  ok(/gptWeb: \(\) => gptWebLaneReady\(home\)/.test(idx), '设置页的「可用」圆点与路由用同一套就绪判断')
+  ok(/laneNeed: LANE_UNREADY_REASON/.test(idx), '/game-image 把「每条通道缺什么」交给统一入口')
+
+  // 设置页：每类素材各有一个「按顺序自动回退」开关，并且三类页面里都挂着这张卡。
+  const ui = readFileSync(path.join(here, '..', 'client.js'), 'utf8')
+  ok(/按顺序自动回退/.test(ui), '卡片里有「按顺序自动回退」')
+  ok(/groups: \{ \[group\]: \{ autoFallback: next \} \}/.test(ui), '开关按组保存（不是全局一个）')
+  ok(/h\(LanePriorityCard, \{ only: 'image' \}\)/.test(ui), '「图片」页就有生图通道顺序卡')
+  ok(/h\(LanePriorityCard, \{ only: 'video' \}\)/.test(ui), '「视频」页就有视频通道顺序卡')
+  ok(/h\(LanePriorityCard, \{ only: 'audio' \}\)/.test(ui), '「音频」页就有 BGM 通道卡')
 }
 
 try { rmSync(scratch, { recursive: true, force: true }) } catch { /* ignore */ }

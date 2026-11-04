@@ -44,6 +44,25 @@ function loadExport(source, name, dependencies) {
 
 const prompt = 'offline shield icon'
 const pendingUrl = 'https://chatgpt.com/c/OFFLINE-TEST-CONVERSATION'
+
+/**
+ * `resolveLanePlan` 的替身：真实现要读磁盘上的 lanes.json，而这些用例的目的是
+ * 固定顺序去验证「换 / 不换」的语义，所以顺序由用例直接给定。
+ * 语义必须与真实现一致：ready 过滤 → attempts（回退关着时只留第一条）。
+ */
+const planOf = (order, { autoFallback = true } = {}) => (_home, group, readyFn = () => true) => {
+  const ready = order.filter((id) => { try { return Boolean(readyFn(id)) } catch { return false } })
+  return {
+    group,
+    autoFallback,
+    order,
+    enabled: order,
+    ready,
+    unready: order.filter((id) => !ready.includes(id)),
+    attempts: autoFallback ? ready : ready.slice(0, 1),
+    deferred: autoFallback ? [] : ready.slice(1),
+  }
+}
 function gptFixture({ pending, failure, accounts = [], genResult, loggedIn = true } = {}) {
   const calls = []
   const pendingRecord = pending === undefined
@@ -151,12 +170,11 @@ for (const error of ['timed out after 660s', 'quota:rejected']) {
   await check(`cross-lane fallback respects submission certainty: ${error}`, async () => {
     let relayCalls = 0
     const run = loadExport(gptSource, 'generateImage', {
-      laneOrder: () => ['gptWeb', 'relayImage'],
+      resolveLanePlan: planOf(['gptWeb', 'relayImage']),
       readGptLaneEnabled: () => true,
-      readLanes: () => ({ autoFallback: true }),
+      gptWebLaneReady: () => true,
       generateWithRotation: async () => ({ ok: false, error, pendingUrl }),
       relayGenerate: async () => { relayCalls += 1; return { ok: true, saved: 'MEMORY-ONLY.png' } },
-      runWithFallback,
     })
     const result = await run('MEMORY-HOME', prompt, { relayReady: () => true })
     assert.equal(relayCalls, error.startsWith('quota:') ? 1 : 0)
@@ -169,8 +187,8 @@ for (const order of [['relayImage', 'zaiduyu'], ['zaiduyu', 'relayImage']]) {
   await check(`unknown paid-lane result never submits through the next lane: ${order[0]}`, async () => {
     const submissions = []
     const run = loadExport(gptSource, 'generateImage', {
-      laneOrder: () => order, readGptLaneEnabled: () => false,
-      readLanes: () => ({ autoFallback: true }), runWithFallback,
+      resolveLanePlan: planOf(order), readGptLaneEnabled: () => false,
+      gptWebLaneReady: () => false,
       relayGenerate: async () => {
         submissions.push('relayImage')
         if (order[0] === 'relayImage') throw new Error('offline transport timeout; result unknown')
@@ -192,8 +210,8 @@ for (const order of [['relayImage', 'zaiduyu'], ['zaiduyu', 'relayImage']]) {
 await check('confirmed Zaiduyu quota marker may fall back to the relay', async () => {
   let relayCalls = 0
   const run = loadExport(gptSource, 'generateImage', {
-    laneOrder: () => ['zaiduyu', 'relayImage'], readGptLaneEnabled: () => false,
-    readLanes: () => ({ autoFallback: true }), runWithFallback,
+    resolveLanePlan: planOf(['zaiduyu', 'relayImage']), readGptLaneEnabled: () => false,
+    gptWebLaneReady: () => false,
     zaiduyuGenerate: async () => { throw Object.assign(new Error('current credits insufficient'), { quota: true }) },
     relayGenerate: async () => { relayCalls += 1; return { outputs: ['MEMORY-ONLY.png'] } },
   })
@@ -202,6 +220,66 @@ await check('confirmed Zaiduyu quota marker may fall back to the relay', async (
   assert.equal(result.ok, true)
   assert.equal(result.lane, 'relayImage')
   assert.equal(result.rotatedLanes, true)
+})
+
+// ── 顺序即使用顺序（2026-11 用户要求）：不可用就往下换，但换个通道也不会
+//    改变「已经有结果的请求绝不重投」这条底线 ──
+await check('a lane whose config is incomplete is skipped, not fatal', async () => {
+  let relayCalls = 0
+  const run = loadExport(gptSource, 'generateImage', {
+    resolveLanePlan: planOf(['zaiduyu', 'relayImage']), readGptLaneEnabled: () => false,
+    gptWebLaneReady: () => false,
+    zaiduyuGenerate: async () => {
+      throw Object.assign(new Error('尚未选择章鱼生图模型'), { code: 'model_required', phase: 'preflight', submitted: false })
+    },
+    relayGenerate: async () => { relayCalls += 1; return { outputs: ['MEMORY-ONLY.png'] } },
+  })
+  const result = await run('MEMORY-HOME', prompt, { relayReady: () => true, zaiduyuReady: () => true })
+  assert.equal(relayCalls, 1, 'fall through to the next lane')
+  assert.equal(result.ok, true)
+  assert.equal(result.lane, 'relayImage')
+  assert.deepEqual(Array.from(result.laneFailures, (f) => f.reason), ['model_required'], 'skipped lane is reported honestly')
+})
+
+await check('auto fallback off stops after the first lane and lists what was left', async () => {
+  let relayCalls = 0
+  const run = loadExport(gptSource, 'generateImage', {
+    resolveLanePlan: planOf(['zaiduyu', 'relayImage'], { autoFallback: false }),
+    readGptLaneEnabled: () => false, gptWebLaneReady: () => false,
+    zaiduyuGenerate: async () => {
+      throw Object.assign(new Error('尚未选择章鱼生图模型'), { code: 'model_required', phase: 'preflight', submitted: false })
+    },
+    relayGenerate: async () => { relayCalls += 1; return { outputs: ['MEMORY-ONLY.png'] } },
+  })
+  const result = await run('MEMORY-HOME', prompt, { relayReady: () => true, zaiduyuReady: () => true })
+  assert.equal(relayCalls, 0, 'switch is off → only the first lane is tried')
+  assert.equal(result.ok, false)
+  assert.deepEqual(Array.from(result.deferred ?? []), ['relayImage'], 'caller learns which lanes it could still enable')
+  assert.match(result.hint, /按顺序自动回退/)
+})
+
+await check('no configured lane at all → one clear message, nothing submitted', async () => {
+  let submitted = 0
+  const run = loadExport(gptSource, 'generateImage', {
+    resolveLanePlan: planOf(['zaiduyu', 'gptWeb', 'relayImage']),
+    readGptLaneEnabled: () => false, gptWebLaneReady: () => false,
+    zaiduyuGenerate: async () => { submitted += 1; return { ok: true, saved: 'nope.png' } },
+    relayGenerate: async () => { submitted += 1; return { outputs: ['nope.png'] } },
+    relayEdit: async () => { submitted += 1; return { outputs: ['nope.png'] } },
+    generateWithRotation: async () => { submitted += 1; return { ok: true, saved: 'nope.png' } },
+  })
+  const result = await run('MEMORY-HOME', prompt, {
+    relayReady: () => false, zaiduyuReady: () => false, gptReady: () => false,
+    laneNeed: { zaiduyu: 'NEED_ZAIDUYU', gptWeb: 'NEED_GPT', relayImage: 'NEED_RELAY' },
+  })
+  assert.equal(submitted, 0, 'no lane ran, so nothing could be charged')
+  assert.equal(result.ok, false)
+  assert.equal(result.error, 'no_lane_ready')
+  assert.equal(result.unready.length, 3)
+  assert.match(result.hint, /一条通道都用不了/)
+  assert.match(result.hint, /NEED_ZAIDUYU/)
+  assert.match(result.hint, /NEED_GPT/)
+  assert.match(result.hint, /NEED_RELAY/)
 })
 
 console.log('\n[3] Browser exceptions retain their reason and recovery URL')

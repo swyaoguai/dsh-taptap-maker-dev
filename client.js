@@ -122,6 +122,9 @@ window.__ModuleLoader__.load({
         disabled: props.disabled,
         onClick: props.onClick,
         'aria-pressed': on,
+        // 无文字标签的开关（例如每类通道的「按顺序自动回退」）必须自己带名字，
+        // 否则读屏软件只会念「按钮」。
+        ...(props.ariaLabel ? { 'aria-label': props.ariaLabel, title: props.ariaLabel } : {}),
         style: {
           width: 46, height: 26, borderRadius: 999, border: 'none', padding: 0, position: 'relative',
           cursor: props.disabled ? 'default' : 'pointer', flex: '0 0 auto',
@@ -1286,7 +1289,7 @@ window.__ModuleLoader__.load({
                   h('span', { style: { fontSize: 13, fontWeight: 600 } }, '轮询'),
                   h('p', { style: { ...S.hint, marginTop: 2 } },
                     `附加账号 ${pool.total} 个（已登录 ${pool.loggedIn}，冷却 ${pool.cooling ?? 0}，封禁 ${pool.banned ?? 0}）。`
-                    + '一个触配额自动换下一个；全部触配额后停下（是否换到中转站通道由「生成通道」卡的自动切换开关决定，默认不换）。')),
+                    + '一个触配额自动换下一个；全部触配额后是否换到下一条通道，由上面「生图通道优先级」里那个「按顺序自动回退」开关决定。')),
                 h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
                   h('span', { style: pool.autoRotate ? S.pill : S.offPill }, pool.autoRotate ? '轮换开' : '轮换关'),
                   h(Toggle, {
@@ -1749,7 +1752,7 @@ window.__ModuleLoader__.load({
           h('br'),
           '花的是',
           h('strong', null, '你自己购买的积分'),
-          '，所以它在通道列表里默认排最后、不会被自动切到 —— 想用就在「生成通道」里排序，或直接在对话里说「用章鱼生图画…」。',
+          '，所以它按「生图通道优先级」里排的位置用（默认第一，可在上面那张卡里往下拖）。也可以直接在对话里说「用章鱼生图画…」。',
           h('br'),
           '本卡分别保存站点账号和默认模型；',
           h('strong', null, '密码不会回显'),
@@ -1875,8 +1878,12 @@ window.__ModuleLoader__.load({
     /**
      * 通道优先级 + 各通道开关。
      *
-     * 这是「走哪条 / 额度不够时换不换」的唯一权威界面：底层三条链路
+     * 这是「走哪条 / 顺序 / 不可用时换不换」的唯一权威界面：底层三条链路
      * （生图 / 视频 / BGM）都读这一份排序。
+     *
+     * **顺序就是使用顺序**（2026-11 用户要求）：上面那条不可用（没配好 / 没账号 /
+     * 额度不足）就自动换下一条，全都不行才回来提示补配置。要不要往下换是
+     * **每类素材各自一个开关**（生图默认开，视频 / BGM 默认关）。
      *
      * 交互刻意做成**拖拽 + 上移/下移**两套：拖拽给鼠标用户，上移下移给触屏和
      * 键盘用户 —— 只做拖拽会让后者完全无法调序，那不是「少个功能」而是「用不了」。
@@ -1885,7 +1892,12 @@ window.__ModuleLoader__.load({
      * 就绪（配好没有）。把「关着」和「开着但没配」分开显示是关键 —— 这两件事
      * 的下一步动作完全不同（前者不用管，后者要去填 Key）。
      */
-    function LanePriorityCard() {
+    function LanePriorityCard(props) {
+      // only：只渲染这几类（放在「图片 / 视频 / 音频」页里，用户在自己的模块
+      // 里就能排序，不必回「开始」页去找这张卡）。
+      const onlyList = props && props.only
+        ? (Array.isArray(props.only) ? props.only : [props.only])
+        : null
       const [data, setData] = useState(null)
       const [saving, setSaving] = useState('')
       const [err, setErr] = useState('')
@@ -1970,18 +1982,25 @@ window.__ModuleLoader__.load({
           h('p', { style: { ...S.hint, color: 'var(--dsh-warn, #f08c00)' } }, '宿主 web 服务未就绪，暂时读不到通道配置。'))
       }
 
-      const groups = Object.entries(data.groups || {})
+      const allGroups = Object.entries(data.groups || {})
+      const groups = onlyList === null
+        ? allGroups
+        : allGroups.filter(([group]) => onlyList.includes(group))
       const readyCount = (g) => g.lanes.filter((l) => l.enabled && l.ready).length
+      const title = onlyList !== null && groups.length === 1
+        ? `${groups[0][1].label}通道优先级`
+        : '生成通道优先级'
       const dirLabel = { image: '图片', video: '视频', bgm: '背景音乐' }
       const dirSourceText = { project: '跟随当前项目', flag: '本次指定', config: '设置页指定', default: '当前不在项目里，已退回 $DSH_HOME' }
 
       return h('div', { style: S.card },
-        h('h2', { style: S.cardTitle }, '生成通道优先级'),
+        h('h2', { style: S.cardTitle }, title),
         h('p', { style: { ...S.sub, marginTop: 0 } },
-          '从上到下就是使用顺序：额度或配额不够时会往下换。每一行左侧的开关决定这条通道要不要参与，右侧圆点表示它现在配好了没有。'),
+          '从上到下就是使用顺序。上面那条不可用（没配好、没账号、额度不足）就自动换下一条；'
+          + '顺序里一条能用的都没有时，才会提示你去补配置。行左侧的开关决定这条通道要不要参与，右侧圆点表示它现在配好了没有。'),
 
         // 素材落点：三类统一收在 sucai/ 下，如实显示真实路径。
-        data.dirs
+        data.dirs && onlyList === null
           ? h('div', { style: { marginTop: 12, padding: '8px 10px', borderRadius: 8, border: '1px solid var(--dsh-border, rgba(128,128,128,0.25))' } },
             h('div', { style: { fontWeight: 600, fontSize: 13, marginBottom: 4 } }, '素材存到哪里'),
             h('div', { style: { fontSize: 12, opacity: 0.75, marginBottom: 6 } },
@@ -1994,24 +2013,38 @@ window.__ModuleLoader__.load({
               h('span', { style: { opacity: 0.55 } }, dirSourceText[d.source] ?? d.source))))
           : null,
 
-        h('div', { style: { ...S.rowBetween, marginTop: 12, paddingTop: 12, borderTop: '1px solid var(--dsh-border, rgba(128,128,128,0.25))' } },
-          h('div', null,
-            h('div', { style: { fontWeight: 600 } }, '额度不足时自动换下一条通道'),
-            h('p', { style: { ...S.hint, margin: '2px 0 0' } },
-              '默认关闭 —— 打开后可能在你不知情的情况下动用付费通道（如中转站）。只有「额度/配额」类失败才换，参数写错这类问题换了也一样错，不会浪费一轮。'),
-            h('p', { style: { ...S.hint, margin: '4px 0 0' } },
-              '⚠️ 关着时网页提示「今日免费额度已用完」等配额信息不会换通道：同一通道内的多账号轮换仍会做（上面的「轮换」开关），但不会跳到下一条通道 —— 会停下并把每条通道的失败原因列给你，由你决定切换、补账号还是等额度恢复。')),
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8 } },
-            h('span', { style: data.autoFallback ? S.pill : S.offPill }, data.autoFallback ? '自动切换开' : '自动切换关'),
-            h(Toggle, {
-              on: data.autoFallback, disabled: saving !== '' && saving !== 'error',
-              onClick: () => save({ autoFallback: !data.autoFallback }, 'fb'),
-            }))),
-
         ...groups.map(([group, g]) => h('div', { key: group, style: { marginTop: 16 } },
-          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 } },
+          h('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' } },
             h('span', { style: { fontWeight: 600, fontSize: 13 } }, g.label),
-            h('span', { style: S.pill }, `可用 ${readyCount(g)} / 共 ${g.lanes.length}`)),
+            h('span', { style: S.pill }, `可用 ${readyCount(g)} / 共 ${g.lanes.length}`),
+            // 「要不要往下换」按类各自一个开关：生图默认开（顺序即优先级），
+            // 视频 / BGM 默认关（按秒计费 / 订阅额度，不该替用户连续花钱）。
+            h('span', { style: { flex: 1 } }),
+            h('span', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              h('span', { style: { ...S.hint, margin: 0 } }, '按顺序自动回退'),
+              h('span', { style: g.autoFallback ? S.pill : S.offPill }, g.autoFallback ? '开' : '关'),
+              h(Toggle, {
+                on: g.autoFallback === true,
+                disabled: saving !== '' && saving !== 'error',
+                ariaLabel: `${g.label}按顺序自动回退`,
+                onClick: () => {
+                  const next = g.autoFallback !== true
+                  setData({ ...data, groups: { ...data.groups, [group]: { ...g, autoFallback: next } } })
+                  save({ groups: { [group]: { autoFallback: next } } }, group, data)
+                },
+              }))),
+
+          h('p', { style: { ...S.hint, margin: '0 0 6px' } },
+            g.autoFallback
+              ? '开着：上面那条不可用会自动换下一条（只有「跑不起来 / 额度不足」才换；参数写错、结果未知这类换了也一样，会直接停下）。'
+              : '关着：只用顺序里第一条可用的通道；它失败就停下，并把每条通道的原因列给你。'),
+
+          // 宿主还没重载新版插件时，后端不会返回每组自己的开关（undefined）。
+          // 这时直说一句，比让用户对着一个点了没反应的开关猜要强。
+          typeof g.autoFallback === 'boolean'
+            ? null
+            : h('p', { style: { ...S.hint, margin: '0 0 6px', color: 'var(--dsh-warn, #f08c00)' } },
+              '服务端还是旧版：这个开关要等 DSH 桌面端重启（重载插件）后才会真正生效。'),
 
           h('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
             ...g.lanes.map((lane, i) => {
@@ -2653,7 +2686,9 @@ window.__ModuleLoader__.load({
 
         h(PanelGroup, { active: group === 'image' },
           h('p', { style: S.sectionIntro },
-            '三条画图的路，用哪条、先后顺序在「开始」页的「生成通道优先级」里定。网页版用你自己的 ChatGPT 免费额度；中转站和章鱼花的是你自己的钱。'),
+            '三条画图的路，谁先谁后就在下面这张卡里排（拖拽或 ↑↓）。网页版用你自己的 ChatGPT 免费额度；'
+            + '中转站和章鱼花的是你自己的钱。'),
+          h(LanePriorityCard, { only: 'image' }),
           h(GptAccount),
           h(ImageConfig),
           h(ZaiduyuAccount),
@@ -2662,12 +2697,14 @@ window.__ModuleLoader__.load({
         h(PanelGroup, { active: group === 'video' },
           h('p', { style: S.sectionIntro },
             '只有「出视频」这一步花钱；后面切帧、抠图、导入都在本机做，反复调不花钱。'),
+          h(LanePriorityCard, { only: 'video' }),
           h(VideoConfig),
         ),
 
         h(PanelGroup, { active: group === 'audio' },
           h('p', { style: S.sectionIntro },
             '音效用免费的 CC0 库，不花钱；完整 BGM 用你的 MiniMax 账号在网页上生成。'),
+          h(LanePriorityCard, { only: 'audio' }),
           h(BgmAccount),
           h(AudioLibrary),
         ),

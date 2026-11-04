@@ -128,9 +128,14 @@ await check('explicit Zaiduyu model cannot be silently ignored by another paid l
   let submissions = 0
   const code = fs.readFileSync(new URL('../src/game-image-web.mjs', import.meta.url), 'utf8')
   const run = load('generateImage', {
-    laneOrder: () => ['relayImage'], readGptLaneEnabled: () => false,
-    readLanes: () => ({ autoFallback: true }),
-    runWithFallback: async (chain, fn) => ({ ok: true, lane: chain[0], value: await fn(chain[0]), attempts: [] }),
+    // 顺序路由现在由 resolveLanePlan 给出（读磁盘配置）；这里固定成只有中转站一条。
+    resolveLanePlan: (_h, group, readyFn = () => true) => {
+      const order = ['relayImage']
+      const ready = order.filter((id) => { try { return Boolean(readyFn(id)) } catch { return false } })
+      return { group, autoFallback: true, order, enabled: order, ready, unready: [], attempts: ready, deferred: [] }
+    },
+    readGptLaneEnabled: () => false,
+    gptWebLaneReady: () => false,
     relayGenerate: async () => { submissions++; return { outputs: ['offline-image'] } },
   }, code)
   const r = await run('MEMORY-HOME', 'offline icon', { relayReady: () => true, zaiduyuOpts: { model: 'offline-selected' } })
