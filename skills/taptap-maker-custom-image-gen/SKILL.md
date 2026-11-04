@@ -1,25 +1,36 @@
 ---
 name: taptap-maker-custom-image-gen
-description: 生成 TapTap Maker 游戏图片素材的两条不消耗 Maker 内置额度的通道——首选 ChatGPT 网页生图（含多账号轮询，有 ToS/封号风险），回退为 OpenAI 兼容 /images 中转站；含 CLI 用法、尺寸限制、假 alpha 抠图与 content_policy 退避重试等实测坑。
+description: 生成 TapTap Maker 游戏图片素材、不消耗 Maker 内置额度的几条通道（章鱼生图积分站 / ChatGPT 网页生图 / OpenAI 兼容中转站）——**按用户在设置页排的顺序自动选**（默认 章鱼 → 网页 → 中转），不可用就往下换，全都不可用才提示用户补配置；含 CLI 用法、尺寸限制、假 alpha 抠图与 content_policy 退避重试等实测坑。
 whenToUse: 需要给游戏生成/补充图片素材（图标、精灵、卡面、UI 元素等），且不应消耗 Maker 内置额度时。
 ---
 
-# 游戏图片素材：两条通道（都不碰 Maker 内置额度）
+# 游戏图片素材：多通道，顺序由用户定（都不碰 Maker 内置额度）
 
 ## 通道选择
 
-| | 通道 | 何时用 |
+| | 通道 | 说明 |
 |---|---|---|
-| **首选** | **ChatGPT 网页生图**（`game-image`） | 默认走这条。用你自己的 ChatGPT 账号 / 免费额度 |
-| **回退** | **中转站**（`game-image-relay`，OpenAI 兼容 `/images`） | 网页通道不可用：已关闭、未登录、所有账号都触配额、或网页选择器失效 |
+| 章鱼生图 | `zaiduyu`（`/game-zaiduyu`） | `pai.zaiduyu.top` 多模型积分站，花用户**自己买的预付积分** |
+| ChatGPT 网页生图 | `gptWeb`（`game-image`） | 用户自己的 ChatGPT 账号 / 免费额度，多账号轮询 |
+| 中转站 | `relayImage`（`game-image-relay`，OpenAI 兼容 `/images`） | 用户自己的 Base URL / Key / 模型 |
 
-**不要一上来就调中转站。** 也永远不要调 Maker 内置 `generate_image`（消耗额度）。
+**顺序就是使用顺序**：设置页「图片」→「生图通道优先级」里从上到下试，上面那条
+不可用（没配好 / 没登录 / 额度不足）就换个下一条；一条能用的都没有时才提示用户补配置。
+对话里先看清楚现状再决定，**不要假设网页优先，也不要替用户改顺序或开关**：
 
-### ⚠️ 先确认总开关
+```powershell
+/game-image lanes        # 顺序 / 开关 / 就绪 / 回退状态 + 「现在会走哪条」
+```
 
-网页生图有一个**总开关**（设置页「ChatGPT 网页生图」卡右上角，或 `/game-image lane on|off`）。
-开关是 **OFF** 时：`gen` 会直接拒绝执行（返回 `lane_disabled`），应当改走中转站，
-而不是反复尝试网页通道，也不要自作主张去改开关状态。
+改顺序/开关/回退必须用户自己发起（命令带 `--yes`，或用户明确说要改）。
+
+**不要绕过顺序去手敲某条通道的 CLI。** 也永远不要调 Maker 内置 `generate_image`（消耗额度）。
+
+### ⚠️ 网页通道的总开关
+
+网页生图另有一个**总开关**（设置页「ChatGPT 网页生图」卡，或 `/game-image lane on|off`）。
+开关是 **OFF** 时：`gen` 直接拒绝执行（返回 `lane_disabled`），这条会被跳过 ——
+按顺序换下一条即可，**不要自作主张去改开关状态**。
 
 ```powershell
 node "<plugin>/src/game-image-web.mjs" lane status   # 查开关
@@ -27,7 +38,7 @@ node "<plugin>/src/game-image-web.mjs" lane status   # 查开关
 
 ---
 
-## 首选：ChatGPT 网页生图
+## ChatGPT 网页生图（顺序里的一条通道）
 
 ```powershell
 # 首次：登录一次（会开真实浏览器，Google/Apple/手机号/邮箱均可，免费账号即可生图）
@@ -40,7 +51,7 @@ node "<plugin>/src/game-image-web.mjs" status      # 登录状态 + 账号池 + 
 node "<plugin>/src/game-image-web.mjs" dir         # 看图片存到哪
 ```
 
-对话里直接说「生成一个蓝色盾牌图标」即可，模型默认走这条。
+对话里直接说「生成一个蓝色盾牌图标」即可：会按你排的顺序挑一条能用的；顺序、开关、回退都在 `/game-image lanes` 里看得到。
 
 ### 账号轮询
 
@@ -68,11 +79,11 @@ node "<plugin>/src/game-image-web.mjs" pool unban             # 不带 id = 恢�
 ### 实测坑与诚实限制
 
 1. **必须 headed（有头）浏览器**：chatgpt.com 有 Cloudflare，无头会被挡、裸请求 403。
-2. **选择器是尽力而为**：OpenAI 界面改版频繁。失败时 `steps` 会写明卡在哪一步（如 `no_composer` / `no_image` / `download_failed`），**如实报告，不要假装成功**；确认失效后再回退到中转站。
+2. **选择器是尽力而为**：OpenAI 界面改版频繁。失败时 `steps` 会写明卡在哪一步（如 `no_composer` / `no_image` / `download_failed`），**如实报告，不要假装成功**。（这类失败属于「跑不起来」，顺序回退开着时插件会自己换下一条，不用你手敲另一条通道。）
 3. **配额信号**：页面出现「达到上限 / rate limit / 稍后再试」等即判定该账号触配额，自动轮换。若所有账号都触配额，如实告知并给选项，不要反复重试。
 4. **尺寸由 ChatGPT 决定**，需要特定比例就在提示词里写明（如「1:1 方形构图」）。
 5. **目视验收每一张**，脚本不报错不代表画面对。
-6. **`lane_disabled` 不是故障**：那是用户在设置里关掉了通道，按回退走中转站即可。
+6. **`lane_disabled` 不是故障**：那是用户在设置里关掉了这条通道 —— 跳过它、按顺序用下一条即可。
 7. **出图慢（1~3 分钟），超时别重新生成**：脚本现在会等"生成中"状态结束、只认本次新出现的图再下载；
    真等超时会返回 `pendingUrl`（那个对话的链接）。此时**先用 `grab` 把已生成好的图抓回来**：
    ```powershell
