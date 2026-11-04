@@ -711,6 +711,35 @@ async function main() {
     assert.ok(['CANCELLED', 'SPAWN_FAILED'].includes(error.code), `实际错误码：${error.code} ${error.message}`)
   })
 
+  await test('取消信号会传到 fetch：上游迟迟不回时立刻中断，报 CANCELLED 而非 TIMEOUT', async () => {
+    // 慢上游：延迟 5 秒才回。工具超时设成 30 秒，取消发生在 200ms。
+    const slow = await startMockServer({ projectPath: projectA, projectId: 'pid-a', delayMs: 5000 })
+    const { McpHttpClient } = await load('src/cocos/mcp-http.mjs')
+    const client = new McpHttpClient(`http://127.0.0.1:${slow.port}/mcp/project/pid-a/`, { timeoutMs: 30000 })
+    const controller = new AbortController()
+    const started = Date.now()
+    const call = client.initialize({ signal: controller.signal }).catch((error) => error)
+    setTimeout(() => controller.abort(), 200)
+    const outcome = await call
+    const elapsed = Date.now() - started
+    closeMockServer(slow.server)
+    assert.ok(outcome instanceof Error, '必须抛错')
+    assert.equal(outcome.code, 'CANCELLED', `取消不能被报成 ${outcome.code}`)
+    assert.ok(elapsed < 2000, `取消后应立刻返回，实际等了 ${elapsed}ms`)
+  })
+
+  await test('探测不到 Creator 时不缓存空结果（装完立刻能用）', async () => {
+    const { findCreatorExecutables, invalidateCreatorExeCache } = await load('src/cocos/discover.mjs')
+    invalidateCreatorExeCache()
+    const first = findCreatorExecutables()
+    // 无论本机有没有装 Creator，空结果都必须**每次都重新探测**：
+    // 缓存空值会让「刚装好 Creator」的用户十分钟内一直报 NO_CREATOR_EXE。
+    const second = findCreatorExecutables()
+    assert.deepEqual(second, first)
+    const real = findCreatorExecutables({ cacheMs: 0 })
+    assert.deepEqual(real, first, '强制重扫应与缓存结果一致（本测试只锁行为，不锁内容）')
+  })
+
   await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-name-'))
     await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })

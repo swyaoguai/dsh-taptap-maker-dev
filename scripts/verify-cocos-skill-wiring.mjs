@@ -220,6 +220,26 @@ async function main() {
     assert.match(source, /if \(cocosText !== ''\)/, '必须按文本是否为空决定注不注入')
   })
 
+  await test('设置页写操作的同源判断挡得住 DNS rebinding', async () => {
+    const { isSameOriginRequest } = await load('src/same-origin.mjs')
+    // 正常本机页面：放行
+    assert.equal(isSameOriginRequest({ origin: 'http://127.0.0.1:57030', host: '127.0.0.1:57030' }), true)
+    assert.equal(isSameOriginRequest({ origin: 'http://localhost:57030', host: 'localhost:57030' }), true)
+    // 非浏览器调用（没有 Origin）：放行
+    assert.equal(isSameOriginRequest({ origin: undefined, host: '127.0.0.1:57030' }), true)
+    // 跨站：拒绝
+    assert.equal(isSameOriginRequest({ origin: 'http://evil.com', host: '127.0.0.1:57030' }), false)
+    // opaque origin：拒绝
+    assert.equal(isSameOriginRequest({ origin: 'null', host: '127.0.0.1:57030' }), false)
+    // DNS rebinding：attacker.com 解析到 127.0.0.1 时 Origin 与 Host 相等，
+    // 但 Host 不是回环地址 —— 必须拒绝（这正是只比 Origin==Host 会漏掉的情况）。
+    assert.equal(isSameOriginRequest({ origin: 'http://attacker.com:57030', host: 'attacker.com:57030' }), false)
+    assert.equal(isSameOriginRequest({ origin: 'http://attacker.com', host: 'attacker.com' }), false)
+    // 端口/协议不一致：拒绝
+    assert.equal(isSameOriginRequest({ origin: 'http://127.0.0.1:1', host: '127.0.0.1:57030' }), false)
+    assert.equal(isSameOriginRequest({ origin: 'http://127.0.0.1' , host: '' }), false)
+  })
+
   fs.rmSync(tmpRoot, { recursive: true, force: true })
   process.stdout.write(`\n通过 ${passed} 项，失败 ${failures.length} 项\n`)
   if (failures.length > 0) {

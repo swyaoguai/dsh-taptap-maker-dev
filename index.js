@@ -63,6 +63,7 @@ import { killProcessesContaining } from './src/win-proc.mjs'
 import { startBackgroundCheck, currentVersion, checkForUpdates, readCachedCheck, shouldCheck } from './src/version-checker.mjs'
 // Cocos 集成的重活都在 src/cocos/ 里；index.js 只负责挂命令、注入守则。
 import { cocosPolicyText } from './src/cocos/policy.mjs'
+import { isSameOriginRequest } from './src/same-origin.mjs'
 import { runCocosCommand } from './src/cocos/command.mjs'
 import { cocosInstall, cocosSetRegistration, cocosStatus } from './src/cocos/api.mjs'
 
@@ -815,23 +816,11 @@ export function apply(ctx, config = {}) {
         //
         // 后两个是写操作（改用户配置 / 往磁盘写文件），所以额外要求同源：
         // 本地 web 服务没有 CSRF token，一个恶意网页完全可以 POST 到 localhost。
-        // 同源判断挡住跨站来源，非浏览器调用（不带 Origin）照旧放行。
-        const sameOrigin = (() => {
-          const origin = req.headers.origin
-          // 同源请求在部分浏览器/嵌 webview 里也可能带 "null" 字符串（sandbox/opaque origin）。
-          // "null" 不是可信来源，按跨站处理更安全。
-          if (typeof origin !== 'string' || origin === '') return true
-          if (origin === 'null') return false
-          try {
-            const originUrl = new URL(origin)
-            // host 已含端口；再比一次协议，避免 https 页面打到 http 端口这类混用。
-            const host = String(req.headers.host ?? '')
-            const isLocal = originUrl.hostname === '127.0.0.1' || originUrl.hostname === 'localhost'
-            return originUrl.host === host && (isLocal || host !== '')
-          } catch {
-            return false
-          }
-        })()
+        // 具体规则与「为什么不能只比 Origin == Host」见 src/same-origin.mjs。
+        const sameOrigin = isSameOriginRequest({
+          origin: req.headers.origin,
+          host: req.headers.host,
+        })
         if (req.method === 'GET' && sub === 'cocos') {
           // fresh=1 时跳过发现缓存（UI「刷新」按钮用；默认走短缓存，避免切 tab 就扫进程）。
           const fresh = url.searchParams.get('fresh') === '1'

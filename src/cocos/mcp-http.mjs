@@ -78,7 +78,7 @@ export class McpHttpClient {
     return this.base
   }
 
-  async #post(body, { timeoutMs = this.timeoutMs } = {}) {
+  async #post(body, { timeoutMs = this.timeoutMs, signal = null } = {}) {
     const url = this.base === '' ? '' : `${this.base}/`
     const headers = {
       'content-type': 'application/json',
@@ -88,6 +88,14 @@ export class McpHttpClient {
     if (this.sessionId) headers['mcp-session-id'] = this.sessionId
 
     const controller = new AbortController()
+    // 区分「超时」与「调用方取消」：两者都会 abort，但错误码完全不同 ——
+    // 把用户取消报成 TIMEOUT 会让人以为编辑器卡了。
+    let abortedByCaller = false
+    const onCallerAbort = () => { abortedByCaller = true; controller.abort() }
+    if (signal !== null && signal !== undefined) {
+      if (signal.aborted) onCallerAbort()
+      else signal.addEventListener?.('abort', onCallerAbort, { once: true })
+    }
     // 超时必须**连读 body 一起覆盖**：只给 fetch() 挂 abort，服务端也可能
     // 先把响应头吐回来、body 一直不结束（SSE 尤其容易），那样调用会永久挂着。
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -102,6 +110,7 @@ export class McpHttpClient {
         })
       } catch (error) {
         if (error?.name === 'AbortError') {
+          if (abortedByCaller) throw new CocosMcpError('Cocos MCP 调用已被取消', { code: 'CANCELLED' })
           throw new CocosMcpError(`Cocos MCP 请求超时（${timeoutMs}ms）：${url}`, { code: 'TIMEOUT' })
         }
         throw new CocosMcpError(`连不上 Cocos MCP（${url}）：${error?.message ?? error}`, { code: 'UNREACHABLE' })
@@ -142,6 +151,7 @@ export class McpHttpClient {
       }
     } finally {
       clearTimeout(timer)
+      signal?.removeEventListener?.('abort', onCallerAbort)
     }
   }
 
@@ -170,13 +180,16 @@ export class McpHttpClient {
 
   /**
    * 握手并缓存身份信息。返回 `{serverInfo, funplay}`。
+   *
+   * `opts.signal` 可取消：握手是「编辑器卡住时最久的一次等待」，
+   * 用户按停止后不该继续等到超时。
    */
-  async initialize() {
+  async initialize({ signal = null } = {}) {
     const result = await this.#rpc('initialize', {
       protocolVersion: this.protocolVersion || '2026-07-28',
       capabilities: {},
       clientInfo: { name: 'dsh-game-forge-cocos', version: '1.0.0' },
-    })
+    }, { signal })
     this.serverInfo = result?.serverInfo ?? null
     this.funplay = result?.funplay ?? null
     this.routingVersion = this.funplay?.routingVersion ?? null
@@ -217,7 +230,10 @@ export class McpHttpClient {
     const payload = { ...args }
     // 写操作要带身份令牌；上游会把同名参数删掉，不会污染工具自己的参数。
     if (opts.expectedContext) payload.expected_context = opts.expectedContext
-    const result = await this.#rpc('tools/call', { name, arguments: payload }, { timeoutMs: opts.timeoutMs ?? this.timeoutMs })
+    const result = await this.#rpc('tools/call', { name, arguments: payload }, {
+      timeoutMs: opts.timeoutMs ?? this.timeoutMs,
+      signal: opts.signal ?? null,
+    })
     // MCP 的「工具执行失败」不是 JSON-RPC error，而是 `result.isError = true`
     // 加一段解释性 content。不在这里拦住，上层会把错误文案当成正常结果，
     // agent 就会以为「场景已经改好了」。

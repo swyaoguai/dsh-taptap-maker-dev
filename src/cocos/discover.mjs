@@ -238,7 +238,7 @@ export function findCreatorExecutables({ cacheMs = CREATOR_EXE_TTL_MS } = {}) {
   if (cacheMs > 0 && creatorExeCache.value !== null && now - creatorExeCache.at < cacheMs) {
     return creatorExeCache.value
   }
-  const found = []
+  let found = []
   if (IS_WINDOWS) {
     const script = [
       '$roots = @()\n',
@@ -256,10 +256,12 @@ export function findCreatorExecutables({ cacheMs = CREATOR_EXE_TTL_MS } = {}) {
     try {
       const parsed = runPowerShellJson(script, 30000)
       const list = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : [])
-      for (const item of list) if (typeof item === 'string' && item.endsWith('.exe')) found.push(item)
+      found = list.filter((item) => typeof item === 'string' && item.endsWith('.exe'))
     } catch { /* 找不到就让调用方给参数 */ }
   }
-  creatorExeCache = { at: now, value: found }
+  // ⚠️ 只在**找到了**才缓存：空结果缓存 10 分钟，意味着用户刚装好 Creator、
+  // 或者插上移动硬盘后，十分钟内怎么试都报「找不到 CocosCreator.exe」。
+  if (found.length > 0) creatorExeCache = { at: now, value: found }
   return found
 }
 

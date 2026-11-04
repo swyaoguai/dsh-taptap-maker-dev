@@ -69,7 +69,7 @@ function missingToolError(name, tools) {
  * 里，主路径的 cocos_exec / 场景保存 / 资源刷新全是裸调用 ——
  * 「同一项目写操作串行」这个承诺实际是空的，两个会话可以同时改一个场景。
  */
-async function invoke({ dshHome, project, tool, args, mutating, sessionId, timeoutMs, discovery }) {
+async function invoke({ dshHome, project, tool, args, mutating, sessionId, timeoutMs, discovery, signal }) {
   const target = await resolveTarget({ dshHome, project, requireLive: true, discovery })
   const run = async () => {
     const { client, identity, tools } = await upstreamTools(target, { timeoutMs: Math.min(timeoutMs ?? 20000, 30000) })
@@ -79,6 +79,9 @@ async function invoke({ dshHome, project, tool, args, mutating, sessionId, timeo
       // 多塞一个参数在别的实现上可能被 schema 校验拒绝。
       expectedContext: mutating ? identity.expectedContext : '',
       timeoutMs: timeoutMs ?? 60000,
+      // 取消信号一路传到 fetch：客户端取消后，正在等上游响应的大调用
+      // （cocos_exec 可能等到 120s）会立刻中断，而不是继续跑满超时。
+      signal: signal ?? null,
     })
     return { result, identity, target }
   }
@@ -193,11 +196,13 @@ function spawnCreator(exePath, args, { cwd, logFile, onError } = {}) {
  * exe 路径，被拿去给项目 B 构建未必错（同一台机器通常只装一个 Creator），
  * 但装了多个版本时就是错的。所以实例自报也要过版本匹配这一关。
  */
-async function resolveCreatorExe({ dshHome, entry }) {
+async function resolveCreatorExe({ dshHome, entry, discovery = null }) {
   if (entry?.creatorExe && fs.existsSync(entry.creatorExe)) return entry.creatorExe
   const want = entry?.creatorVersion ?? ''
-  const discovery = await discoverLive({ cacheMs: 0 })
-  const hit = discovery.instances.find((instance) => instance.exePath !== ''
+  // 复用调用方已有的探测结果：cocos_open / cocos_build 进来时 resolveTarget 已经
+  // 扫过一次进程表，这里再强制 cacheMs: 0 等于白扫第二遍（每次数秒）。
+  const disc = discovery ?? await discoverLive()
+  const hit = disc.instances.find((instance) => instance.exePath !== ''
     && (want === '' || creatorVersionFromExe(instance.exePath) === '' || creatorVersionFromExe(instance.exePath) === want))
   if (hit) return hit.exePath
   // 命令行探测带缓存：实现要递归扫 ProgramData/ProgramFiles，实测每次数秒。
@@ -310,7 +315,7 @@ export const TOOL_DEFINITIONS = [
       if (target.health !== null) {
         return { alreadyRunning: true, slug: target.entry.slug, port: target.health.port, path: target.entry.path }
       }
-      const exe = await resolveCreatorExe({ dshHome: ctx.dshHome, entry: target.entry })
+      const exe = await resolveCreatorExe({ dshHome: ctx.dshHome, entry: target.entry, discovery: ctx.discovery })
       const editorShotDir = shotsDir(ctx.dshHome)
       // 每次启动只留一份编辑器日志；产物目录整体按时间保留最近 N 个。
       pruneArtifacts(editorShotDir, { match: /-editor\.log$/ })
@@ -390,6 +395,7 @@ export const TOOL_DEFINITIONS = [
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
         discovery: ctx.discovery,
+        signal: ctx.signal,
         project: args.project,
         tool: 'execute_javascript',
         args: { context: args.context, code: args.code, args: args.args ?? {} },
@@ -447,6 +453,7 @@ export const TOOL_DEFINITIONS = [
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
         discovery: ctx.discovery,
+        signal: ctx.signal,
         project: args.project,
         tool: spec.tool,
         args: payload,
@@ -492,6 +499,7 @@ export const TOOL_DEFINITIONS = [
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
         discovery: ctx.discovery,
+        signal: ctx.signal,
         project: args.project,
         tool: spec.tool,
         args: payload,
@@ -530,6 +538,7 @@ export const TOOL_DEFINITIONS = [
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
         discovery: ctx.discovery,
+        signal: ctx.signal,
         project: args.project,
         tool: spec.tool,
         args: payload,
@@ -603,7 +612,7 @@ export const TOOL_DEFINITIONS = [
       const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: false, discovery: ctx.discovery })
       const exe = args.creator_exe && fs.existsSync(args.creator_exe)
         ? args.creator_exe
-        : await resolveCreatorExe({ dshHome: ctx.dshHome, entry: target.entry })
+        : await resolveCreatorExe({ dshHome: ctx.dshHome, entry: target.entry, discovery: ctx.discovery })
       const parts = [`platform=${args.platform ?? 'web-mobile'}`, `debug=${args.debug === false ? 'false' : 'true'}`]
       if (args.extra) parts.push(String(args.extra))
       const buildArg = parts.join(';')
@@ -793,6 +802,7 @@ export const TOOL_DEFINITIONS = [
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
         discovery: ctx.discovery,
+        signal: ctx.signal,
         project: args.project,
         tool,
         args: payload,
@@ -822,6 +832,7 @@ export const TOOL_DEFINITIONS = [
       const { result, identity } = await invoke({
         dshHome: ctx.dshHome,
         discovery: ctx.discovery,
+        signal: ctx.signal,
         project: args.project,
         tool: args.tool,
         args: args.arguments ?? {},
