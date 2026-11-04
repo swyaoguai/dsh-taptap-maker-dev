@@ -462,7 +462,12 @@ export const TOOL_DEFINITIONS = [
       const spec = map[args.action]
       if (!spec) throw new CocosMcpError(`未知 action "${args.action}"`, { code: 'BAD_ARGS' })
       const payload = {}
-      if (args.scene) payload.scene = args.scene
+      if (args.scene) {
+        // 上游 open_scene / create_scene 的参数名是 target（0.7.0 实测：
+        // 传 scene 会被上游当成空参数，报 "Asset uuid or path is required."）。
+        if (args.action === 'open' || args.action === 'create') payload.target = args.scene
+        else payload.scene = args.scene
+      }
       if (args.query) payload.query = args.query
       if (args.node) payload.target = args.node
       if (typeof args.depth === 'number') payload.depth = args.depth

@@ -165,7 +165,11 @@ export async function discoverLive(opts = {}) {
   const enriched = await Promise.all(instances.map(async (instance) => {
     const healths = instance.ports.length > 0 ? await probeInstancePorts(instance, opts) : []
     // 交互实例优先：`--build` 是命令行构建用的无头实例，不该被当成交互目标。
-    healths.sort((a, b) => a.port - b.port)
+    // 同一工程可能同时装着多个 MCP 扩展（典型的：旧的 cocos-mcp-server 固定占 3000，
+    // Funplay 用项目态随机端口）。两者 /health 都会回 200，但只有 Funplay 会自报
+    // projectPath / name；纯按端口号排序会选到旧的那个，调用直接 404。
+    const identityScore = (health) => ((health.projectPath || health.name) ? 0 : 1)
+    healths.sort((a, b) => identityScore(a) - identityScore(b) || a.port - b.port)
     return { ...instance, mcpHealths: healths }
   }))
 
