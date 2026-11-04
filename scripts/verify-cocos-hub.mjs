@@ -39,7 +39,8 @@ async function test(name, fn) {
 }
 
 // ── 1. 客户端 / 身份校验（本地假 MCP 服务）──────────────────────────────
-function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFirst = false, toolError = false, delayMs = 0 } = {}) {  const state = { calls: [], sseOnce, sseNotifyFirst, toolError }
+function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFirst = false, toolError = false, delayMs = 0, pagedTools = false, stringIds = false, wrongIdOnly = false } = {}) {
+  const state = { calls: [], sseOnce, sseNotifyFirst, toolError, pagedTools, stringIds, wrongIdOnly }
   const expectedContext = `${projectId}:instance-1`
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://localhost')
@@ -76,7 +77,9 @@ function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFir
       const message = JSON.parse(body)
       state.calls.push(message)
       const reply = (result) => {
-        const payload = { jsonrpc: '2.0', id: message.id, result }
+        // stringIds：模拟「上游把数字 id 回成字符串」，这是合法实现，
+        // 客户端用 === 比较就会匹配不到，把空结果当成功。
+        const payload = { jsonrpc: '2.0', id: state.stringIds ? String(message.id) : message.id, result }
         if (state.sseNotifyFirst) {
           // 同一条 SSE 流里先塞一条服务端通知（id 不匹配），再给真正的响应。
           // 客户端如果「没匹配到就取最后一条」会拿错，这里用来锁住这个行为。
@@ -90,6 +93,13 @@ function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFir
           state.sseOnce = false
           res.writeHead(200, { 'content-type': 'text/event-stream' })
           res.end(`event: message\ndata: ${JSON.stringify(payload)}\n\n`)
+          return
+        }
+        if (state.wrongIdOnly) {
+          // 只回一条 id 不对的 SSE：客户端必须报错，不能把空结果当成功。
+          res.writeHead(200, { 'content-type': 'text/event-stream' })
+          const stray = { jsonrpc: '2.0', id: 'not-ours', result: { tools: [] } }
+          res.end(`event: message\ndata: ${JSON.stringify(stray)}\n\n`)
           return
         }
         res.writeHead(200, { 'content-type': 'application/json' })
@@ -117,6 +127,20 @@ function startMockServer({ projectPath, projectId, sseOnce = false, sseNotifyFir
         return
       }
       if (message.method === 'tools/list') {
+        // 支持分页：第一页带 nextCursor，第二页给剩下的工具。
+        if (state.pagedTools) {
+          if (message.params?.cursor === undefined) {
+            reply({
+              tools: [{ name: 'execute_javascript', description: 'exec', inputSchema: { type: 'object' } }],
+              nextCursor: 'page-2',
+            })
+          } else {
+            reply({
+              tools: [{ name: 'save_scene', description: 'save', inputSchema: { type: 'object' } }],
+            })
+          }
+          return
+        }
         reply({
           tools: [
             { name: 'execute_javascript', description: 'exec', inputSchema: { type: 'object' } },
@@ -795,6 +819,49 @@ async function main() {
       if (previous === undefined) delete process.env.COCOS_USER_DIR
       else process.env.COCOS_USER_DIR = previous
     }
+  })
+
+  await test('tools/list 分页：第二页的工具也必须能列出来', async () => {
+    const paged = await startMockServer({ projectPath: projectA, projectId: 'pid-paged', pagedTools: true })
+    const client = new McpHttpClient(`http://127.0.0.1:${paged.port}/mcp/project/pid-paged/`)
+    await client.initialize()
+    const tools = await client.toolsList()
+    closeMockServer(paged.server)
+    const names = tools.map((tool) => tool.name)
+    assert.deepEqual(names.sort(), ['execute_javascript', 'save_scene'], '两页要合并，不能只取第一页')
+    assert.ok(tools.some((tool) => tool.name === 'save_scene'), '第二页的 save_scene 必须出现')
+  })
+
+  await test('SSE 响应的 id 是字符串也能匹配上（不能让 id 类型把结果吞掉）', async () => {
+    const stringy = await startMockServer({
+      projectPath: projectA, projectId: 'pid-str', sseOnce: true, stringIds: true,
+    })
+    const client = new McpHttpClient(`http://127.0.0.1:${stringy.port}/mcp/project/pid-str/`)
+    const outcome = await client.initialize().then(() => 'ok').catch((error) => error)
+    closeMockServer(stringy.server)
+    assert.equal(outcome, 'ok', `id 类型不同不该让握手失败：${outcome}`)
+    assert.equal(client.identity().projectId, 'pid-str')
+  })
+
+  await test('SSE 里没有本次响应时必须报错，而不是静默返回空结果', async () => {
+    const wrong = await startMockServer({
+      projectPath: projectA, projectId: 'pid-wrong', wrongIdOnly: true,
+    })
+    const client = new McpHttpClient(`http://127.0.0.1:${wrong.port}/mcp/project/pid-wrong/`)
+    const outcome = await client.initialize().then(() => null).catch((error) => error)
+    closeMockServer(wrong.server)
+    assert.ok(outcome instanceof Error, '必须抛错，不能返回空结果')
+    assert.equal(outcome.code, 'MISMATCHED_RESPONSE', `错误码应为 MISMATCHED_RESPONSE，实际 ${outcome?.code}`)
+    assert.match(String(outcome.message), /没有本次请求的 id/)
+  })
+
+  await test('SSE 通知混在响应之前时，仍要拿到真正的响应', async () => {
+    const dead = await startMockServer({ projectPath: projectA, projectId: 'pid-dead', sseOnce: true, sseNotifyFirst: true })
+    const second = new McpHttpClient(`http://127.0.0.1:${dead.port}/mcp/project/pid-dead/`)
+    const result = await second.initialize().then((value) => value).catch((error) => error)
+    closeMockServer(dead.server)
+    assert.ok(result && typeof result === 'object' && !(result instanceof Error), `应拿到握手结果，实际：${result}`)
+    assert.equal(second.identity().projectId, 'pid-dead')
   })
 
   await test('注册表：损坏副本只留最近 3 份（不会每次读都复制一份）', async () => {

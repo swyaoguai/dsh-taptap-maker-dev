@@ -32,8 +32,23 @@ export class CocosMcpError extends Error {
 }
 
 /** 从 SSE 文本里取出 id 匹配的那条 JSON-RPC 响应。 */
+/**
+ * JSON-RPC id 是否相同。
+ *
+ * 不能直接用 `===`：id 允许是数字或字符串，上游把我们的 `1` 回成 `"1"`
+ * 是合法的；严格比较会「匹配不到」→ 返回 null → 上层把空结果当成功。
+ */
+function sameId(a, b) {
+  if (a === b) return true
+  if (a === null || a === undefined || b === null || b === undefined) return false
+  const stringish = (value) => typeof value === 'string' || typeof value === 'number'
+  if (!stringish(a) || !stringish(b)) return false
+  return String(a) === String(b)
+}
+
 function pickSseResponse(text, id) {
   const events = text.split(/\r?\n\r?\n/)
+  const seenIds = []
   for (const event of events) {
     const dataLines = event.split(/\r?\n/)
       .filter((line) => line.startsWith('data:'))
@@ -47,12 +62,19 @@ function pickSseResponse(text, id) {
       continue
     }
     if (parsed === null || typeof parsed !== 'object') continue
-    if (parsed.id === id) return parsed
+    if (parsed.id !== undefined) seenIds.push(parsed.id)
+    if (sameId(parsed.id, id)) return parsed
   }
   // ⚠️ 不能「没匹配到就返回最后一条」：SSE 流里可能夹着服务端的
   // notifications/*，或者并发请求的响应；把别人的结果当成本次结果返回，
-  // 上层会拿着错的 content 去写场景。宁可返回 null 让调用方按「空结果」处理。
-  return null
+  // 上层会拿着错的 content 去写场景。
+  // 但也**不能静默返回 null**：流里明明有响应却不是给我们的，说明协议层出问题了
+  // （id 类型、多路复用、上游实现 bug），上层会把空结果当成功。
+  throw new CocosMcpError(
+    `Cocos MCP 的 SSE 响应里没有本次请求的 id（期望 ${JSON.stringify(id)}，流里看到 ${JSON.stringify(seenIds)}）。`
+    + '通常是上游把 id 换了类型或复用了连接；重试一次，仍失败就用 cocos_exec 兜底。',
+    { code: 'MISMATCHED_RESPONSE' },
+  )
 }
 
 export class McpHttpClient {
@@ -213,10 +235,26 @@ export class McpHttpClient {
   }
 
   /** `tools/list`，返回原始工具数组。 */
-  async toolsList() {
-    const result = await this.#rpc('tools/list', {})
-    const tools = Array.isArray(result?.tools) ? result.tools : []
-    return tools
+  /**
+   * 列出上游工具。
+   *
+   * MCP 允许分页（`nextCursor`）。只取第一页的实现看起来「能用」，但只要上游
+   * 的工具多到翻页，后面的工具就永远看不到 —— 表现为「明明装了 full 档，
+   * 却报某个工具不存在」，而错误提示还会让人去切档位，越查越偏。
+   */
+  async toolsList({ maxPages = 20 } = {}) {
+    const all = []
+    let cursor = null
+    for (let page = 0; page < maxPages; page += 1) {
+      const params = cursor === null ? {} : { cursor }
+      const result = await this.#rpc('tools/list', params)
+      const tools = Array.isArray(result?.tools) ? result.tools : []
+      all.push(...tools)
+      const next = result?.nextCursor
+      if (typeof next !== 'string' || next === '' || next === cursor) break
+      cursor = next
+    }
+    return all
   }
 
   /**
