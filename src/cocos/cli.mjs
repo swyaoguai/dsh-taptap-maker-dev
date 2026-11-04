@@ -8,6 +8,7 @@
  * @module src/cocos/cli.mjs
  */
 import path from 'node:path'
+import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { resolveDshHome } from '../paths.js'
 import { doctor, installExtension } from './install.mjs'
@@ -19,20 +20,72 @@ import { errorText } from './util.mjs'
 const HERE = path.dirname(fileURLToPath(import.meta.url))
 const HUB_PATH = path.join(HERE, 'server.mjs')
 
+/**
+ * 只吃「有没有」、不吃值的开关。
+ *
+ * ⚠️ 以前没有这份名单：解析器默认每个 `--flag` 都可能带值，于是
+ * `game-cocos install --global D:\proj` 会把 **路径当成 --global 的值**吞掉，
+ * 位置参数为空 → 安装目标回落到 `process.cwd()`（装错工程）。
+ * `--yes` 同理：`--yes D:\proj` 会让 `flags.yes !== true` 成立而拒绝执行，
+ * 看起来像是「确认无效」。
+ */
+const BOOLEAN_FLAGS = new Set(['yes', 'json', 'force', 'global', 'help', 'h'])
+
+/** 显式给值的开关（其余未知 `--x` 仍然按「可能带值」处理，保持兼容）。 */
+const VALUE_FLAGS = new Set(['home', 'build-slots', 'platform', 'wait', 'code', 'context', 'out'])
+
+function toBoolean(value) {
+  if (value === true) return true
+  const text = String(value).toLowerCase()
+  return text === 'true' || text === '1' || text === 'yes' || text === 'on'
+}
+
 function parse(argv) {
   const args = []
   const flags = {}
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
-    if (token.startsWith('--')) {
-      const [key, inline] = token.slice(2).split('=')
-      if (inline !== undefined) flags[key] = inline
-      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
-        flags[key] = argv[++i]
-      } else flags[key] = true
-    } else args.push(token)
+    if (!token.startsWith('--')) {
+      args.push(token)
+      continue
+    }
+    const [key, inline] = token.slice(2).split('=')
+    if (BOOLEAN_FLAGS.has(key)) {
+      // `--yes=false` 这类显式写法照样认，但绝不吞掉后面的位置参数。
+      flags[key] = inline === undefined ? true : toBoolean(inline)
+      continue
+    }
+    if (inline !== undefined) {
+      flags[key] = inline
+    } else if (VALUE_FLAGS.has(key) && argv[i + 1] !== undefined && !argv[i + 1].startsWith('--')) {
+      flags[key] = argv[++i]
+    } else if (VALUE_FLAGS.has(key)) {
+      flags[key] = true
+    } else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith('--') && looksLikeFlagValue(argv[i + 1])) {
+      // 未知开关：只有在下一个 token 明显不是路径/子命令时才当值吃，
+      // 否则保留给位置参数（宁可少解析一个值，也不能吞掉工程路径）。
+      flags[key] = argv[++i]
+    } else {
+      flags[key] = true
+    }
   }
   return { args, flags }
+}
+
+/** 下一个 token 像不像某一行的「值」（而不是工程路径或子命令）。 */
+function looksLikeFlagValue(token) {
+  if (token === '') return false
+  if (token.startsWith('-')) return false
+  // 路径特征：盘符、分隔符、点开头，或已存在的路径
+  if (/^[a-zA-Z]:[\\/]/.test(token)) return false
+  if (token.includes('/') || token.includes('\\')) return false
+  if (token.startsWith('.')) return false
+  try {
+    if (fs.existsSync(token)) return false
+  } catch {
+    return true
+  }
+  return true
 }
 
 function out(value, flags) {

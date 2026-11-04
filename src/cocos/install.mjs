@@ -74,6 +74,35 @@ export function readProjectConfig(projectPath) {
 }
 
 /**
+ * 列出**所有**已装位置（工程级 + 全局）。
+ *
+ * `detectExtension` 只返回第一个命中，于是「工程里装了一份、全局也装了一份」
+ * 这种状态看起来和正常没区别 —— 但 Cocos 会把两份都加载，扩展注册两次、
+ * 菜单重复、两个 MCP 端口抢同一个项目。doctor 需要能看到这个。
+ */
+export function detectAllExtensions(projectPath) {
+  const normal = normalizeProjectPath(projectPath)
+  const meta = readProjectMeta(normal)
+  const version = meta?.creatorVersion ?? ''
+  const out = []
+  const dirs = [{ scope: 'project', dir: path.join(normal, 'extensions', EXTENSION_DIR_NAME) }]
+  if (version !== '') {
+    dirs.push({ scope: 'global', dir: path.join(cocosUserDir(), 'builtin-extensions', version, EXTENSION_DIR_NAME) })
+  }
+  for (const candidate of dirs) {
+    const pkg = readJson(path.join(candidate.dir, 'package.json'))
+    if (pkg === null) continue
+    out.push({
+      ...candidate,
+      installed: true,
+      version: String(pkg.version ?? ''),
+      name: String(pkg.name ?? EXTENSION_DIR_NAME),
+    })
+  }
+  return out
+}
+
+/**
  * 写入「按项目派生端口 + 自动启动」的配置（已存在就完全不动）。
  *
  * 为什么必须写这个：扩展默认可能沿用固定端口 8765，两个项目一起开就会抢同一个端口，
@@ -308,6 +337,7 @@ export async function installExtension({
   const existing = detectExtension(normal)
   if (existing !== null && !force) {
     const configState = ensureProjectConfig(normal)
+    const others = detectAllExtensions(normal).filter((item) => item.dir !== existing.dir)
     return {
       installed: false,
       alreadyInstalled: true,
@@ -315,7 +345,12 @@ export async function installExtension({
       dir: existing.dir,
       version: existing.version,
       config: configState,
-      note: '已经装好了，未重复下载。要覆盖重装请加 --force。',
+      // 别的地方还装着一份 → Cocos 会两个都加载，必须提示（否则「菜单怎么有两份」查不到原因）。
+      otherScopes: others.map((item) => ({ scope: item.scope, dir: item.dir, version: item.version })),
+      note: others.length > 0
+        ? `已经装好了，未重复下载。但另外还有 ${others.length} 份（${others.map((item) => item.scope).join('、')}）：`
+          + 'Cocos 会全部加载，建议只留一份。'
+        : '已经装好了，未重复下载。要覆盖重装请加 --force。',
     }
   }
 
@@ -422,6 +457,7 @@ export async function doctor({ projectPath, dshHome } = {}) {
   const normal = normalizeProjectPath(projectPath)
   const meta = readProjectMeta(normal)
   const extension = detectExtension(normal)
+  const all = detectAllExtensions(normal)
   const config = readProjectConfig(normal)
   const report = {
     projectPath: normal,
@@ -429,6 +465,7 @@ export async function doctor({ projectPath, dshHome } = {}) {
     creatorVersion: meta?.creatorVersion ?? '',
     hasAssets: meta?.hasAssets ?? false,
     extension: extension ?? { installed: false },
+    installedScopes: all.map((item) => ({ scope: item.scope, dir: item.dir, version: item.version })),
     config: config ?? { present: false },
     problems: [],
     suggestions: [],
@@ -439,6 +476,14 @@ export async function doctor({ projectPath, dshHome } = {}) {
   if (extension === null) {
     report.problems.push('没有安装 Cocos MCP 扩展')
     report.suggestions.push('运行 /game-cocos install <项目目录> 安装（MIT 版 funplay-cocos-mcp）')
+  }
+  if (all.length > 1) {
+    // Cocos 会把工程级和全局的扩展都加载：注册两次、菜单重复、端口互相抢。
+    report.problems.push(
+      `同一工程能同时加载 ${all.length} 份扩展（${all.map((item) => `${item.scope} ${item.version || '?'}`).join('、')}）：`
+      + 'Cocos 会全部加载，容易出现扩展重复注册、菜单重复、两个 MCP 端口抢同一个项目',
+    )
+    report.suggestions.push('只保留一份：删掉工程里的 extensions/funplay-cocos-mcp，或删掉全局 builtin-extensions 下那份')
   }
   if (config !== null && config.portMode === 'fixed') {
     report.problems.push(`扩展使用固定端口 ${config.port ?? '?'}：多项目并行时会抢端口`)

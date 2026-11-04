@@ -21,7 +21,7 @@ import { connectTarget, projectOverview, readProjectMeta, resolveTarget } from '
 import { upsertProject } from './registry.mjs'
 import { acquireFileLock, acquireBuildSlot, makeOwner, projectLockPath, releaseBuildSlot, releaseFileLock, touchFileLock, withProjectLock } from './locks.mjs'
 import { creatorVersionFromExe, discoverLive, findCreatorExecutables, invalidateDiscoveryCache, pickCreatorExecutable } from './discover.mjs'
-import { downsampleList, sleep } from './util.mjs'
+import { sleep } from './util.mjs'
 import { sameProjectPath, shotsDir } from './paths.mjs'
 
 /** 上游工具清单缓存：同一端点 30 秒内不重复拉。 */
@@ -253,12 +253,22 @@ export const TOOL_DEFINITIONS = [
     description: '查看单个项目的详细状态：编辑器进程、MCP 端口与身份、扩展版本、写锁持有者、构建槽位。',
     inputSchema: {
       type: 'object',
-      properties: { project: PROJECT_PARAM },
+      properties: {
+        project: PROJECT_PARAM,
+        refresh: { type: 'boolean', description: '忽略缓存重新扫进程与端口（默认 false，用 2.5s 短缓存）', default: false },
+      },
       additionalProperties: false,
     },
     mutating: false,
     handler: async (args, ctx) => {
-      const overview = await projectOverview({ dshHome: ctx.dshHome, cacheMs: 0, buildSlotLimit: ctx.config?.buildSlots, discovery: ctx.discovery })
+      // 默认走短缓存：agent 排查问题时会连着查好几次状态，
+      // 每次都强制扫一遍进程表（1~3 秒）纯属白等；要最新就传 refresh: true。
+      const overview = await projectOverview({
+        dshHome: ctx.dshHome,
+        cacheMs: args.refresh ? 0 : undefined,
+        buildSlotLimit: ctx.config?.buildSlots,
+        discovery: ctx.discovery,
+      })
       let view = null
       if (args.project) {
         // 先用注册表解析（支持 slug / 名称 / 前缀 / 路径），再回到视图列表里取状态。
@@ -857,4 +867,4 @@ export function toolSchemas() {
   }))
 }
 
-export { downsampleList, pruneArtifacts }
+export { pruneArtifacts }

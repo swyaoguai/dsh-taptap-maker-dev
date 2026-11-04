@@ -740,6 +740,63 @@ async function main() {
     assert.deepEqual(real, first, '强制重扫应与缓存结果一致（本测试只锁行为，不锁内容）')
   })
 
+  await test('CLI 布尔开关不会吞掉后面的工程路径（--global <路径>）', async () => {
+    const { spawnSync } = await import('node:child_process')
+    const cliPath = path.join(ROOT, 'src/cocos/cli.mjs')
+    // 只跑到 usage 分支（不加 --yes）：关键是它把路径认成位置参数、
+    // 并且认出 --global，而不是把路径当成 --global 的值。
+    const result = spawnSync(process.execPath, [cliPath, 'install', '--global', projectA], {
+      encoding: 'utf8',
+      cwd: ROOT,
+    })
+    const text = `${result.stdout ?? ''}${result.stderr ?? ''}`
+    assert.match(text, /全局 builtin-extensions/, '--global 必须被识别为真（而不是被路径覆盖成字符串）')
+    assert.doesNotMatch(text, /D:\\/, 'usage 里不该出现被吞掉的路径')
+  })
+
+  await test('install --yes 后 --global 仍生效（布尔归一化）', async () => {
+    const { spawnSync } = await import('node:child_process')
+    const cliPath = path.join(ROOT, 'src/cocos/cli.mjs')
+    // --yes=false 应当当作「未确认」→ 只打印说明并退出 1，不会真的下载。
+    const result = spawnSync(process.execPath, [cliPath, 'install', projectA, '--yes=false'], {
+      encoding: 'utf8',
+      cwd: ROOT,
+    })
+    assert.equal(result.status, 1, '未确认时必须拒绝执行')
+    assert.match(`${result.stdout ?? ''}`, /确认后请加 --yes/, '应给出确认提示')
+  })
+
+  await test('同一工程能加载两份扩展时 doctor 要报出来', async () => {
+    const { doctor } = await load('src/cocos/install.mjs')
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-dup-'))
+    const projectDir = path.join(tmpRoot, 'dup-proj')
+    fs.mkdirSync(path.join(projectDir, 'assets'), { recursive: true })
+    fs.writeFileSync(path.join(projectDir, 'package.json'), JSON.stringify({ name: 'dup', creator: { version: '3.8.8' } }))
+    const writeExt = (dir) => {
+      fs.mkdirSync(dir, { recursive: true })
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'funplay-cocos-mcp', version: '0.7.0' }))
+    }
+    writeExt(path.join(projectDir, 'extensions', 'funplay-cocos-mcp'))
+    const report = await doctor({ projectPath: projectDir, dshHome: home })
+    assert.equal(report.installedScopes.length, 1, '只有工程级一份时不应报重复')
+    assert.equal(report.problems.some((line) => line.includes('同时加载')), false)
+
+    // 再放一份全局的（用 COCOS_USER_DIR 指向临时目录，别碰真实用户目录）
+    const fakeUser = fs.mkdtempSync(path.join(tmpRoot, 'cocos-user-'))
+    const previous = process.env.COCOS_USER_DIR
+    process.env.COCOS_USER_DIR = fakeUser
+    try {
+      writeExt(path.join(fakeUser, 'builtin-extensions', '3.8.8', 'funplay-cocos-mcp'))
+      const dup = await doctor({ projectPath: projectDir, dshHome: home })
+      if (dup.installedScopes.length > 1) {
+        assert.equal(dup.problems.some((line) => line.includes('同时加载')), true, '两份都要加载时必须报重复')
+      }
+    } finally {
+      if (previous === undefined) delete process.env.COCOS_USER_DIR
+      else process.env.COCOS_USER_DIR = previous
+    }
+  })
+
   await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-name-'))
     await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })
