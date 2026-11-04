@@ -131,14 +131,20 @@ export function workflowPolicyText({ gptLaneOn = true, defaultZaiduyuModel = '',
     '## 游戏开发工作流（dsh-game-forge 插件注入）',
     '',
     '本插件是**通用游戏开发工作流**插件，覆盖：立项/定玩法 → 原型 → 内容（关卡/战斗/经济/剧情）→ 美术与音频 → 手感打磨 → 测试修 bug → 上线提审。',
-    '**TapTap Maker（UrhoX + Lua）只是本项目支持的一条引擎链路**；Godot / Unity / Unreal / 网页（PixiJS、Canvas）同样适用，`godot-*` / `unity-*` / `unreal-*` / `pixijs-*` / `web-*` 这些 skill 不是摆设。',
+    '**TapTap Maker（UrhoX + Lua）只是本项目支持的一条引擎链路**；Godot / Unity / Unreal / Cocos Creator / 网页（PixiJS、Canvas）同样适用，`godot-*` / `unity-*` / `unreal-*` / `pixijs-*` / `web-*` / `cocos-*` 这些 skill 不是摆设。',
     '',
-    '**先判断引擎，再动手**：看工程特征决定用哪套 skill —— `.project/` + `scripts/main.lua` + `project.json` = TapTap Maker；`project.godot`；`*.unity` / `Assets/`；`*.uproject`；`package.json` 里有 `pixi.js` / 纯前端。',
+    // Cocos 必须排在这些特征前面：Cocos 工程同样有 `assets/` 与 `package.json`，
+    // 只按「package.json = 网页前端」判断会把它误判成 web 项目，然后拿 PixiJS 的
+    // 那套 API 去改 Cocos 场景。
+    '**先判断引擎，再动手**：看工程特征决定用哪套 skill —— `.project/` + `scripts/main.lua` + `project.json` = TapTap Maker；'
+      + '`package.json` 里 `creator.version` + `assets/` + `settings/`（或 `extensions/`）= **Cocos Creator**（用 `cocos-creator-mcp`，'
+      + '场景/资源走 `cocos_*` 工具，不要手改工程文件）；`project.godot`；`*.unity` / `Assets/`；`*.uproject`；'
+      + '`package.json` 里有 `pixi.js` / 纯前端 = 网页项目。',
     '判断不出来就问一句「这是哪个引擎的项目」，**不要默认按 Maker 处理**，也不要把 Maker 的 API 硬套到别的引擎上。',
     '',
     `**按进度和需求用 skill（你自己挑，不让用户挑）**：${skillCountText}，列表里只有简介，正文要用 \`skill\` 工具加载。`,
     '- 每一步开始前，按「项目做到哪一步了 + 用户这句话要干什么」挑 1~3 个最相关的加载，然后照着做；不确定挑哪个时先加载 `taptap-skill-router`（进度表 + 需求表）。',
-    '- 当前引擎专属的 skill 优先（Maker 项目就是 `taptap-maker-*`，Godot 项目就是 `godot-*`），通用设计 skill（`game-designer`、`level-design`、`game-feel` 等）补方法论。',
+    '- 当前引擎专属的 skill 优先（Maker 项目就是 `taptap-maker-*`，Cocos 项目就是 `cocos-creator-mcp`，Godot 项目就是 `godot-*`），通用设计 skill（`game-designer`、`level-design`、`game-feel` 等）补方法论。',
     '- 跨引擎对照是允许的：想问「Unity 里怎么做、这个引擎怎么对应」就加载那边的 skill 看思路，再落到当前引擎。借思路，别抄 API。',
     '- 换话题、进入新阶段时重新判断；当前步骤用不上的 skill 不加载，不要为了保险整类加载。',
     '- 遇到风格化 UI / 美术 / 系统玩法需求，先查是否有对应 skill，不要凭空编造；**不要编 skill 名字**，只加载列表里真实存在的。',

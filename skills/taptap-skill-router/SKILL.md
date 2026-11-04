@@ -15,7 +15,7 @@ skill 列表里只有名字和一句话简介，正文要用 `skill` 工具加�
 
 ## 怎么用
 
-1. 先判断**引擎**（TapTap Maker / Godot / Unity / Unreal / 网页 —— 看下面「其他引擎」一节的线索）。
+1. 先判断**引擎**（TapTap Maker / Cocos Creator / Godot / Unity / Unreal / 网页 —— 看下面「其他引擎」一节的线索）。
 2. 再判断**项目进度**（看下面「按进度」）和**用户这句话要干什么**（看「按需求」）。
 3. 两张表交叉，挑最贴近的 1~3 个加载；**当前引擎专属的优先**（Maker 项目就是 `taptap-maker-*`，Godot 项目就是 `godot-*`），
    通用设计 skill（`game-designer`、`level-design`、`game-feel` 等）补方法论。
@@ -64,13 +64,16 @@ skill 列表里只有名字和一句话简介，正文要用 `skill` 工具加�
 | 埋点、数据统计 | `telemetry-instrumentation` | — |
 | 排期、风险 | `milestone-planning` | `risk-register` |
 | 给插件加 / 改 skill | `skill-authoring` | `external-skills-catalog` |
+| 用 Cocos Creator 做游戏（改场景/预制体/资源/构建） | `cocos-creator-mcp` | `game-ui-ux`、`sprite-pipeline`、`game-feel` |
 
 ## 其他引擎的 skill 什么时候用
 
 Maker 是 UrhoX + Lua，`godot-*`、`unity-*`、`unreal-*`、`pixijs-*`、`web-*` 的 API 不能直接搬进 Maker。
 但它们**不是废的**，下面这些情况就加载对应的：
 
-- 用户的项目本身就是那个引擎（看到 `project.godot`、`*.unity`/`Assets/`、`*.uproject`、`package.json` 里有 `pixi.js`）。
+- 用户的项目本身就是那个引擎（看到 `project.godot`、`*.unity`/`Assets/`、`*.uproject`、
+  `package.json` 里有 `pixi.js`；或 `package.json` 有 `creator.version` + `assets/`/`settings/` = **Cocos Creator**，
+  这时用 `cocos-creator-mcp`，场景与资源走 `cocos_*` 工具而不是手改文件）。
 - 用户问「这个在 Unity / Godot 里怎么做，Maker 里怎么对应」——加载那边的 skill 看思路，再用 `taptap-maker-*` 落地。
 - 做网页小游戏、网页版工具或 H5 预览——用 `web-*` 和 `pixijs-*`。
 - Maker 的 skill 没覆盖、而别的引擎 skill 里有可借鉴的通用做法（比如 `unreal-gas-patterns` 的技能系统拆法、`godot-signals-patterns` 的事件解耦思路）。借思路，别抄 API。
