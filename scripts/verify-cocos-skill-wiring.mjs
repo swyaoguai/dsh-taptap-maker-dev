@@ -192,14 +192,17 @@ async function main() {
   // ── 5. 命令入口（agent 不加载 skill 时的兜底） ──────────────
   await test('/game-cocos 帮助文本列出的子命令都真实可执行', async () => {
     const { runCocosCommand } = await load('src/cocos/command.mjs')
-    const home = fs.mkdtempSync(path.join(tmpRoot, 'cmd-'))
-    const help = await runCocosCommand('', { home, config: {} })
+    const started = Date.now()
+    const help = await runCocosCommand('', { home: fs.mkdtempSync(path.join(tmpRoot, 'cmd-')), config: {} })
+    const elapsed = Date.now() - started
     assert.equal(help.kind, 'success')
+    // 不带参数必须只打印用法：不扫进程表（也就不会被扫描超时拖成失败）
+    assert.ok(elapsed < 3000, `不带参数应在 3s 内返回，实际 ${elapsed}ms`)
     for (const sub of ['list', 'status', 'install', 'doctor', 'register', 'unregister', 'open', 'build']) {
       assert.ok(help.text.includes(sub), `帮助文本缺少子命令 ${sub}`)
     }
     // 未知子命令要给错误 + 用法，而不是静默成功
-    const unknown = await runCocosCommand('nonsense', { home, config: {} })
+    const unknown = await runCocosCommand('nonsense', { home: fs.mkdtempSync(path.join(tmpRoot, 'cmd2-')), config: {} })
     assert.equal(unknown.kind, 'error')
     assert.match(unknown.text, /未知子命令/)
   })

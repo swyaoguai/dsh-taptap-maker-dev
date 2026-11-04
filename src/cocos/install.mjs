@@ -131,7 +131,7 @@ export function ensureProjectConfig(projectPath, { force = false } = {}) {
   return { file, written: true, config }
 }
 
-/** 取最新 release 信息（网络失败返回 null，由调用方给出手动指引）。 */
+/** 取最新 release 信息（网络失败返回 null，由调用方给出手动指引；限流则明确抛出）。 */
 export async function fetchLatestRelease({ timeoutMs = 20000 } = {}) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -140,7 +140,23 @@ export async function fetchLatestRelease({ timeoutMs = 20000 } = {}) {
       headers: { 'user-agent': 'dsh-game-forge', accept: 'application/vnd.github+json' },
       signal: controller.signal,
     })
-    if (!response.ok) return null
+    if (!response.ok) {
+      // 区分「限流」与「网络不通」：GitHub 匿名 API 每小时 60 次，CI 里连跑几次
+      // 就会 403；笼统说「网络/代理问题」会让人去查网络，白折腾。
+      if (response.status === 403 || response.status === 429) {
+        const remaining = response.headers.get('x-ratelimit-remaining')
+        const reset = response.headers.get('x-ratelimit-reset')
+        const resetAt = reset ? new Date(Number(reset) * 1000).toISOString() : '未知'
+        throw new CocosMcpError(
+          `GitHub API 限流（HTTP ${response.status}，剩余 ${remaining ?? '?'}，重置时间 ${resetAt}）。`
+          + '这是匿名调用的每小时配额，不是网络故障。稍后再试，或手动安装：\n'
+          + `  下载 https://github.com/${REPO}/releases 里的 Funplay.CocosMcp.v<版本>.zip，`
+          + `解压后把 ${EXTENSION_DIR_NAME}/ 放进工程的 extensions/`,
+          { code: 'RELEASE_RATE_LIMITED' },
+        )
+      }
+      return null
+    }
     const body = await response.json()
     const assets = Array.isArray(body.assets) ? body.assets : []
     const zip = assets.find((asset) => /\.zip$/i.test(String(asset.name ?? '')))
@@ -152,7 +168,9 @@ export async function fetchLatestRelease({ timeoutMs = 20000 } = {}) {
       sums: sums ? { name: sums.name, url: sums.browser_download_url } : null,
       notes: String(body.body ?? '').slice(0, 2000),
     }
-  } catch {
+  } catch (error) {
+    // 限流错误必须原样上抛（它带着可操作的指引）；其余网络/解析错误统一降级为 null。
+    if (error instanceof CocosMcpError) throw error
     return null
   } finally {
     clearTimeout(timer)

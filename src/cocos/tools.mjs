@@ -125,6 +125,12 @@ function persistImages(result, { dshHome, slug, scope }) {
       out.push(file)
     } catch { /* 写不进去就不报路径，绝不给假路径 */ }
   })
+  if (out.length > 0) {
+    // 截图是诊断产物：agent 反复「改一下看一眼」能产出几百张，不清理会一直涨。
+    // 只删我们自己命名的截图，保留更大的上限（用户可能还要回看最近几张）。
+    const shotDir = shotsDir(dshHome)
+    pruneArtifacts(shotDir, { keep: 120, match: /-(scene|game|preview)-\d{4}-.*\.(png|jpg|webp)$/ })
+  }
   return out
 }
 

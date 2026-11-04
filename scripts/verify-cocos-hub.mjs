@@ -173,7 +173,7 @@ async function main() {
   const { acquireBuildSlot, releaseBuildSlot, buildSlotsStatus } = await load('src/cocos/locks.mjs')
   const { TOOL_INDEX } = await load('src/cocos/tools.mjs')
   const { upsertMcpRow, removeMcpRow, findRowBlock, renderRow } = await load('src/cocos/register.mjs')
-  const { upsertProject, resolveProjectRef, listProjects } = await load('src/cocos/registry.mjs')
+  const { upsertProject, resolveProjectRef, listProjects, readRegistry } = await load('src/cocos/registry.mjs')
   const { tokenize } = await load('src/cocos/command.mjs')
   const { installExtension } = await load('src/cocos/install.mjs')
 
@@ -795,6 +795,36 @@ async function main() {
       if (previous === undefined) delete process.env.COCOS_USER_DIR
       else process.env.COCOS_USER_DIR = previous
     }
+  })
+
+  await test('注册表：损坏副本只留最近 3 份（不会每次读都复制一份）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-corrupt-'))
+    const regFile = path.join(home, 'game-forge', 'cocos', 'projects.json')
+    fs.mkdirSync(path.dirname(regFile), { recursive: true })
+    fs.writeFileSync(regFile, '{ broken json')
+    for (let i = 0; i < 10; i += 1) readRegistry(home)
+    const copies = fs.readdirSync(path.dirname(regFile)).filter((name) => name.includes('.corrupt-'))
+    assert.equal(copies.length, 3, `损坏副本应只留 3 份，实际 ${copies.length}`)
+    assert.deepEqual(readRegistry(home).projects, {}, '损坏时读出来是空表，不抛错')
+  })
+
+  await test('注册表：磁盘版本比插件新时拒绝写入（不静默降级丢字段）', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-v2-'))
+    const regFile = path.join(home, 'game-forge', 'cocos', 'projects.json')
+    fs.mkdirSync(path.dirname(regFile), { recursive: true })
+    const newer = JSON.stringify({ version: 2, projects: { x: { slug: 'x', newField: 1 } } })
+    fs.writeFileSync(regFile, newer)
+    assert.equal(readRegistry(home).version, 2, '读得到版本号')
+    let error = null
+    try {
+      await upsertProject(home, { path: projectA, name: 'game-a' })
+    } catch (caught) {
+      error = caught
+    }
+    assert.ok(error !== null, '必须拒绝写回旧版本')
+    assert.match(String(error.message), /注册表版本是 2/)
+    // 关键：原文件一个字节都不能被改坏
+    assert.equal(fs.readFileSync(regFile, 'utf8'), newer)
   })
 
   await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {

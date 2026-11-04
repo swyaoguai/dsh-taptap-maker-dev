@@ -23,11 +23,14 @@ import { locksDir } from './paths.mjs'
 
 const EMPTY = Object.freeze({ version: 1, projects: {} })
 
+/** 当前代码能读写的注册表版本。 */
+export const REGISTRY_VERSION = 1
+
 /** 进程内写队列：注册表读-改-写必须串行，否则并发 upsert 会丢更新。 */
 let writeChain = Promise.resolve()
 
 function emptyRegistry() {
-  return { version: 1, projects: {} }
+  return { version: REGISTRY_VERSION, projects: {} }
 }
 
 /** 读取注册表；文件缺失或损坏都退回空表（并保留损坏文件副本以便排查）。 */
@@ -45,22 +48,62 @@ export function readRegistry(dshHome) {
     const projects = parsed.projects !== null && typeof parsed.projects === 'object' && !Array.isArray(parsed.projects)
       ? parsed.projects
       : {}
-    return { version: 1, projects, ...(parsed.updatedAt ? { updatedAt: parsed.updatedAt } : {}) }
+    const version = Number.isFinite(Number(parsed.version)) ? Number(parsed.version) : REGISTRY_VERSION
+    return { version, projects, ...(parsed.updatedAt ? { updatedAt: parsed.updatedAt } : {}) }
   } catch {
-    // 损坏：别删用户数据，留个副本再重建。
+    // 损坏：别删用户数据，留个副本再重建（副本只留最近几份，否则每次读都复制一份）。
     try {
-      fs.writeFileSync(`${file}.corrupt-${Date.now()}`, text)
+      const stamp = Date.now()
+      fs.writeFileSync(`${file}.corrupt-${stamp}`, text)
+      pruneCorruptCopies(file)
     } catch { /* 复制失败就算了 */ }
     return emptyRegistry()
   }
 }
 
+/** 只保留最近 3 份损坏副本：readRegistry 每次调用都可能触发复制，不清理会无限增长。 */
+function pruneCorruptCopies(file) {
+  const dir = path.dirname(file)
+  const base = path.basename(file)
+  let entries
+  try {
+    entries = fs.readdirSync(dir)
+  } catch {
+    return
+  }
+  const copies = entries
+    .filter((name) => name.startsWith(`${base}.corrupt-`))
+    .map((name) => {
+      const full = path.join(dir, name)
+      try {
+        return { full, at: fs.statSync(full).mtimeMs }
+      } catch {
+        return null
+      }
+    })
+    .filter((item) => item !== null)
+    .sort((a, b) => b.at - a.at)
+  for (const item of copies.slice(3)) {
+    try { fs.unlinkSync(item.full) } catch { /* 下次再说 */ }
+  }
+}
+
 /** 原子写：临时文件 + rename。 */
 export function writeRegistry(dshHome, data) {
+  // 拒绝「降级写」：如果磁盘上是更新版本写的（version > 我们支持的），
+  // 我们读得出 projects 却写回 version 1，会静默丢掉新版本才有的字段。
+  // 宁可直接报错让用户升级插件，也不要悄悄把数据改坏。
+  const onDisk = readRegistry(dshHome)
+  if (Number(onDisk.version) > REGISTRY_VERSION) {
+    throw new Error(
+      `注册表版本是 ${onDisk.version}，当前插件只支持到 ${REGISTRY_VERSION}。`
+      + '请升级 dsh-game-forge，避免把它写回旧格式（会丢字段）。',
+    )
+  }
   const dir = cocosRoot(dshHome)
   const file = registryPath(dshHome)
   const payload = {
-    version: 1,
+    version: REGISTRY_VERSION,
     projects: data.projects ?? {},
     updatedAt: new Date().toISOString(),
   }

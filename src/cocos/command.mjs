@@ -81,7 +81,7 @@ function usageText() {
   return [
     'Cocos 集成（多项目安全）：',
     '',
-    '  /game-cocos                     看现状（等同 list）',
+    '  /game-cocos                     显示本帮助（不扫描进程）',
     '  /game-cocos list                列出已登记 / 正在运行的项目',
     '  /game-cocos status <项目>        单个项目详情（端口、身份、锁、构建槽位）',
     '  /game-cocos install <项目目录> [--global] [--yes]',
@@ -108,8 +108,15 @@ export async function runCocosCommand(raw, ctx) {
   const { flags, values, positional } = parseTokens(tokens.slice(1))
   const home = ctx.home
 
+  // ⚠️ 不带参数（或 help）只打印用法，**不扫进程表**：
+  // 以前 '' 和 'list' 走同一分支，连「帮我看看怎么用」都要先做一次进程扫描
+  // （PowerShell，1~3 秒，负载高时还会超时），超时了连用法文本都看不到。
+  if (sub === '' || sub === 'help' || sub === '-h' || sub === '--help') {
+    return { kind: 'success', text: usageText() }
+  }
+
   try {
-    if (sub === '' || sub === 'list' || sub === 'status') {
+    if (sub === 'list' || sub === 'status') {
       if (sub === 'status' && positional[0]) {
         const overview = await projectOverview({ dshHome: home, cacheMs: 0, buildSlotLimit: ctx.config?.cocos?.buildSlots })
         const hit = overview.projects.find((item) => item.slug === positional[0]
