@@ -207,10 +207,15 @@ export function groupByProject(discovery) {
   })
 }
 
-/** 在运行中的实例里按项目路径找一组（找不到返回 null）。 */
-export function findRunningProject(discovery, projectPath) {
-  const groups = groupByProject(discovery)
-  return groups.find((group) => sameProjectPath(group.projectPath, projectPath)) ?? null
+/**
+ * 在运行中的实例里按项目路径找一组（找不到返回 null）。
+ *
+ * `groups` 可传入已算好的分组：`projectOverview` 会遍历所有已登记项目，
+ * 每次都重新 groupByProject 是白白重复 O(n) 的工作。
+ */
+export function findRunningProject(discovery, projectPath, groups = null) {
+  const list = groups ?? groupByProject(discovery)
+  return list.find((group) => sameProjectPath(group.projectPath, projectPath)) ?? null
 }
 
 /** 本机可能存在的 Cocos Creator 可执行文件（用于启动编辑器/命令行构建）。 */

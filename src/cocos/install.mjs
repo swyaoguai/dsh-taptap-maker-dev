@@ -210,12 +210,21 @@ function expandZip(zipFile, destDir) {
 function locateExtensionRoot(dir) {
   const direct = path.join(dir, 'package.json')
   if (fs.existsSync(direct)) return dir
-  const entries = fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory())
-  for (const entry of entries) {
-    const candidate = path.join(dir, entry.name)
-    if (fs.existsSync(path.join(candidate, 'package.json'))) return candidate
-  }
-  return null
+  const candidates = fs.readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(dir, entry.name))
+    .filter((candidate) => fs.existsSync(path.join(candidate, 'package.json')))
+  if (candidates.length === 0) return null
+  if (candidates.length === 1) return candidates[0]
+  // 多个带 package.json 的目录（例如顺带打进去的示例/文档工程）：
+  // 必须挑对，否则会把文档工程拷成扩展。优先认名字与入口文件。
+  const byName = candidates.find((candidate) => {
+    const pkg = readJson(path.join(candidate, 'package.json'))
+    return pkg !== null && (pkg.name === EXTENSION_DIR_NAME || typeof pkg.mcpName === 'string')
+  })
+  if (byName) return byName
+  const byEntry = candidates.find((candidate) => fs.existsSync(path.join(candidate, 'browser.js')))
+  return byEntry ?? candidates[0]
 }
 
 function copyDir(from, to) {
@@ -318,24 +327,42 @@ export async function installExtension({
   }
 
   const staging = path.join(cache, `staging-${Date.now()}`)
-  fs.mkdirSync(staging, { recursive: true })
-  expandZip(zipFile, staging)
-  const root = locateExtensionRoot(staging)
-  if (root === null) {
-    throw new CocosMcpError('解压后没找到 package.json，压缩包结构可能变了。', { code: 'BAD_ARCHIVE' })
-  }
-
-  // 覆盖前把旧目录挪开（不直接删，留一份可回滚）。
-  if (fs.existsSync(targetDir)) {
-    const backup = `${targetDir}.bak-${Date.now()}`
-    try {
-      fs.renameSync(targetDir, backup)
-    } catch {
-      fs.rmSync(targetDir, { recursive: true, force: true })
+  let backupDir = null
+  try {
+    fs.mkdirSync(staging, { recursive: true })
+    expandZip(zipFile, staging)
+    const root = locateExtensionRoot(staging)
+    if (root === null) {
+      throw new CocosMcpError('解压后没找到 package.json，压缩包结构可能变了。', { code: 'BAD_ARCHIVE' })
     }
+
+    // 覆盖前把旧目录挪开（不直接删，留一份可回滚）。
+    // ⚠️ 备份必须放到 extensions/ **外面**：Cocos 会把 extensions/ 下每个
+    // 带 package.json 的目录都当扩展加载，`extensions/funplay-cocos-mcp.bak-…`
+    // 等于给编辑器塞了一个幽灵扩展（旧版本和新版本同时注册、菜单重复）。
+    if (fs.existsSync(targetDir)) {
+      backupDir = path.join(cache, `backup-${path.basename(targetDir)}-${Date.now()}`)
+      try {
+        fs.renameSync(targetDir, backupDir)
+      } catch {
+        // rename 失败（跨盘等）才降级为原地删除 —— 此时没有可回滚副本，如实报告。
+        fs.rmSync(targetDir, { recursive: true, force: true })
+        backupDir = null
+      }
+    }
+    try {
+      copyDir(root, targetDir)
+    } catch (error) {
+      // 拷贝失败要把旧版本还回去，不能让工程停在「扩展被删了一半」的状态。
+      if (backupDir !== null) {
+        try { fs.rmSync(targetDir, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
+        try { fs.renameSync(backupDir, targetDir) } catch { /* 还原失败就只能按原错误上报 */ }
+      }
+      throw error
+    }
+  } finally {
+    try { fs.rmSync(staging, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
   }
-  copyDir(root, targetDir)
-  fs.rmSync(staging, { recursive: true, force: true })
 
   const configState = ensureProjectConfig(normal)
   return {
@@ -346,6 +373,7 @@ export async function installExtension({
     tag: release.tag,
     bytes: buffer.length,
     checksum: { expected: expected || null, actual },
+    backupDir: backupDir ?? undefined,
     config: { file: configState.file, written: configState.written, config: configState.config },
     note: global
       ? '已装到全局 builtin-extensions；所有用同一 Creator 版本的项目都会加载它。'

@@ -635,6 +635,29 @@ async function main() {
     assert.equal(error.code, 'NOT_COCOS_PROJECT')
   })
 
+  await test('artifact 清理只保留最近 N 个，且不误删别的文件', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-prune-'))
+    const dir = path.join(home, 'game-forge', 'cocos', 'shots')
+    fs.mkdirSync(dir, { recursive: true })
+    // 造 50 份构建日志（旧的）+ 3 份截图 + 1 份别人的文件。
+    for (let i = 0; i < 50; i += 1) {
+      const file = path.join(dir, `game-a-build-${1000 + i}.log`)
+      fs.writeFileSync(file, 'x')
+      const old = new Date(Date.now() - (100 - i) * 60000)
+      fs.utimesSync(file, old, old)
+    }
+    for (let i = 0; i < 3; i += 1) fs.writeFileSync(path.join(dir, `shot-${i}.png`), 'y')
+    fs.writeFileSync(path.join(dir, 'notes.txt'), 'keep me')
+
+    const { pruneArtifacts } = await load('src/cocos/tools.mjs')
+    const removed = pruneArtifacts(dir, { keep: 5, match: /-build-\d+\.log$/ })
+    assert.equal(removed, 45, '50 份日志保留 5 份，应删 45 份')
+    const left = fs.readdirSync(dir)
+    assert.equal(left.filter((name) => /-build-\d+\.log$/.test(name)).length, 5)
+    assert.equal(left.filter((name) => name.endsWith('.png')).length, 3, '截图不能被当成日志删掉')
+    assert.ok(left.includes('notes.txt'), '不匹配的文件必须原样保留')
+  })
+
   await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-name-'))
     await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })

@@ -17,9 +17,10 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { spawn } from 'node:child_process'
 import { CocosMcpError } from './mcp-http.mjs'
-import { callProjectTool, connectTarget, projectOverview, readProjectMeta, resolveTarget } from './router.mjs'
+import { connectTarget, projectOverview, readProjectMeta, resolveTarget } from './router.mjs'
+import { upsertProject } from './registry.mjs'
 import { acquireFileLock, acquireBuildSlot, makeOwner, projectLockPath, releaseBuildSlot, releaseFileLock, touchFileLock, withProjectLock } from './locks.mjs'
-import { discoverLive, findCreatorExecutables, invalidateDiscoveryCache } from './discover.mjs'
+import { creatorVersionFromExe, discoverLive, findCreatorExecutables, invalidateDiscoveryCache } from './discover.mjs'
 import { downsampleList, sleep } from './util.mjs'
 import { sameProjectPath, shotsDir } from './paths.mjs'
 
@@ -101,7 +102,12 @@ function contentToText(result) {
   return parts.join('\n')
 }
 
-/** 从上游结果里捞出图片（base64），落盘并返回路径。 */
+/**
+ * 从上游结果里捞出图片（base64），落盘并返回路径。
+ *
+ * 落盘而不是塞进返回值：一张截图 base64 动辄几百 KB~几 MB，进对话上下文
+ * 会直接把窗口撑爆（而且 agent 也读不了 base64）。这里只给路径。
+ */
 function persistImages(result, { dshHome, slug, scope }) {
   const content = Array.isArray(result?.content) ? result.content : []
   const out = []
@@ -117,6 +123,39 @@ function persistImages(result, { dshHome, slug, scope }) {
     } catch { /* 写不进去就不报路径，绝不给假路径 */ }
   })
   return out
+}
+
+/** 日志/截图目录保留上限：这些是诊断产物，不清理会无限增长。 */
+const ARTIFACT_KEEP = 40
+
+/** 按修改时间保留最近 N 个文件，其余删除（只动我们自己的产物目录）。 */
+function pruneArtifacts(dir, { keep = ARTIFACT_KEEP, match = null } = {}) {
+  let entries
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true }).filter((entry) => entry.isFile())
+  } catch {
+    return 0
+  }
+  const files = entries
+    .filter((entry) => (match === null ? true : match.test(entry.name)))
+    .map((entry) => {
+      const full = path.join(dir, entry.name)
+      try {
+        return { full, at: fs.statSync(full).mtimeMs }
+      } catch {
+        return null
+      }
+    })
+    .filter((item) => item !== null)
+    .sort((a, b) => b.at - a.at)
+  let removed = 0
+  for (const item of files.slice(keep)) {
+    try {
+      fs.unlinkSync(item.full)
+      removed += 1
+    } catch { /* 被占用就下次再说 */ }
+  }
+  return removed
 }
 
 /**
@@ -268,7 +307,10 @@ export const TOOL_DEFINITIONS = [
         return { alreadyRunning: true, slug: target.entry.slug, port: target.health.port, path: target.entry.path }
       }
       const exe = await resolveCreatorExe({ dshHome: ctx.dshHome, entry: target.entry })
-      const logFile = path.join(shotsDir(ctx.dshHome), `${target.entry.slug}-editor.log`)
+      const editorShotDir = shotsDir(ctx.dshHome)
+      // 每次启动只留一份编辑器日志；产物目录整体按时间保留最近 N 个。
+      pruneArtifacts(editorShotDir, { match: /-editor\.log$/ })
+      const logFile = path.join(editorShotDir, `${target.entry.slug}-editor.log`)
       let spawnError = null
       spawnCreator(exe, ['--project', target.entry.path], {
         logFile,
@@ -285,6 +327,16 @@ export const TOOL_DEFINITIONS = [
         const running = latest.instances.find((instance) => sameProjectPath(instance.projectPath, target.entry.path))
         const health = running?.mcpHealths?.[0]
         if (health) {
+          // 编辑器起来了就登记：下次 `cocos_projects` 能直接列出（含正确的
+          // creatorVersion，之前要等下一次 status 调用才补上）。
+          try {
+            await upsertProject(ctx.dshHome, {
+              slug: target.entry.slug,
+              name: target.entry.name,
+              path: target.entry.path,
+              creatorVersion: creatorVersionFromExe(exe) || target.entry.creatorVersion || '',
+            })
+          } catch { /* 登记失败不影响「已启动」这个事实 */ }
           return {
             started: true,
             slug: target.entry.slug,
@@ -588,7 +640,10 @@ export const TOOL_DEFINITIONS = [
         releaseFileLock(lockFile, owner)
         releaseBuildSlot(slot.file, owner)
       }
-      const logFile = path.join(shotsDir(ctx.dshHome), `${target.entry.slug}-build-${Date.now()}.log`)
+      const buildShotDir = shotsDir(ctx.dshHome)
+      // 每次构建留一份带时间戳的日志；目录只保留最近 N 份，否则会一直涨。
+      pruneArtifacts(buildShotDir, { match: /-build-\d+\.log$/ })
+      const logFile = path.join(buildShotDir, `${target.entry.slug}-build-${Date.now()}.log`)
       let buildError = null
       let child
       try {
@@ -772,4 +827,4 @@ export function toolSchemas() {
   }))
 }
 
-export { downsampleList }
+export { downsampleList, pruneArtifacts }

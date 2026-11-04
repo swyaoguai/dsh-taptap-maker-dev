@@ -260,15 +260,16 @@ export async function callProjectTool({
  *
  * 这是 `cocos_projects` / `cocos_status` 的数据源，也是设置页要展示的东西。
  */
-export async function projectOverview({ dshHome, cacheMs, buildSlotLimit = 1 } = {}) {
-  const discovery = await discoverLive({ cacheMs })
-  const groups = groupByProject(discovery)
+export async function projectOverview({ dshHome, cacheMs, buildSlotLimit = 1, discovery = null } = {}) {
+  const disc = discovery ?? await discoverLive({ cacheMs })
+  const groups = groupByProject(disc)
   const registered = listProjects(dshHome)
   const seen = new Set()
   const views = []
 
   for (const entry of registered) {
-    const group = findRunningProject(discovery, entry.path)
+    // 分组结果复用：登记的项目一多，逐个重新分组是纯粹的重复劳动。
+    const group = findRunningProject(disc, entry.path, groups)
     const health = group === null ? null : pickHealth(group)
     seen.add(entry.slug)
     views.push({
@@ -324,7 +325,7 @@ export async function projectOverview({ dshHome, cacheMs, buildSlotLimit = 1 } =
     projects: views.sort((a, b) => String(a.name).localeCompare(String(b.name), 'zh')),
     buildSlots: buildSlotsStatus(dshHome, buildSlotLimit),
     buildSlotLimit: Math.max(1, Number(buildSlotLimit) || 1),
-    probedAt: discovery.probedAt,
-    platform: discovery.platform,
+    probedAt: disc.probedAt,
+    platform: disc.platform,
   }
 }
