@@ -140,7 +140,17 @@ function validateArgs(def, args) {
   return null
 }
 
-async function handleToolCall(params) {
+/**
+ * 在飞的工具调用（按 JSON-RPC id 记），用于响应客户端的 `notifications/cancelled`。
+ *
+ * 为什么要做：`cocos_open` 会等最多 120 秒、`cocos_build` 可能等更久，而且
+ * **写操作全程持有项目写锁**。客户端取消（用户按了停止）后如果服务端继续跑，
+ * 锁会被白白占到操作结束，别的会话只能干等。收到取消就 abort：
+ * 工具在轮询/等待的间隙会看到 signal 并提前退出，finally 里照常放锁。
+ */
+const inFlight = new Map()
+
+async function handleToolCall(params, callId) {
   const name = params?.name
   const def = TOOL_INDEX.get(name)
   if (!def) {
@@ -152,13 +162,34 @@ async function handleToolCall(params) {
     log(`工具 ${name} 参数被拒：${invalid}`)
     return toolError(new Error(invalid))
   }
+  const controller = new AbortController()
+  if (callId !== undefined && callId !== null) inFlight.set(callId, controller)
   try {
-    const value = await def.handler(args, { dshHome, sessionId, config, log })
+    const value = await def.handler(args, { dshHome, sessionId, config, log, signal: controller.signal })
     return toolResult(value)
   } catch (error) {
+    if (controller.signal.aborted) {
+      log(`工具 ${name} 已被客户端取消`)
+      return toolError(new Error(`工具 ${name} 已被取消（客户端取消请求）。没有遗留副作用：写锁已在 finally 中释放。`))
+    }
     log(`工具 ${name} 失败：${errorText(error)}`)
     return toolError(error)
+  } finally {
+    if (callId !== undefined && callId !== null) inFlight.delete(callId)
   }
+}
+
+/** 处理 `notifications/cancelled`：abort 对应的在飞调用。 */
+function handleCancelled(params) {
+  const requestId = params?.requestId
+  if (requestId === undefined || requestId === null) return false
+  const controller = inFlight.get(requestId)
+  if (controller === undefined) return false
+  try {
+    controller.abort()
+  } catch { /* 已经 abort 过 */ }
+  log(`收到取消：requestId=${requestId}`)
+  return true
 }
 
 async function handleResourcesList() {
@@ -204,7 +235,8 @@ async function dispatch(message) {
   const isNotification = id === undefined || id === null
 
   if (isNotification) {
-    // 通知（notifications/initialized 等）不需要响应。
+    // 通知不需要响应，但 `notifications/cancelled` 有副作用：必须真的停掉在飞调用。
+    if (method === 'notifications/cancelled') handleCancelled(params)
     return
   }
 
@@ -233,7 +265,7 @@ async function dispatch(message) {
       result(id, { tools: toolSchemas() })
       return
     case 'tools/call': {
-      const outcome = await handleToolCall(params)
+      const outcome = await handleToolCall(params, id)
       result(id, outcome)
       return
     }

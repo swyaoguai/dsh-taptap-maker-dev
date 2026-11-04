@@ -323,6 +323,11 @@ export const TOOL_DEFINITIONS = [
       const deadline = Date.now() + Math.max(5000, Number(args.wait_ms) || 120000)
       while (Date.now() < deadline) {
         await sleep(1500)
+        // 客户端取消（用户按停止）要能立刻退出等待，否则这条工具会一直占着
+        // 这条调用链（以及它持有的任何锁）直到超时。
+        if (ctx.signal?.aborted) {
+          throw new CocosMcpError('等待编辑器启动已被客户端取消。', { code: 'CANCELLED' })
+        }
         if (spawnError !== null) {
           throw new CocosMcpError(`启动编辑器失败：${spawnError.message ?? spawnError}（exe: ${exe}）`, { code: 'SPAWN_FAILED' })
         }
@@ -698,6 +703,7 @@ export const TOOL_DEFINITIONS = [
       const deadline = Date.now() + waitMs
       let exitCode = null
       let timedOut = false
+      let cancelled = false
       await new Promise((resolve) => {
         let poll = null
         const finish = (code) => {
@@ -707,12 +713,17 @@ export const TOOL_DEFINITIONS = [
         }
         child.on('exit', (code) => finish(code))
         child.on('error', () => finish(null))
+        // 客户端取消：停止等待，但构建进程继续跑（它是 detached 的独立进程），
+        // 锁按「超时」那条路径移交给看门狗 —— 不能在这里放锁。
+        const onAbort = () => { cancelled = true; finish(null) }
+        if (ctx.signal?.aborted) onAbort()
+        else ctx.signal?.addEventListener?.('abort', onAbort, { once: true })
         poll = setInterval(() => {
           if (Date.now() > deadline) { timedOut = true; finish(null) }
         }, 1000)
         poll.unref?.()
       })
-      if (timedOut) {
+      if (timedOut || cancelled) {
         // 超时 ≠ 构建结束：进程还在写 build/ 与 library/。**绝不能**在这个状态
         // 放掉项目锁——那等于告诉其它会话「可以安全改场景了」，而工程此刻正被
         // 构建进程写。把锁移交给后台看门狗，进程真正退出才释放。
@@ -732,12 +743,16 @@ export const TOOL_DEFINITIONS = [
         return {
           ...base,
           waiting: true,
-          timedOut: true,
+          timedOut,
+          cancelled,
           exitCode: null,
           finished: false,
           logTail: tail,
-          note: `等待 ${Math.round(waitMs / 1000)}s 后超时，但构建进程（pid ${child.pid}）还在跑。`
-            + '项目写锁保留到构建真正结束；期间该项目不能改场景/资源。',
+          note: cancelled
+            ? `等待已被客户端取消，但构建进程（pid ${child.pid}）还在跑。`
+              + '项目写锁保留到构建真正结束；期间该项目不能改场景/资源。'
+            : `等待 ${Math.round(waitMs / 1000)}s 后超时，但构建进程（pid ${child.pid}）还在跑。`
+              + '项目写锁保留到构建真正结束；期间该项目不能改场景/资源。',
         }
       }
       releaseAll()

@@ -673,6 +673,44 @@ async function main() {
     assert.notEqual(pickCreatorExecutable(candidates, '3.8.8'), candidates[0])
   })
 
+  await test('isUsableNodePath 排除应用商店存根与不存在的路径', async () => {
+    const { isUsableNodePath } = await load('src/cocos/register.mjs')
+    // Windows 上 `where node` 常先返回 0 字节存根，拿它当 MCP command 会立刻退出。
+    assert.equal(isUsableNodePath('C:\\Users\\x\\AppData\\Local\\Microsoft\\WindowsApps\\node.exe'), false)
+    assert.equal(isUsableNodePath('/home/x/.local/share/WindowsApps/node'), false)
+    assert.equal(isUsableNodePath('C:\\definitely\\missing\\node.exe'), false)
+    assert.equal(isUsableNodePath(''), false)
+    assert.equal(isUsableNodePath(null), false)
+    // 真正的 node 可执行文件应当可用。
+    assert.equal(isUsableNodePath(process.execPath), true)
+  })
+
+  await test('客户端取消：cocos_open 的等待循环会被 abort 中断', async () => {
+    const home = fs.mkdtempSync(path.join(tmpRoot, 'home-cancel-'))
+    const projectDir = path.join(tmpRoot, 'cancel-proj')
+    fs.mkdirSync(path.join(projectDir, 'assets'), { recursive: true })
+    fs.writeFileSync(path.join(projectDir, 'package.json'), JSON.stringify({ name: 'cancel-proj', creator: { version: '3.8.8' } }))
+    await upsertProject(home, { path: projectDir, name: 'cancel-proj', creatorVersion: '3.8.8' })
+    const controller = new AbortController()
+    // 没有任何在跑实例 → cocos_open 会进入「启动后等待」的循环；用 abort 打断它。
+    const emptyDiscovery = { instances: [], probedAt: Date.now(), platform: process.platform }
+    const promise = TOOL_INDEX.get('cocos_open').handler(
+      { project: projectSlug(projectDir), wait_ms: 60000, creator_exe: process.execPath },
+      { dshHome: home, config: {}, sessionId: 'verify', discovery: emptyDiscovery, signal: controller.signal },
+    )
+    setTimeout(() => controller.abort(), 300)
+    let error = null
+    try {
+      await promise
+    } catch (caught) {
+      error = caught
+    }
+    // 要么被取消（CANCELLED），要么因为 node 不接受 --project 而 SPAWN_FAILED；
+    // 关键是**不能在 60s 等待里挂住**。
+    assert.ok(error !== null, 'abort 后应尽快结束并抛错')
+    assert.ok(['CANCELLED', 'SPAWN_FAILED'].includes(error.code), `实际错误码：${error.code} ${error.message}`)
+  })
+
   await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-name-'))
     await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })

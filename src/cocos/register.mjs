@@ -237,12 +237,35 @@ export function resolveNodeBin() {
     if (which.status === 0) push(String(which.stdout ?? '').trim())
   }
   for (const candidate of candidates) {
-    try {
-      if (fs.existsSync(candidate)) return candidate
-    } catch { /* 继续找 */ }
+    if (!isUsableNodePath(candidate)) continue
+    return candidate
   }
   throw new CocosMcpError(
-    '找不到 node 可执行文件。请在环境变量里设置 DSH_NODE_BIN 指向 node（例如 C:\\Program Files\\nodejs\\node.exe）。',
+    '找不到可用的 node 可执行文件（找到的都不像是真 node）。'
+    + '请设置环境变量 DSH_NODE_BIN 指向 node（例如 C:\\Program Files\\nodejs\\node.exe）。',
     { code: 'NO_NODE' },
   )
+}
+
+/**
+ * 候选 node 路径是否真的能用。
+ *
+ * ⚠️ Windows 上有个经典坑：`where node` 经常先返回应用商店的**执行存根**
+ * `%LOCALAPPDATA%\Microsoft\WindowsApps\node.exe`（0 字节占位符）。它存在于
+ * `PATH` 里、`existsSync` 也为真，但拿它当 stdio MCP 的 command 只会得到一个
+ * 立刻退出的服务（报错还只有 "connection closed"）。所以必须显式排除。
+ */
+export function isUsableNodePath(candidate) {
+  if (typeof candidate !== 'string' || candidate === '') return false
+  const lower = candidate.toLowerCase()
+  if (lower.includes(`${path.sep}windowsapps${path.sep}`) || lower.includes('/windowsapps/')) return false
+  try {
+    const stat = fs.statSync(candidate)
+    if (!stat.isFile()) return false
+    // 存根是 0 字节（或极小）；真 node.exe 至少几 MB。
+    if (stat.size < 1024) return false
+    return true
+  } catch {
+    return false
+  }
 }
