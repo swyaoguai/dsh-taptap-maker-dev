@@ -1535,9 +1535,21 @@ export async function generateImage(dshHome, prompt, {
   //    真正发生过（付费通道一失败就整单结束）。顺序语义只保留一处，就是这里。
   const attempted = []
   const failures = []
+  let lastResult = null
+  // 「还有哪几条可用但没试」= 链里没轮到的 + 因为「回退关着」被压住的。
+  // 两处失败出口都要带它：上层据此告诉用户「打开开关就能继续往下换」。
+  const untried = () => [...chain.slice(attempted.length), ...plan.deferred]
+  /** 在通道自己的错误说明后面补一句「其实还能往下换，只是开关关着」。 */
+  const withDeferredHint = (hint, list) => {
+    const base = String(hint ?? '').trim()
+    if (!Array.isArray(list) || list.length === 0) return base
+    return `${base}${base ? '\n' : ''}（顺序里后面还有 ${list.map(laneLabel).join('、')} 可用，`
+      + '但「按顺序自动回退」是关着的 —— 想让它自动换：设置页「生图通道优先级」里打开那个开关。）'
+  }
   for (const laneId of chain) {
     const r = await safeRunLane(laneId)
     attempted.push(laneId)
+    lastResult = r
     if (r && r.ok === true) {
       return {
         ...r,
@@ -1563,15 +1575,38 @@ export async function generateImage(dshHome, prompt, {
         ...r,
         ok: false,
         lane: laneId,
+        hint: withDeferredHint(r?.hint, untried()),
         stoppedAt: laneId,
         stopReason: reason,
         laneOrder: chain,
         attempted,
-        deferred: chain.slice(attempted.length),
+        deferred: untried(),
         skippedUnready: plan.unready,
         laneFailures: failures,
         ...lastReferenceAudit,
       }
+    }
+  }
+
+  // 只试了一条通道、而且失败了：把**那条通道自己的**结果原样交回上层。
+  // 汇总成 all_lanes_failed 会把 lane 变成 null，调用方就再也说不出
+  // 「是谁失败了」—— 单通道场景（很常见：只配了网页/只开了章鱼）必须保留
+  // 具体原因、pendingUrl 与登录指引。
+  if (attempted.length === 1 && lastResult) {
+    return {
+      ...lastResult,
+      ok: false,
+      lane: attempted[0],
+      hint: withDeferredHint(lastResult?.hint, untried()),
+      laneOrder: chain,
+      attempted,
+      rotatedLanes: false,
+      stoppedAt: attempted[0],
+      stopReason: failures[0]?.reason,
+      deferred: untried(),
+      skippedUnready: plan.unready,
+      laneFailures: failures,
+      ...lastReferenceAudit,
     }
   }
 

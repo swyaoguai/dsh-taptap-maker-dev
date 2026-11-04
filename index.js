@@ -2510,7 +2510,9 @@ export function apply(ctx, config = {}) {
                 ? '按你排的顺序，没有一条生图通道是配好的（没有提交任何生成）：'
                 : r.error === 'no_lane_enabled'
                   ? '生图通道都被关掉了：设置页「生图通道优先级」→ 生图，把至少一条打开。'
-                  : `${laneName(r.lane)}失败：${r.error}`,
+                  : r.error === 'all_lanes_failed'
+                    ? `按顺序试过的 ${(Array.isArray(r.attempted) ? r.attempted : []).map(laneName).join('、') || '通道'} 都失败了：`
+                    : `${laneName(r.lane)}失败：${why(r.error)}`,
               r.stoppedAt && r.error !== 'no_lane_ready'
                 ? `这一条失败后没有再往下换（换通道也一样失败，或可能重复扣费）：${why(r.stopReason ?? r.error)}`
                 : '',

@@ -258,6 +258,27 @@ await check('auto fallback off stops after the first lane and lists what was lef
   assert.match(result.hint, /按顺序自动回退/)
 })
 
+await check('single attempted lane keeps its own error (not a vague "all failed")', async () => {
+  let relayCalls = 0
+  const run = loadExport(gptSource, 'generateImage', {
+    resolveLanePlan: planOf(['zaiduyu', 'relayImage']),
+    readGptLaneEnabled: () => false, gptWebLaneReady: () => false,
+    zaiduyuGenerate: async () => {
+      throw Object.assign(new Error('缺少站点账号'), { code: 'no_credentials', phase: 'preflight', submitted: false, requiresLogin: true })
+    },
+    relayGenerate: async () => { relayCalls += 1; return { outputs: ['MEMORY-ONLY.png'] } },
+  })
+  // 中转站没配好 → 只会试章鱼一条；失败后必须说清「是章鱼失败」，
+  // 不能汇总成 lane=null 的 all_lanes_failed（那样上层只能报个笼统的错）。
+  const result = await run('MEMORY-HOME', prompt, { relayReady: () => false, zaiduyuReady: () => true })
+  assert.equal(relayCalls, 0, '未配置的通道不参与')
+  assert.equal(result.ok, false)
+  assert.equal(result.lane, 'zaiduyu', '要能说出是哪条通道失败')
+  assert.equal(result.error, 'no_credentials')
+  assert.equal(Array.from(result.attempted).join('>'), 'zaiduyu')
+  assert.equal(result.rotatedLanes, false)
+})
+
 await check('no configured lane at all → one clear message, nothing submitted', async () => {
   let submitted = 0
   const run = loadExport(gptSource, 'generateImage', {

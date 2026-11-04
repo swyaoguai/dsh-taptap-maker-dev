@@ -500,12 +500,17 @@ await check('web preflight cannot become a cross-lane quota retry', async () => 
   assert.equal(result.ok, false); assert.equal(relayCalls, 0); assertPreflight(result)
   assert.equal(result.referencePreparation.offline, true); assert.ok(result.notes.includes(marker))
 })
-await check('all web quota failures retain preparation audit instead of losing it in lane summary', async () => {
+await check('web quota failure keeps its own reason and preparation audit', async () => {
   const f = fixture(); const p = await f.prepare([f.file('input.png')], { lane: 'gptWeb', dshHome: f.home })
   const run = unified({ order: ['gptWeb'], generateWithRotation: async () => ({ ok: false, error: 'quota:rejected',
     referencePreparation: publicReferencePreparation(p), notes: p.notes }) })
   const result = await run(f.home, prompt)
-  assert.equal(result.ok, false); assert.equal(result.error, 'all_lanes_failed'); assertAudit(result, f)
+  assert.equal(result.ok, false)
+  // 只试了一条通道时不该汇总成 all_lanes_failed/lane=null：上层要能说出
+  // 「是网页这条失败了、原因是额度」，并保留参考图预检的审计信息。
+  assert.equal(result.error, 'quota:rejected')
+  assert.equal(result.lane, 'gptWeb')
+  assertAudit(result, f)
 })
 
 await check('Zaiduyu CLI error JSON preserves preflight flags and preparation audit/notes', async () => {
