@@ -227,6 +227,39 @@ function locateExtensionRoot(dir) {
   return byEntry ?? candidates[0]
 }
 
+/** 下载缓存里保留的安装备份数量：多了只是垃圾（每次 --force 都会留一份）。 */
+const BACKUP_KEEP = 3
+
+/** 只保留最近 N 个安装备份（`backup-<name>-<ts>`）。 */
+function pruneInstallBackups(cacheDir, { keep = BACKUP_KEEP } = {}) {
+  let entries
+  try {
+    entries = fs.readdirSync(cacheDir, { withFileTypes: true })
+  } catch {
+    return 0
+  }
+  const backups = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith('backup-'))
+    .map((entry) => {
+      const full = path.join(cacheDir, entry.name)
+      try {
+        return { full, at: fs.statSync(full).mtimeMs }
+      } catch {
+        return null
+      }
+    })
+    .filter((item) => item !== null)
+    .sort((a, b) => b.at - a.at)
+  let removed = 0
+  for (const item of backups.slice(keep)) {
+    try {
+      fs.rmSync(item.full, { recursive: true, force: true })
+      removed += 1
+    } catch { /* 被占用就下次再说 */ }
+  }
+  return removed
+}
+
 function copyDir(from, to) {
   fs.mkdirSync(to, { recursive: true })
   for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
@@ -363,6 +396,7 @@ export async function installExtension({
   } finally {
     try { fs.rmSync(staging, { recursive: true, force: true }) } catch { /* 尽力而为 */ }
   }
+  pruneInstallBackups(cache)
 
   const configState = ensureProjectConfig(normal)
   return {

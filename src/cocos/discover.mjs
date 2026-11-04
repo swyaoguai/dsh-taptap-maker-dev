@@ -218,8 +218,26 @@ export function findRunningProject(discovery, projectPath, groups = null) {
   return list.find((group) => sameProjectPath(group.projectPath, projectPath)) ?? null
 }
 
-/** 本机可能存在的 Cocos Creator 可执行文件（用于启动编辑器/命令行构建）。 */
-export function findCreatorExecutables() {
+/**
+ * 本机可能存在的 Cocos Creator 可执行文件（用于启动编辑器/命令行构建）。
+ *
+ * ⚠️ 带缓存：实现要递归遍历 `ProgramData` 与两个 `Program Files`（`-Depth 3`），
+ * 实测每次 1~10 秒。以前每次调用都重扫 —— 也就是每次 `cocos_open` / `cocos_build`
+ * 都要白等一次磁盘遍历。安装目录不会变，缓存 10 分钟足够。
+ */
+let creatorExeCache = { at: 0, value: null }
+const CREATOR_EXE_TTL_MS = 10 * 60 * 1000
+
+/** 清掉可执行文件探测缓存（装完新的 Creator 版本后调用）。 */
+export function invalidateCreatorExeCache() {
+  creatorExeCache = { at: 0, value: null }
+}
+
+export function findCreatorExecutables({ cacheMs = CREATOR_EXE_TTL_MS } = {}) {
+  const now = Date.now()
+  if (cacheMs > 0 && creatorExeCache.value !== null && now - creatorExeCache.at < cacheMs) {
+    return creatorExeCache.value
+  }
   const found = []
   if (IS_WINDOWS) {
     const script = [
@@ -236,12 +254,35 @@ export function findCreatorExecutables() {
       '$out | ConvertTo-Json -Compress\n',
     ].join('')
     try {
-      const parsed = runPowerShellJson(script, 20000)
+      const parsed = runPowerShellJson(script, 30000)
       const list = Array.isArray(parsed) ? parsed : (parsed ? [parsed] : [])
       for (const item of list) if (typeof item === 'string' && item.endsWith('.exe')) found.push(item)
     } catch { /* 找不到就让调用方给参数 */ }
   }
+  creatorExeCache = { at: now, value: found }
   return found
+}
+
+/**
+ * 按目标项目挑一个 Creator 可执行文件。
+ *
+ * 优先版本完全匹配：以前只要候选多于一个就取 `candidates[0]`（或只做一次
+ * `includes(want)` 的模糊匹配）—— 一个 3.7 的实例排在前面时，给 3.8.8 的工程
+ * 构建就会用错引擎版本，产物和编辑器行为都会莫名其妙。
+ */
+export function pickCreatorExecutable(candidates, wantVersion = '') {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null
+  const want = String(wantVersion || '').trim()
+  if (want !== '') {
+    const exact = candidates.find((item) => creatorVersionFromExe(item) === want)
+    if (exact) return exact
+    const sameMinor = candidates.find((item) => {
+      const version = creatorVersionFromExe(item)
+      return version !== '' && version.split('.').slice(0, 2).join('.') === want.split('.').slice(0, 2).join('.')
+    })
+    if (sameMinor) return sameMinor
+  }
+  return candidates[0]
 }
 
 /** 从可执行文件路径推断 Creator 版本（`.../Creator/3.8.8/CocosCreator.exe`）。 */

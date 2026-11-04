@@ -658,6 +658,21 @@ async function main() {
     assert.ok(left.includes('notes.txt'), '不匹配的文件必须原样保留')
   })
 
+  await test('pickCreatorExecutable 按版本挑对的 exe，而不是拿第一个', async () => {
+    const { pickCreatorExecutable } = await load('src/cocos/discover.mjs')
+    const candidates = [
+      'C:\\ProgramData\\cocos\\editors\\Creator\\3.7.2\\CocosCreator.exe',
+      'C:\\ProgramData\\cocos\\editors\\Creator\\3.8.8\\CocosCreator.exe',
+      'C:\\ProgramData\\cocos\\editors\\Creator\\3.8.9\\CocosCreator.exe',
+    ]
+    assert.equal(pickCreatorExecutable(candidates, '3.8.8'), candidates[1], '精确版本优先')
+    assert.equal(pickCreatorExecutable(candidates, '3.8.2'), candidates[1], '次版本匹配（3.8.x）')
+    assert.equal(pickCreatorExecutable(candidates, ''), candidates[0], '无版本要求取第一个')
+    assert.equal(pickCreatorExecutable([], '3.8.8'), null, '空候选返回 null')
+    // 之前 candidates[0] 兜底：给 3.8.8 的工程用 3.7.2 构建，产物行为不可预期。
+    assert.notEqual(pickCreatorExecutable(candidates, '3.8.8'), candidates[0])
+  })
+
   await test('注册表：传空 name 时保留原名字（不会被覆盖成空白）', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-name-'))
     await upsertProject(home, { path: projectA, name: 'game-a', creatorVersion: '3.8.8' })

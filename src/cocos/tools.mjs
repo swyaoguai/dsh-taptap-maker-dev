@@ -20,7 +20,7 @@ import { CocosMcpError } from './mcp-http.mjs'
 import { connectTarget, projectOverview, readProjectMeta, resolveTarget } from './router.mjs'
 import { upsertProject } from './registry.mjs'
 import { acquireFileLock, acquireBuildSlot, makeOwner, projectLockPath, releaseBuildSlot, releaseFileLock, touchFileLock, withProjectLock } from './locks.mjs'
-import { creatorVersionFromExe, discoverLive, findCreatorExecutables, invalidateDiscoveryCache } from './discover.mjs'
+import { creatorVersionFromExe, discoverLive, findCreatorExecutables, invalidateDiscoveryCache, pickCreatorExecutable } from './discover.mjs'
 import { downsampleList, sleep } from './util.mjs'
 import { sameProjectPath, shotsDir } from './paths.mjs'
 
@@ -186,20 +186,24 @@ function spawnCreator(exePath, args, { cwd, logFile, onError } = {}) {
   return child
 }
 
-/** 找可执行文件：优先注册表里记的，其次实例自报的，最后扫常见安装位置。 */
+/**
+ * 找可执行文件：优先注册表里记的，其次实例自报的，最后扫常见安装位置。
+ *
+ * ⚠️ 「实例自报」只在**同一个项目**的实例上才可信：运行着项目 A 的编辑器的
+ * exe 路径，被拿去给项目 B 构建未必错（同一台机器通常只装一个 Creator），
+ * 但装了多个版本时就是错的。所以实例自报也要过版本匹配这一关。
+ */
 async function resolveCreatorExe({ dshHome, entry }) {
   if (entry?.creatorExe && fs.existsSync(entry.creatorExe)) return entry.creatorExe
+  const want = entry?.creatorVersion ?? ''
   const discovery = await discoverLive({ cacheMs: 0 })
-  const hit = discovery.instances.find((instance) => instance.exePath !== '')
+  const hit = discovery.instances.find((instance) => instance.exePath !== ''
+    && (want === '' || creatorVersionFromExe(instance.exePath) === '' || creatorVersionFromExe(instance.exePath) === want))
   if (hit) return hit.exePath
+  // 命令行探测带缓存：实现要递归扫 ProgramData/ProgramFiles，实测每次数秒。
   const candidates = findCreatorExecutables()
-  if (candidates.length === 1) return candidates[0]
-  if (candidates.length > 1) {
-    // 优先与项目 Creator 版本一致的安装。
-    const want = entry?.creatorVersion ?? ''
-    const matched = candidates.find((item) => want !== '' && item.includes(want))
-    return matched ?? candidates[0]
-  }
+  const picked = pickCreatorExecutable(candidates, want)
+  if (picked !== null) return picked
   throw new CocosMcpError(
     '找不到 CocosCreator.exe。请确认已安装 Cocos Creator，或显式传 creator_exe。',
     { code: 'NO_CREATOR_EXE' },
@@ -229,7 +233,7 @@ export const TOOL_DEFINITIONS = [
     },
     mutating: false,
     handler: async (args, ctx) => {
-      const overview = await projectOverview({ dshHome: ctx.dshHome, cacheMs: args.refresh ? 0 : undefined, buildSlotLimit: ctx.config?.buildSlots })
+      const overview = await projectOverview({ dshHome: ctx.dshHome, cacheMs: args.refresh ? 0 : undefined, buildSlotLimit: ctx.config?.buildSlots, discovery: ctx.discovery })
       return {
         projects: overview.projects,
         buildSlots: overview.buildSlots,
@@ -249,7 +253,7 @@ export const TOOL_DEFINITIONS = [
     },
     mutating: false,
     handler: async (args, ctx) => {
-      const overview = await projectOverview({ dshHome: ctx.dshHome, cacheMs: 0, buildSlotLimit: ctx.config?.buildSlots })
+      const overview = await projectOverview({ dshHome: ctx.dshHome, cacheMs: 0, buildSlotLimit: ctx.config?.buildSlots, discovery: ctx.discovery })
       let view = null
       if (args.project) {
         // 先用注册表解析（支持 slug / 名称 / 前缀 / 路径），再回到视图列表里取状态。

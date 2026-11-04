@@ -62,12 +62,42 @@ function rpcError(id, code, message, data) {
   send({ jsonrpc: '2.0', id, error: { code, message, ...(data === undefined ? {} : { data }) } })
 }
 
-/** 工具结果：文本内容 + 结构化副本（structuredContent 便于程序化消费）。 */
+/** structuredContent 的体积上限：超了就不再原样透传。 */
+const STRUCTURED_LIMIT_BYTES = 200 * 1024
+
+/**
+ * 工具结果：文本内容 + 结构化副本（structuredContent 便于程序化消费）。
+ *
+ * ⚠️ 两个都不能无脑透传：`content` 会被模型直接读，`structuredContent` 会被
+ * PTC/编程调用方拿到。只截前者的话，一次 `cocos_scene hierarchy` 抓回来几十万行
+ * 场景树，文本被截了、结构化副本照样是完整大对象 —— PTC 模式下等于把整个
+ * 场景树塞进模型上下文。这里对两者用同一套上限，超了就换成带说明的信封。
+ */
 function toolResult(value) {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+  const clipped = clipText(text, 40000)
+  const wasClipped = clipped !== text
+  let structured = typeof value === 'object' && value !== null ? value : { value }
+  let structuredTruncated = false
+  try {
+    if (wasClipped || Buffer.byteLength(JSON.stringify(structured)) > STRUCTURED_LIMIT_BYTES) {
+      structured = {
+        truncated: true,
+        reason: '结果过大，已省略结构化副本',
+        bytes: Buffer.byteLength(text),
+        hint: '缩小范围再查：场景用 depth 限制层级、资源用 folder/type 过滤，或用 cocos_exec 在场景里挑出需要的字段返回。',
+        preview: clipText(text, 4000),
+      }
+      structuredTruncated = true
+    }
+  } catch {
+    structured = { truncated: true, reason: '结构化结果无法序列化' }
+    structuredTruncated = true
+  }
   return {
-    content: [{ type: 'text', text: clipText(text, 40000) }],
-    structuredContent: typeof value === 'object' && value !== null ? value : { value },
+    content: [{ type: 'text', text: clipped }],
+    structuredContent: structured,
+    ...(structuredTruncated ? { _meta: { truncated: true } } : {}),
     isError: false,
   }
 }
