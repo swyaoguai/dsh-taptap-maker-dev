@@ -2,6 +2,46 @@
 
 只记**用户能感知**的行为变化与修过的坑；格式参考 Keep a Changelog，版本号跟随 `package.json`。
 
+## 未发布
+
+### Cocos：补上「Graphics 现画 vs Sprite 贴图」的分流判据
+
+- `cocos-ui-layout` 新增「先分流：这个按钮底是贴图还是现画？」一节：
+  `cc.Sprite` 与 `cc.Graphics` 在同一节点上**互斥**，按钮底的画法直接决定要不要 `cc.Button`；
+  并写清 `cc.EventHandler` 是独立对象（不需要 `cc.Button`），
+  Graphics 路线照样能拿到「策划在属性检查器里连线」的能力。
+- `cocos-performance` 新增「『Graphics 太多』要不要换贴图？先分类」：
+  按「一次性绘制 / 视觉重复 / 每帧重画」三类分流，只有「视觉重复」才值得换共享贴图。
+- 这两条是实测踩出来的：有个工程（界面全 Graphics 现画）被"缺 `cc.Button`、该换 Sprite"的
+  通用最佳实践误导，加 `cc.Button` 后撞组件冲突报错。
+
+### Cocos：补齐 14 个专题 skill
+
+- 在 `cocos-creator-mcp` / `cocos-scene-first-workflow` 之外，新增 14 个 Cocos Creator 3.x 专题 skill：
+  工程结构 `cocos-project-structure`、TS 规范 `cocos-typescript-standards`、
+  组件架构 `cocos-component-architecture`、资源与预制体 `cocos-resource-prefabs`、
+  UI 与适配 `cocos-ui-layout`、动画 `cocos-animation`、物理 `cocos-physics`、输入 `cocos-input`、
+  性能 `cocos-performance`、音频 `cocos-audio`、联网 `cocos-networking`、
+  构建发布 `cocos-build-release`、编辑器扩展 `cocos-editor-tooling`、测试 `cocos-testing`。
+- `taptap-skill-router` 增加「Cocos Creator 项目按需求加载」对照表，按任务挑 1~2 个，
+  不再需要模型自己猜。
+- Cocos MCP 守则（`src/cocos/policy.mjs`）补一条：专题内容按需加载，不凭记忆写 3.x API。
+- 全部按 Creator 3.x 写并明确 2.x 不适用；每篇都带「验收」与「常见坑」，
+  和 MCP 的「保存 → 截图 → 看日志」闭环对齐。
+
+### Cocos：先搭舞台，再规划代码
+
+- 新增 skill `cocos-scene-first-workflow`：要求 AI 先在编辑器里像人一样建节点树、
+  挂组件（Button/Widget/Label 等标准组件）、配好物理分组与碰撞矩阵、存盘截图验收，
+  **之后**才规划并编写逻辑代码；禁止用代码 `new Node()` 动态拼 UI / 场景，
+  运行期临时对象只能从 Prefab 实例化。
+- Cocos MCP 守则注入加了一条硬约束：涉及场景/UI/玩法开发时必须加载这个 skill
+  （`src/cocos/policy.mjs`），新会话开场即生效，不依赖模型自行匹配。
+- `taptap-skill-router` 同步登记（Cocos 行的必读补充 + 独立触发条件行）。
+- 配套 `references/recipes.md`：可直接抄的 `cocos_exec` 片段（Canvas / Widget 容器 / 按钮 /
+  SpriteFrame / 2D 物理体 / 存 Prefab / 编辑器连线）与「UI 看不见、按钮点不到、物理不碰撞」
+  等常见失败对照表。
+
 ## 0.7.0 — 2026-11-05
 
 ### 生图通道：顺序就是使用顺序
