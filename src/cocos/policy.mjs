@@ -26,6 +26,8 @@ export function cocosPolicyText(dshHome) {
   return [
     'Cocos Creator（本机可能同时开着 2~3 个项目；工具命名空间统一是 `cocos`）：',
     '- 动手前先加载 `cocos-creator-mcp` skill：怎么选工具、改完怎么验收（保存 → 截图 → 看日志）都在里面；',
+    '- 涉及场景/UI/玩法开发时，必须再加载 `cocos-scene-first-workflow`：先在编辑器里搭好节点树、挂组件、配好物理分组并保存验证，之后才规划代码；禁止用代码动态 new 节点拼 UI 或场景（运行期临时对象只能从 Prefab 实例化）；',
+    '- 专题深入按需加载：`cocos-typescript-standards`（写组件）、`cocos-component-architecture`、`cocos-resource-prefabs`、`cocos-ui-layout`、`cocos-animation`、`cocos-physics`、`cocos-input`、`cocos-performance`、`cocos-audio`、`cocos-networking`、`cocos-build-release`、`cocos-editor-tooling`、`cocos-testing`、`cocos-project-structure`；完整对照见 `taptap-skill-router` 的「Cocos Creator 项目按需求加载」，一次只挑直接相关的 1~2 个，不要凭记忆写 3.x API；',
     '- 先 `cocos_projects` 看现状（slug / 路径 / 端口 / 是否在跑 / 构建槽位），再动手；',
     '- 需要项目的每个工具都必须带 `project`（slug、目录名或完整路径）。多个项目在跑时省略 `project` 会直接报错——工具不会替你猜是哪一个；',
     '- 同一项目同一时间只允许一个写操作（写锁），**构建期间该项目也被锁住**；构建全机串行。撞锁/排队时等它结束，不要换个项目「重试」；',

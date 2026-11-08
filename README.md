@@ -332,6 +332,20 @@ dsh plugin --profile <profile> add dsh-game-forge
 | 多项目同时构建 | 全局构建槽位（默认 1），排队而不是一起把机器拖死 |
 | 「同一项目」开了交互 + 无头构建两个实例 | 发现阶段区分 `--build` 实例，操作只打交互实例 |
 
+### Cocos 专题 skill（16 个）
+
+两个入口 skill：`cocos-creator-mcp`（工具路由、多项目安全、验收闭环）、
+`cocos-scene-first-workflow`（先搭舞台再写代码）。其余 14 个专题按任务挑 1~2 个加载：
+
+| 阶段 | skill |
+|---|---|
+| 工程与代码 | `cocos-project-structure`、`cocos-typescript-standards`、`cocos-component-architecture`、`cocos-resource-prefabs` |
+| 玩法与表现 | `cocos-ui-layout`、`cocos-animation`、`cocos-physics`、`cocos-input`、`cocos-audio` |
+| 交付 | `cocos-performance`、`cocos-networking`、`cocos-build-release`、`cocos-editor-tooling`、`cocos-testing` |
+
+全部按 **Creator 3.x** 写（2.x 不适用），每篇都带「验收」和「常见坑」，与 MCP 的
+「保存 → 截图 → 看日志」闭环对齐。对照表见 `taptap-skill-router` 的「Cocos Creator 项目按需求加载」。
+
 ## 素材存到哪里（`sucai/`）
 
 在 **Maker 项目目录里**执行生图 / 视频 / BGM 命令时，三类素材统一收在项目下：

@@ -17,7 +17,7 @@ skill 列表里只有名字和一句话简介，正文要用 `skill` 工具加�
 
 1. 先判断**引擎**（TapTap Maker / Cocos Creator / Godot / Unity / Unreal / 网页 —— 看下面「其他引擎」一节的线索）。
 2. 再判断**项目进度**（看下面「按进度」）和**用户这句话要干什么**（看「按需求」）。
-3. 两张表交叉，挑最贴近的 1~3 个加载；**当前引擎专属的优先**（Maker 项目就是 `taptap-maker-*`，Godot 项目就是 `godot-*`），
+3. 两张表交叉，挑最贴近的 1~3 个加载；**当前引擎专属的优先**（Maker 项目就是 `taptap-maker-*`，Cocos 项目就是 `cocos-*`，Godot 项目就是 `godot-*`），
    通用设计 skill（`game-designer`、`level-design`、`game-feel` 等）补方法论。
 4. 用户没要求、当前步骤也用不上的 skill，不加载。
 5. 不用告诉用户「我加载了哪个 skill」，除非他问。
@@ -64,7 +64,32 @@ skill 列表里只有名字和一句话简介，正文要用 `skill` 工具加�
 | 埋点、数据统计 | `telemetry-instrumentation` | — |
 | 排期、风险 | `milestone-planning` | `risk-register` |
 | 给插件加 / 改 skill | `skill-authoring` | `external-skills-catalog` |
-| 用 Cocos Creator 做游戏（改场景/预制体/资源/构建） | `cocos-creator-mcp` | `game-ui-ux`、`sprite-pipeline`、`game-feel` |
+| 用 Cocos Creator 做游戏（改场景/预制体/资源/构建） | `cocos-creator-mcp` | `cocos-scene-first-workflow`、`game-ui-ux`、`sprite-pipeline` |
+| 要在 Cocos 里搭 UI/舞台/玩法（先建节点挂组件，禁止代码动态拼场景） | `cocos-scene-first-workflow` | `cocos-creator-mcp`、`game-ui-ux` |
+
+## Cocos Creator 项目按需求加载
+
+Cocos 项目先定工程（`cocos-creator-mcp`），舞台与 UI 一律**先搭再写代码**
+（`cocos-scene-first-workflow`）。下面是专题 skill，一次只挑直接相关的 1~2 个：
+
+| 用户在说 | 加载 |
+|---|---|
+| 工程目录、资源放哪、.gitignore、settings | `cocos-project-structure` |
+| 写组件脚本、@property、生命周期、TS 规范 | `cocos-typescript-standards` |
+| 组件职责、事件通信、管理器、切场景 | `cocos-component-architecture` |
+| 加载贴图/预制体、bundle、远程资源、释放内存 | `cocos-resource-prefabs` |
+| UI 布局、多分辨率适配、ScrollView、按钮 | `cocos-ui-layout` |
+| 动画、tween、Spine/龙骨、序列帧 | `cocos-animation` |
+| 物理、碰撞分组、射线、角色控制 | `cocos-physics` |
+| 键盘/触摸/摇杆、输入抽象、键位 | `cocos-input` |
+| 掉帧、drawcall、包体、内存 | `cocos-performance` |
+| 音效、BGM、音量设置 | `cocos-audio` |
+| 联网、WebSocket、断线重连 | `cocos-networking` |
+| 构建、发布、小游戏、原生、热更新 | `cocos-build-release` |
+| 编辑器扩展、批量工具 | `cocos-editor-tooling` |
+| 单测、冒烟、真机验收 | `cocos-testing` |
+
+这些内容按 **Creator 3.x** 写；2.x 项目格式与 API 都不同，不要照搬。
 
 ## 其他引擎的 skill 什么时候用
 

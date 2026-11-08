@@ -173,3 +173,17 @@ node src/cocos/cli.mjs register --yes
   `cocos_raw` 是逃生口，`cocos_exec` 是兜底。
 - 身份校验能防「配置过期/端口回退导致写错工程」，但**不是鉴权**：
   本机上任何进程都能访问那个 HTTP 端口，别把它绑到 `0.0.0.0`。
+
+## 6. 配套 skill
+
+工具之上还有一层使用纪律，agent 动手前会按任务加载（目录见 `taptap-skill-router`
+的「Cocos Creator 项目按需求加载」）：
+
+| 阶段 | skill |
+|---|---|
+| 入口 | `cocos-creator-mcp`（工具路由/多项目安全）、`cocos-scene-first-workflow`（先搭舞台再写码） |
+| 工程与代码 | `cocos-project-structure`、`cocos-typescript-standards`、`cocos-component-architecture`、`cocos-resource-prefabs` |
+| 玩法与表现 | `cocos-ui-layout`、`cocos-animation`、`cocos-physics`、`cocos-input`、`cocos-audio` |
+| 交付 | `cocos-performance`、`cocos-networking`、`cocos-build-release`、`cocos-editor-tooling`、`cocos-testing` |
+
+全部按 Creator 3.x 写；每篇都带验收步骤与常见坑，改完要按「保存 → 截图 → 看日志」收尾。
