@@ -191,7 +191,12 @@ console.log('\n[5] 老宿主兼容：服务端没给组级 autoFallback 时，�
   ok(texts(flat).some((x) => /服务端还是旧版/.test(x)), '旧形状下给出「重启 DSH 后生效」的提示')
 }
 
+// 先掐断 keep-alive 连接再关服务，并留一点时间让 undici 的 socket 句柄收干净。
+// 否则 Windows 上偶发 `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)`
+// （libuv win/async.c）——断言发生在进程退出阶段，与断言结果无关却会让脚本变红。
+server.closeAllConnections?.()
 await new Promise((r) => server.close(r))
+await new Promise((r) => setTimeout(r, 50))
 try { fs.rmSync(home, { recursive: true, force: true }) } catch { /* ignore */ }
 console.log(`\n结果：${passed} 项通过，${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
