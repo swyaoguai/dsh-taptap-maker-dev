@@ -120,7 +120,54 @@ export class HudView extends Component {
 `comp.scoreLabel = node.getComponent(Label)` 赋一次并保存场景）。
 `find('Canvas/HUD/Score')` 这类魔法路径只在迁移旧场景时用，新代码不许写。
 
-## 8. 自查闭环（每次都做）
+## 8. 叠加 UI 设计稿到场景视图
+
+有设计稿时，AI 照着图摆节点比照着文字描述摆准得多。
+
+**准备**：把设计稿放进**工程目录内**（推荐 `<工程>/temp/dsh-ref/ui.png`）。
+工程外的绝对路径会被上游 `execute_javascript` 的安全检查直接拒掉（它扫描代码里的
+字符串字面量，发现工程外路径就整个拒绝执行）。
+
+```js
+// 叠加（默认压暗场景到 25%，参考图 90% 不透明度）
+cocos_reference(action="set", image="temp/dsh-ref/ui.png", label="主界面")
+
+// 摆几个节点后截图对照
+cocos_screenshot(scope="scene")
+
+// 对照完清掉，别把覆盖层留在编辑器里影响别人看
+cocos_reference(action="clear")
+
+// 想知道当前叠的是哪张：action="list"
+```
+
+**参数**：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `image` | — | 工程相对路径 / `db://` URL / 工程内绝对路径 |
+| `opacity` | 0.9 | 参考图自身不透明度 |
+| `dim_scene` | 0.25 | 场景视图被压暗到多少（1 = 不压暗） |
+| `scale` | 1 | 参考图缩放 |
+| `label` | 空 | 覆盖层左上角的文字标签 |
+
+**它是怎么工作的（Creator 3.8.8 实测）**：场景画面渲染在场景面板里的一个
+`<webview>`（独立渲染帧）上，HTML 盖不住它。所以实现是「把 webview 自身的不透明度
+调低 + 在主窗口里画一层与 webview 矩形对齐的 div 放参考图」。
+
+覆盖层是 `pointer-events: none` 的纯展示层：**不碰节点树、不改组件、不动资源**，
+用户在场景视图里照样能点节点、拖 gizmo。
+
+**常见失败**：
+
+| 现象 | 原因 / 处理 |
+|---|---|
+| 报「参考图必须放在 Cocos 工程目录内」 | 路径在工程外；拷到 `<工程>/temp/dsh-ref/` 再用相对路径 |
+| 报「参考图不存在」 | 相对路径是相对**工程根**，不是相对当前脚本 |
+| `imageLoaded: false` | 文件格式不是浏览器能解的（webp/PNG/JPG 才行）；或路径含特殊字符没转义 |
+| 叠加了但截图中看不到 | 场景视图面板没打开，或编辑器窗口太小把视口压没了 |
+
+## 9. 自查闭环（每次都做）
 
 1. `cocos_scene action=save`
 2. `cocos_screenshot scope=scene` —— 层级 / 位置 / 遮挡 / 缩放 / 文字是否溢出

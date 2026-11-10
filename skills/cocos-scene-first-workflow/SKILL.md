@@ -26,6 +26,20 @@ whenToUse: 在 Cocos Creator 项目里做任何玩法/UI/场景开发时先加�
 - **禁止在不看节点树的情况下开始写任何代码。**
 
 ### 第 1 步：搭舞台（像人一样点）
+
+**先看设计稿**：有 UI 设计稿（PSD/Figma 导出的图）时，先把它叠到场景视图上，
+再照着摆节点 —— 比凭描述猜布局靠谱得多：
+
+```js
+// 参考图必须放在 Cocos 工程目录内（推荐 <工程>/temp/dsh-ref/ui.png）
+// 上游 execute_javascript 的安全检查会拒绝工程外的绝对路径
+cocos_reference(action="set", image="temp/dsh-ref/ui.png", label="主界面设计稿")
+// 摆完 → 截图对照 → 调位置
+cocos_screenshot(scope="scene")
+// 看完清掉，别把覆盖层留在编辑器里
+cocos_reference(action="clear")
+```
+
 按人在编辑器里的顺序操作 `cocos_exec`（scene 上下文）：
 1. 建 UI 根：Canvas → 依次建 Panel / 容器（用 Widget 对齐，别手摆坐标）。
 2. 建 HUD 元素：Label（Label 组件 + 字体）、Sprite/Button（Sprite + Button + 可选 Label 子节点）、ProgressBar/Slider 等，每个都按「建节点 → 挂组件 → 设属性 → 设布局」走。

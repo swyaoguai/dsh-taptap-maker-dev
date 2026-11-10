@@ -24,6 +24,7 @@ mcp__cocos__cocos_scene        → { project, action: info|hierarchy|find|open|s
 mcp__cocos__cocos_asset        → { project, action: list|inspect|deps|ready|refresh }
 mcp__cocos__cocos_logs         → { project, action: recent|search|clear }
 mcp__cocos__cocos_screenshot   → { project, scope: editor|scene|preview|game }
+mcp__cocos__cocos_reference    → { project, action: set|clear|list } 叠加 UI 设计稿
 mcp__cocos__cocos_build        → { project, platform, debug, wait_ms }
 mcp__cocos__cocos_preview      → { project, action: run|mode|set_mode }
 mcp__cocos__cocos_open         → { project } 启动编辑器并等 MCP 就绪
@@ -93,6 +94,30 @@ Cocos 的每个编辑器实例是独立进程（`CocosCreator.exe --project <dir
 
 编辑器侧用的是 MIT 开源的 **Funplay MCP for Cocos**（编辑器内嵌 HTTP MCP 服务，
 支持项目级端口、项目绑定 URL、写操作身份令牌）。
+
+### 为什么不是 Cocos MCP Server（DaxianLee/cocos-mcp-server）
+
+市面上另一个常见的 Cocos MCP（[DaxianLee/cocos-mcp-server](https://github.com/DaxianLee/cocos-mcp-server)，
+1.5k star）被反复问「要不要接进来」。结论是**不接**，三条硬理由：
+
+1. **许可证不允许商用。** 它的 README 明写「任何本项目代码或者衍生代码均不能用于
+   任何商用、转售」。Cocos 项目天然要上商店卖钱，接进来等于给整条 Cocos 链路埋雷。
+2. **没有项目身份上报，本套安全层会当场失效。** 它的 `initialize` 返回里没有
+   `funplay.context`（没有 `project_path` / `project_id`），`/health` 也只回
+   `{status, tools}`。而 `router.mjs` 的 `verifyIdentity()` 正是靠 `project_path`
+   判定「这一枪打在正确的工程上」—— 拿不到就中止（`UNVERIFIED_IDENTITY`）。
+   它的端口模型还是**固定端口 3000**，多项目并行时第二个实例要么抢不到端口，
+   要么静默连到别的工程。
+3. **功能是 Funplay 的子集，不是超集。** 开源版 50 个工具 vs Funplay 的 106 个
+   （full 档）；Funplay 还有 resources（`cocos://project/context` 等 10 个）、
+   prompts、输入模拟（带 `captureId` 校准）、按项目派生端口 + 面板一键配客户端。
+   README 里宣传的「231 项操作 / 16 个意图级工具」是**商业闭源 Pro 版**的能力。
+
+它唯一值得吸收的是「参考图叠加到场景视图」—— 这已经用 `cocos_reference` 自己实现了
+（Creator 3.8 本身没有这个功能，见 `src/cocos/reference-image.mjs` 的实测记录），
+不必为了一个功能换掉整个上游。
+
+### 安装
 
 ```bash
 # 装到工程自己的 extensions/（推荐：天然按项目隔离）

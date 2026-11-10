@@ -24,6 +24,7 @@ whenToUse: 要给 Cocos Creator 项目加 UI、改场景、查资源、跑构建
 | 调编辑器自身（写文件、跑 Editor.Message） | `cocos_exec`（`context: "editor"`） |
 | 看日志 / 搜日志 | `cocos_logs` |
 | 截图验证 | `cocos_screenshot` |
+| 叠加 UI 设计稿到场景视图 | `cocos_reference` |
 | 命令行构建 | `cocos_build` |
 | 预览 | `cocos_preview` |
 | 上游有但上面没包 | `cocos_raw`（只读要显式 `mutating: false`） |

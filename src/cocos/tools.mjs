@@ -21,6 +21,7 @@ import { connectTarget, projectOverview, readProjectMeta, resolveTarget } from '
 import { upsertProject } from './registry.mjs'
 import { acquireFileLock, acquireBuildSlot, makeOwner, projectLockPath, releaseBuildSlot, releaseFileLock, touchFileLock, withProjectLock } from './locks.mjs'
 import { creatorVersionFromExe, discoverLive, findCreatorExecutables, invalidateDiscoveryCache, pickCreatorExecutable } from './discover.mjs'
+import { buildInjectCode, resolveReferenceImage } from './reference-image.mjs'
 import { sleep } from './util.mjs'
 import { sameProjectPath, shotsDir } from './paths.mjs'
 
@@ -177,11 +178,20 @@ function pruneArtifacts(dir, { keep = ARTIFACT_KEEP, match = null } = {}) {
  */
 function spawnCreator(exePath, args, { cwd, logFile, onError } = {}) {
   const stdoutFd = logFile ? fs.openSync(logFile, 'a') : 'ignore'
+  // ⚠️ 必须显式清掉 ELECTRON_RUN_AS_NODE。
+  // 这个环境变量让 Electron 变成纯 Node：不设的话 CocosCreator.exe 会把
+  // `--project` 当成 Node 的未知参数（"bad option: --project"）或者把工程目录
+  // 当模块路径（"Cannot find module 'D:\wxzj-cocos'"），两种都在几秒内退出，
+  // 表现是「编辑器起不来」，但错误信息完全看不出是环境变量的问题。
+  // （本机 DSH 运行时该变量为 1，实测踩过。）
+  const env = { ...process.env }
+  delete env.ELECTRON_RUN_AS_NODE
   const child = spawn(exePath, args, {
     cwd: cwd || path.dirname(exePath),
     detached: true,
     stdio: logFile ? ['ignore', stdoutFd, stdoutFd] : 'ignore',
     windowsHide: false,
+    env,
   })
   child.unref()
   if (logFile) {
@@ -608,6 +618,85 @@ export const TOOL_DEFINITIONS = [
         note: files.length === 0 && save
           ? '上游没有返回可直接落盘的图片数据（可能只给了内部路径），请看 data 字段。'
           : null,
+      }
+    },
+  },
+  {
+    name: 'cocos_reference',
+    description: '参考图叠加：set 把一张 UI 设计稿叠到场景视图上（AI 照着设计稿搭界面），'
+      + 'clear 移除，list 看当前叠加状态。参考图必须放在 Cocos 工程目录内（推荐 <工程>/temp/dsh-ref/），'
+      + '因为上游 execute_javascript 的安全检查会拒绝工程外的绝对路径。'
+      + '纯视觉叠加，不改场景数据、不影响节点操作。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project: PROJECT_PARAM,
+        action: { type: 'string', enum: ['set', 'clear', 'list'], default: 'list' },
+        image: {
+          type: 'string',
+          description: 'action=set 时的参考图路径：工程相对路径（推荐，如 temp/dsh-ref/ui.png）、'
+            + 'db:// 资源库 URL，或工程内的绝对路径。',
+        },
+        opacity: { type: 'number', description: '参考图不透明度 0~1（默认 0.9）', default: 0.9 },
+        dim_scene: { type: 'number', description: '叠加时把场景视图压暗到多少（0~1，默认 0.25；1 = 不压暗）', default: 0.25 },
+        scale: { type: 'number', description: '参考图缩放倍数（默认 1）', default: 1 },
+        label: { type: 'string', description: '叠加层左上角的文字标签（可空）' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    mutating: false,
+    handler: async (args, ctx) => {
+      const action = args.action ?? 'list'
+      const target = await resolveTarget({ dshHome: ctx.dshHome, project: args.project, requireLive: true, discovery: ctx.discovery })
+      let imageUrl = ''
+      let absolutePath = ''
+      if (action === 'set') {
+        const resolved = resolveReferenceImage(target.entry.path, args.image)
+        if (!resolved.ok) throw new CocosMcpError(resolved.error, { code: 'BAD_ARGS' })
+        imageUrl = resolved.fileUrl
+        absolutePath = resolved.absolutePath
+      }
+      const code = buildInjectCode({
+        mode: action,
+        imageUrl,
+        opacity: args.opacity ?? 0.9,
+        dimScene: args.dim_scene ?? 0.25,
+        scale: args.scale ?? 1,
+        label: args.label ?? '',
+      })
+      const { result, identity } = await invoke({
+        dshHome: ctx.dshHome,
+        discovery: ctx.discovery,
+        signal: ctx.signal,
+        project: args.project,
+        tool: 'execute_javascript',
+        args: { context: 'editor', code, args: {} },
+        mutating: false,
+        sessionId: ctx.sessionId,
+        timeoutMs: 60000,
+      })
+      const text = contentToText(result)
+      let data = result?.data ?? null
+      // 上游把结构化结果包在 text 里，这里解出来方便 agent 直接用。
+      if (data === null && typeof text === 'string' && text.trim().startsWith('{')) {
+        try {
+          const parsed = JSON.parse(text)
+          data = parsed?.data ?? parsed
+        } catch { /* 不是 JSON 就原样返回 */ }
+      }
+      if (data && typeof data === 'object' && typeof data.error === 'string') {
+        throw new CocosMcpError(data.error, { code: 'REFERENCE_OVERLAY_FAILED' })
+      }
+      return {
+        project: identity.projectPath,
+        action,
+        image: absolutePath || null,
+        text,
+        data,
+        note: action === 'set'
+          ? '已叠加。截图验证：cocos_screenshot scope=scene。看完记得 action=clear 清掉。'
+          : action === 'clear' ? '已移除参考图覆盖层。' : null,
       }
     },
   },

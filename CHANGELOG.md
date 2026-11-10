@@ -4,6 +4,43 @@
 
 ## 未发布
 
+### Cocos：参考图叠加（照着设计稿搭界面）
+
+- 新增工具 `cocos_reference`：`set` 把一张 UI 设计稿叠到场景视图上，
+  `clear` 移除，`list` 看当前叠加状态。
+  有设计稿时 AI 照着图摆节点，比照着文字描述摆准得多。
+- 覆盖层是 `pointer-events: none` 的纯展示层：**不碰节点树、不改组件、不动资源**，
+  用户在场景视图里照样能点节点、拖 gizmo。
+- 实现走 `cocos_exec`（editor 上下文）的 `require('electron')` →
+  `BrowserWindow` → `webContents.executeJavaScript()` 往渲染进程注入 DOM。
+  Creator 3.8 **本身没有**官方的参考图功能（`Editor.Message` 各命名空间里
+  都没有 overlay / reference 相关方法），这是唯一可行路径。
+- **参考图必须放在 Cocos 工程目录内**（推荐 `<工程>/temp/dsh-ref/`）：
+  上游 `execute_javascript` 的安全检查会扫描代码里的字符串字面量，
+  碰到工程外的绝对路径就整个拒绝执行。工具会提前拦下并给出可操作的提示。
+- 相关文档：`cocos-scene-first-workflow` 第 1 步加了「先看设计稿」，
+  `references/recipes.md` 第 8 节是完整用法与失败对照表。
+
+### Cocos：修 `cocos_open` 起不来编辑器
+
+- `spawnCreator` 现在会显式清掉 `ELECTRON_RUN_AS_NODE` 环境变量。
+  该变量存在时 CocosCreator.exe 会退化成纯 Node：把 `--project` 当成 Node 的未知参数
+  （`bad option: --project`）或把工程目录当模块路径（`Cannot find module 'D:\wxzj-cocos'`），
+  两种都在几秒内退出 —— 表现是「编辑器起不来」，但错误信息完全看不出是环境变量的问题。
+  本机 DSH 运行时该变量为 1，实测踩过。
+
+### Cocos：写清楚「为什么不用 Cocos MCP Server」
+
+- `docs/cocos-mcp.md` 补了一节选型说明，回答「要不要把
+  [DaxianLee/cocos-mcp-server](https://github.com/DaxianLee/cocos-mcp-server) 接进来」：
+  结论是**不接**，三条硬理由 ——
+  ① 它明确禁止商用（含衍生代码），而 Cocos 项目要上商店；
+  ② 它的 `initialize` 不上报 `project_path` / `project_id`，
+     本套「写操作必须打在正确工程上」的安全层会当场失效，且端口是固定的 3000；
+  ③ 开源版 50 个工具是 Funplay 上游（106 个 + resources + prompts + 输入模拟）的子集，
+     README 宣传的 231 项操作是商业闭源 Pro 版。
+- 它唯一值得吸收的「参考图叠加」已经自己实现了（见上），不必为它换掉整个上游。
+
 ### Cocos：补上「Graphics 现画 vs Sprite 贴图」的分流判据
 
 - `cocos-ui-layout` 新增「先分流：这个按钮底是贴图还是现画？」一节：

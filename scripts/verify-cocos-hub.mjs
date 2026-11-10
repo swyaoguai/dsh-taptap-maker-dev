@@ -909,6 +909,78 @@ async function main() {
     assert.equal(fs.existsSync(lockFile), false, '写完后锁必须释放')
   })
 
+  // ── 参考图叠加（cocos_reference）────────────────────────────────
+  await test('参考图：工程外路径必须被拒（上游安全检查会拦，给出可操作提示）', async () => {
+    const { resolveReferenceImage } = await load('src/cocos/reference-image.mjs')
+    const outside = path.join(tmpRoot, 'outside.png')
+    fs.writeFileSync(outside, 'x')
+    const result = resolveReferenceImage(projectA, outside)
+    assert.equal(result.ok, false, '工程外的参考图必须被拒')
+    assert.match(result.error, /工程目录内/, '错误信息要说明必须放在工程内')
+    assert.match(result.error, /temp\/dsh-ref/, '错误信息要给出推荐的相对路径')
+  })
+
+  await test('参考图：工程相对路径 / db:// URL 都能解析成 file URL', async () => {
+    const { resolveReferenceImage } = await load('src/cocos/reference-image.mjs')
+    const rel = path.join(projectA, 'temp', 'dsh-ref', 'ui.png')
+    fs.mkdirSync(path.dirname(rel), { recursive: true })
+    fs.writeFileSync(rel, 'x')
+
+    const byRelative = resolveReferenceImage(projectA, 'temp/dsh-ref/ui.png')
+    assert.equal(byRelative.ok, true, '工程相对路径应解析成功')
+    assert.equal(byRelative.absolutePath, rel)
+    assert.match(byRelative.fileUrl, /^file:\/\/\//, '应转成 file:// URL')
+
+    // db:// 是资源库 URL：映射到工程内对应位置，文件也得真的存在。
+    const dbTarget = path.join(projectA, 'assets', 'ui', 'ui.png')
+    fs.mkdirSync(path.dirname(dbTarget), { recursive: true })
+    fs.writeFileSync(dbTarget, 'x')
+    const byDb = resolveReferenceImage(projectA, 'db://assets/ui/ui.png')
+    assert.equal(byDb.ok, true, 'db:// URL 应解析成功')
+    assert.equal(byDb.absolutePath, dbTarget)
+  })
+
+  await test('参考图：file:// URL 形态不会触发上游安全检查的路径拦截', async () => {
+    // 上游 javascript-safety.js 扫的是代码里的**字符串字面量**，
+    // 用 path.isAbsolute 判定绝对路径。'file:///D:/...' 这种形态不被它认成绝对路径，
+    // 所以渲染进程拿到的 URL 不会被拦 —— 真正把关工程边界的是 resolveReferenceImage。
+    const { buildInjectCode } = await load('src/cocos/reference-image.mjs')
+    const code = buildInjectCode({ mode: 'set', imageUrl: 'file:///D:/wxzj-cocos/temp/dsh-ref/ui.png' })
+    // 路径只能以「数据」形态出现，不能被写成独立的字符串字面量语句。
+    const asStandaloneLiteral = /['"][^'"]*dsh-ref[^'"]*['"]\s*;/.test(code)
+    assert.equal(asStandaloneLiteral, false, '路径不能作为独立字符串字面量出现')
+    // 且 payload 必须是 JSON.stringify 的产物（整段 JSON 是一个字面量，解析出来没问题）。
+    assert.match(code, /executeJavaScript/, '必须走 executeJavaScript')
+    assert.match(code, /\{\\"mode\\":\\"set\\"/, 'payload 应以 JSON 字符串传入')
+  })
+
+  await test('参考图：文件不存在时明确报错（不假装成功）', async () => {
+    const { resolveReferenceImage } = await load('src/cocos/reference-image.mjs')
+    const result = resolveReferenceImage(projectA, 'temp/dsh-ref/nope.png')
+    assert.equal(result.ok, false)
+    assert.match(result.error, /不存在/)
+  })
+
+  await test('参考图：注入代码用 electron 找主窗口并执行到渲染进程', async () => {
+    const { buildInjectCode } = await load('src/cocos/reference-image.mjs')
+    const code = buildInjectCode({ mode: 'set', imageUrl: 'file:///x/y.png' })
+    assert.match(code, /require\('electron'\)/, '必须用 electron 拿 BrowserWindow')
+    assert.match(code, /executeJavaScript/, '必须往渲染进程注入')
+    assert.match(code, /packages:\/\/scene\//, '必须按 scene webview 定位场景视图')
+  })
+
+  await test('参考图：cocos_reference 在工具表里，action 枚举完整', async () => {
+    const { TOOL_DEFINITIONS } = await load('src/cocos/tools.mjs')
+    const tool = TOOL_DEFINITIONS.find((item) => item.name === 'cocos_reference')
+    assert.ok(tool !== undefined, 'cocos_reference 必须注册')
+    const actions = tool.inputSchema.properties.action.enum
+    for (const action of ['set', 'clear', 'list']) {
+      assert.ok(actions.includes(action), `action 枚举必须包含 ${action}`)
+    }
+    assert.ok(tool.inputSchema.properties.image !== undefined, '必须有 image 参数')
+    assert.match(tool.description, /工程目录内/, '描述要提醒路径必须在工程内')
+  })
+
   // ── stdio 服务 ──────────────────────────────────────────────
   await test('stdio 服务：initialize / tools/list / tools/call 全链路', async () => {
     const home = fs.mkdtempSync(path.join(tmpRoot, 'home-stdio-'))
